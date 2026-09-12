@@ -18,12 +18,12 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 2 (canonical Task 2: Domain models and `TaskPaths`,
-`implementationplan.md:388`) — re-read that section fresh before implementing.
+Start Phase 3 (canonical Task 3: `TaskFolderService`,
+`implementationplan.md:749`) — re-read that section fresh before implementing.
 
 ## Current Phase
 
-Phase 2
+Phase 3
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -62,7 +62,15 @@ commands.
 ### Phase 2: Domain models and `TaskPaths`
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:388` (## Task 2)
-- **Status:** pending
+- [x] TDD: wrote failing tests (TaskPathsTests, PhaseCatalogTests,
+      WorkingDirectoryPathTests — the latter's test content was not in the
+      plan text, authored directly against the documented Normalise contract)
+- [x] Verified RED (CS0234/CS0246 — Workflow.Models did not exist)
+- [x] Implemented WorkflowPhase/PhaseStatus/CompletionRule enums,
+      PhaseDefinition, PhaseCatalog, WorkingDirectoryPath, TaskPaths
+- [x] Verified GREEN — 19/19 tests pass, solution builds 0 warnings/0 errors
+- [x] Commit
+- **Status:** complete
 
 ### Phase 3: `TaskFolderService`
 

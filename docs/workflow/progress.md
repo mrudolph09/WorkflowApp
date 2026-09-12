@@ -75,6 +75,33 @@ actually happened, not what was planned.
     `GlobalUsings.cs`
   - `Workflow.sln` (modified — Workflow.Tests added)
 
+### Phase 2: Domain models and `TaskPaths` (canonical Task 2)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-12
+- Actions taken:
+  - Invoked `superpowers:test-driven-development` and followed red-green-refactor.
+  - RED: wrote `TaskPathsTests.cs`, `PhaseCatalogTests.cs` verbatim from the
+    plan, plus `WorkingDirectoryPathTests.cs` (the plan's Files section lists
+    this test file but never provides its content or includes it in the
+    Step 2/4 filters — a minor plan gap, not a spec conflict; authored 5
+    direct unit tests against the documented `Normalise` contract: drive-root
+    preserved, trailing separator stripped, whitespace trimmed, throws on
+    blank input).
+  - Verified RED: `dotnet test --filter ...` failed with CS0234/CS0246/CS0103
+    — `Workflow.Models` did not exist yet. Correct failure reason.
+  - GREEN: implemented `WorkflowPhase.cs` (3 enums), `PhaseDefinition.cs`,
+    `PhaseCatalog.cs`, `WorkingDirectoryPath.cs`, `TaskPaths.cs` verbatim per
+    the plan.
+  - Verified GREEN: filtered test run → 18 passed; full suite → 19/19 passed
+    (18 + placeholder). Full solution build → 0 Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Models\WorkflowPhase.cs`, `PhaseDefinition.cs`,
+    `PhaseCatalog.cs`, `WorkingDirectoryPath.cs`, `TaskPaths.cs`
+  - `Workflow.Tests\TaskPathsTests.cs`, `PhaseCatalogTests.cs`,
+    `WorkingDirectoryPathTests.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
@@ -84,6 +111,10 @@ actually happened, not what was planned.
 | `dotnet test Workflow.sln` | PlaceholderTests | 1 passed | 1 passed | PASS |
 | Policy probe (bare interface) in `Workflow.Tests` | Step 8a as written | build FAILS with IDE0040 | build succeeded (0/0) — false negative, wrong project scope | FAIL → diagnosed → corrected (see progress/findings) |
 | Policy probe (bare interface) in `Workflow` (corrected location) | temp file | build FAILS with IDE0040 | `error IDE0040` | PASS |
+| `dotnet test` filtered to Task 2 tests (before impl) | TaskPaths/PhaseCatalog/WorkingDirectoryPath tests | compile FAIL (types missing) | CS0234/CS0246/CS0103 | PASS (correct RED) |
+| `dotnet test` filtered to Task 2 tests (after impl) | same | all pass | 18 passed | PASS (GREEN) |
+| `dotnet test Workflow.sln` (full suite) | all tests | all pass | 19/19 passed | PASS |
+| `dotnet build Workflow.sln -c Debug` (after Task 2) | full solution | 0/0 | 0 Warning(s), 0 Error(s) | PASS |
 
 ## Error Log
 
