@@ -1,0 +1,18 @@
+<Project>
+  <PropertyGroup>
+    <AnalysisMode>All</AnalysisMode>
+    <AnalysisLevel>latest-all</AnalysisLevel>
+    
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    
+    <Nullable>enable</Nullable>
+    
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);1591</NoWarn> 
+
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    
+    <ApiCompatEnableRuleAttributesDiagnostic>true</ApiCompatEnableRuleAttributesDiagnostic>
+  </PropertyGroup>
+</Project>

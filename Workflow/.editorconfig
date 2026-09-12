@@ -1,0 +1,66 @@
+# Top-level .editorconfig Datei
+root = true
+
+[*]
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+charset = utf-8
+
+[*.cs]
+
+#### 1. Spracheinstellungen (Minimiert Halluzinationen von altem Code) ####
+
+# Erzwinge 'var' für alle Variablen (AI neigt sonst zum Mischen von Typen)
+dotnet_style_qualification_for_field = false:error
+dotnet_style_qualification_for_property = false:error
+dotnet_style_qualification_for_method = false:error
+dotnet_style_qualification_for_event = false:error
+
+# Bevorzuge explizite Sichtbarkeit (AI vergisst oft 'private')
+dotnet_style_require_accessibility_modifiers = always:error
+
+# Spracheigenschaften erzwingen (verhindert antike C#-Muster)
+csharp_style_var_for_built_in_types = true:error
+csharp_style_var_when_type_is_apparent = true:error
+csharp_style_expression_bodied_methods = true:suggestion
+csharp_style_expression_bodied_constructors = true:suggestion
+
+#### 2. Null-Safety (Verhindert NullReferenceExceptions durch AI) ####
+
+# Erzwinge Null-Checks und moderne Patterns
+csharp_style_throw_expression = true:error
+csharp_style_conditional_delegate_call = true:error
+csharp_style_nullable_reference_type_annotations = true:error
+
+#### 3. Naming Conventions (Gibt der AI ein festes Schema) ####
+
+# Interfaces müssen mit I beginnen
+dotnet_naming_rule.interface_should_be_begun_with_i.severity = error
+dotnet_naming_rule.interface_should_be_begun_with_i.symbols = interface_symbols
+dotnet_naming_rule.interface_should_be_begun_with_i.style = begin_with_i_style
+
+dotnet_naming_symbols.interface_symbols.applicable_kinds = interface
+dotnet_naming_style.begin_with_i_style.required_prefix = I
+
+# Private Felder müssen mit _ beginnen (verhindert Verwechslung mit lokalen Variablen)
+dotnet_naming_rule.private_fields_should_be_underscored.severity = error
+dotnet_naming_rule.private_fields_should_be_underscored.symbols = private_fields
+dotnet_naming_rule.private_fields_should_be_underscored.style = underscore_style
+
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+dotnet_naming_style.underscore_style.required_prefix = _
+
+#### 4. Code-Qualitäts-Regeln (Analyzers) ####
+
+# Verhindere unbenutzten Code (AI-Artefakte)
+dotnet_diagnostic.CA1822.severity = error   # Member als static markieren, wenn möglich
+dotnet_diagnostic.IDE0051.severity = error   # Unbenutzte private Member entfernen
+dotnet_diagnostic.IDE0052.severity = error   # Unbenutzte private Felder entfernen
+dotnet_diagnostic.IDE0059.severity = error   # Unnötige Wertzuweisungen entfernen
+
+# Performance-Rules
+dotnet_diagnostic.CA1825.severity = error   # Array.Empty<T>() statt new T[0]
+dotnet_diagnostic.CA1806.severity = error   # Ignoriere keine Rückgabewerte
