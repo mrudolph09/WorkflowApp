@@ -1,0 +1,37 @@
+<Project>
+
+  <!-- Workflow\.roslyn holds the analyzer / nullable / warnings-as-errors policy.
+       It is a plain MSBuild fragment and is imported here so it actually takes effect. -->
+  <Import Project="$(MSBuildThisFileDirectory)Workflow\.roslyn" />
+
+  <PropertyGroup>
+    <LangVersion>12.0</LangVersion>
+    <UseArtifactsOutput>false</UseArtifactsOutput>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- CA2007: ConfigureAwait(false) is wrong in WPF - continuations must resume on the UI thread. -->
+    <NoWarn>$(NoWarn);CA2007</NoWarn>
+    <!-- CA1303: the UI is German-only by requirement; there is no resource table to localise into. -->
+    <NoWarn>$(NoWarn);CA1303</NoWarn>
+    <!-- SYSLIB1054: LibraryImport emits unsafe marshalling code; .roslyn sets AllowUnsafeBlocks=false. -->
+    <NoWarn>$(NoWarn);SYSLIB1054</NoWarn>
+    <!-- CA1003: CA1003 demands EventHandler<T> with T : EventArgs. The only two events in the
+         app carry a raw ReadOnlyMemory<byte> PTY chunk and an int exit code; wrapping either in
+         an EventArgs subclass allocates on the 4 KiB read path and buys nothing. -->
+    <NoWarn>$(NoWarn);CA1003</NoWarn>
+    <!-- NOTE: CA1031 is deliberately NOT listed. A broad catch is correct in exactly two places
+         (the PTY read loop and the top-level dispatcher handler) and is suppressed there with a
+         local #pragma. A repository-wide entry would silently disable the diagnostic for all
+         future code - see spec section 4.4 and acceptance criterion A2/A7. -->
+    <!-- CA1812: ViewModels and services are instantiated by the composition root or by XAML,
+         which the analyzer cannot see. -->
+    <NoWarn>$(NoWarn);CA1812</NoWarn>
+    <!-- CA1848: no ILogger is used in this application. -->
+    <NoWarn>$(NoWarn);CA1848</NoWarn>
+    <!-- CA1515: making every ViewModel/service internal would force InternalsVisibleTo for the
+         test project and fight XAML tooling, for no benefit in a single-assembly desktop app. -->
+    <NoWarn>$(NoWarn);CA1515</NoWarn>
+  </PropertyGroup>
+
+</Project>
