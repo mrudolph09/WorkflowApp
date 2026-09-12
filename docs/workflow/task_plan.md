@@ -18,12 +18,15 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 7 (canonical Task 7: `SettingsService`,
-`implementationplan.md:2909`) — re-read fresh.
+Start Phase 8 (canonical Task 8: ConPTY terminal session,
+`implementationplan.md:3274`) — re-read fresh. **BLOCKING per spec §6.3.1/
+plan D15: this task opens with a mandatory spike before any ConPtySession
+code is written or committed** — the documented native call sequence is
+proven NOT to stream output on this machine. Do not skip the spike.
 
 ## Current Phase
 
-Phase 7
+Phase 8
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -137,7 +140,11 @@ commands.
 ### Phase 7: `SettingsService`
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:2909` (## Task 7)
-- **Status:** pending
+- [x] TDD red-green: SettingsServiceTests written, verified RED (CS0246),
+      implemented AppSettings/ISettingsService/SettingsService verbatim
+- [x] Full suite 116/116 passed; build 0 warnings/0 errors
+- [x] Commit
+- **Status:** complete
 
 ### Phase 8: ConPTY terminal session (opens with a BLOCKING spike — spec §6.3.1)
 

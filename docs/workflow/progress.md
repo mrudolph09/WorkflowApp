@@ -219,6 +219,25 @@ actually happened, not what was planned.
   - `Workflow\Models\FileHashResult.cs`
   - `Workflow.Tests\ArtifactWatcherTests.cs`
 
+### Phase 7: `SettingsService` (canonical Task 7)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-12
+- Actions taken:
+  - RED: wrote `SettingsServiceTests.cs` verbatim from the plan. Verified
+    fails with CS0246 (`SettingsService` missing).
+  - GREEN: implemented `AppSettings` (Collection<string>, not List<T> - CA1002),
+    `ISettingsService`/`SettingsService` (atomic write via .tmp + File.Move,
+    MRU dedup/cap/promote, corrupt-JSON fallback) verbatim per the plan.
+  - Verified GREEN: filtered run → 12 passed (plan said 13 - same benign
+    off-by-one pattern as prior tasks). Full suite → 116/116. Build → 0
+    Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Models\AppSettings.cs`
+  - `Workflow\Services\ISettingsService.cs`, `SettingsService.cs`
+  - `Workflow.Tests\SettingsServiceTests.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
