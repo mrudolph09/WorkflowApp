@@ -188,6 +188,37 @@ actually happened, not what was planned.
   - `Workflow\Assets\autoanswer.rules.json` (placeholder -> real rule set)
   - `Workflow.Tests\Workflow.Tests.csproj`
 
+### Phase 6: `ArtifactWatcher` (canonical Task 6)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-12
+- Actions taken:
+  - RED: wrote `ArtifactWatcherTests.cs` verbatim from the plan. Verified
+    fails with CS0246 (`ArtifactWatcherFactory`/`IArtifactWatcher` missing).
+  - GREEN (first pass): implemented `IArtifactWatcher`, `IArtifactWatcherFactory`/
+    `ArtifactWatcherFactory`, `FileHashResult`/`FileHashState`,
+    `ArtifactWatchException`, `ArtifactWatcher` verbatim per the plan. Build
+    of the test project failed with 4x `CA2025` + 1x `CA2000` — new analyzer
+    rules not covered by the plan's documented conformance list. Applied
+    systematic-debugging: formed a hypothesis (stored-Task-plus-using-disposable
+    pattern), tested it on one occurrence, confirmed the fix cleared exactly
+    that error before applying to the rest. See findings.md for full detail.
+  - Re-ran filtered tests: 1 real failure —
+    `AnyContentChanged_DoesNotFireWhileAFileIsExclusivelyLocked` expected
+    `OperationCanceledException` exactly but got `TaskCanceledException`.
+    Diagnosed and fixed by matching the `ThrowsAnyAsync` pattern already used
+    by every other cancellation assertion in the same file. See findings.md.
+  - Verified GREEN: filtered run → 12/12 passed (matches plan exactly). Ran
+    twice more to rule out timing flakiness in the FileSystemWatcher/poll
+    tests — stable both times. Full suite → 104/104. Build → 0 Warning(s),
+    0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Services\IArtifactWatcher.cs`, `IArtifactWatcherFactory.cs`,
+    `ArtifactWatchException.cs`, `ArtifactWatcher.cs`
+  - `Workflow\Models\FileHashResult.cs`
+  - `Workflow.Tests\ArtifactWatcherTests.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

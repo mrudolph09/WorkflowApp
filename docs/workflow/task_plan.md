@@ -18,12 +18,12 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 6 (canonical Task 6: `ArtifactWatcher`,
-`implementationplan.md:2298`) — re-read fresh.
+Start Phase 7 (canonical Task 7: `SettingsService`,
+`implementationplan.md:2909`) — re-read fresh.
 
 ## Current Phase
 
-Phase 6
+Phase 7
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -120,7 +120,19 @@ commands.
 ### Phase 6: `ArtifactWatcher`
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:2298` (## Task 6)
-- **Status:** pending
+- [x] TDD red-green: ArtifactWatcherTests written, verified RED (CS0246),
+      implemented IArtifactWatcher/IArtifactWatcherFactory/ArtifactWatcher/
+      ArtifactWatchException/FileHashResult
+- [x] Fixed 2 real defects surfaced by the analyzer/test run (not present in
+      canonical plan text) — see findings.md: (1) CA2025/CA2000 on 4 test
+      methods' `using`+stored-Task pattern, fixed via try/finally disposal
+      after await, no NoWarn added; (2) a test-assertion bug
+      (`Assert.ThrowsAsync<OperationCanceledException>` vs the actual
+      `TaskCanceledException` subtype) inconsistent with every other
+      cancellation assertion in the same file — aligned to `ThrowsAnyAsync`
+- [x] Full suite 104/104 passed (stable across 2 runs); build 0 warnings/0 errors
+- [x] Commit
+- **Status:** complete
 
 ### Phase 7: `SettingsService`
 
