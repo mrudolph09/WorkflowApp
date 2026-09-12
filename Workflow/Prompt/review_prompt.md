@@ -1,4 +1,4 @@
-/review produce a {review_path} as delta critique for following plans:
+/review produce {review_path} as delta critique for following plans:
 
 - Specification: {spec_path}
 - Implementation plan: {plan_path}

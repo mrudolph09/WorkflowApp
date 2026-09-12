@@ -121,6 +121,47 @@ actually happened, not what was planned.
   - `Workflow\Services\ITaskFolderService.cs`, `TaskFolderService.cs`
   - `Workflow.Tests\TaskFolderServiceTests.cs`
 
+### Phase 4: `PromptTemplateService` + repair prompt templates (canonical Task 4)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-12
+- Actions taken:
+  - Re-read all four shipped `Workflow\Prompt\*.md` files fresh (task's own
+    "before editing" requirement) — matched the plan's documented state
+    exactly, confirming the live `qdocimporter/eval` bullet on disk (this is
+    the very same file rendered into this session's own top-level task
+    instructions — see findings.md).
+  - Applied the 4 required edits: `review_prompt.md` dropped "a"; appended the
+    `## Review resolution` guarantee to `resolve_review_prompt.md`; removed
+    the stray `{plan_path}_` underscore and replaced the qdocimporter/eval
+    bullet with `Workflow\verify.ps1 exits 0` in `implementation_prompt.md`.
+  - `grep -oh "{[A-Za-z_][A-Za-z_]*}" *.md | sort -u` over all 4 templates →
+    exactly the 6 expected tokens, nothing else.
+  - RED: wrote `PromptTemplateServiceTests.cs` verbatim from the plan.
+    Verified fails with CS0246 (types not found). Noted CS0619 "Assert.Throws
+    deprecated" cascading warnings on 3 tests during RED — confirmed these
+    were an artifact of the unresolved types (once real types existed, all
+    15 tests compiled and passed with no such warning), not a real defect in
+    the plan's test code.
+  - GREEN: implemented `PromptTemplateException.cs`, `IPromptTemplateService.cs`,
+    `PromptTemplateService.cs` (incl. `PromptVariables`) verbatim per the
+    plan; added the `Content Include="..\Workflow\Prompt\**\*.md"` item to
+    `Workflow.Tests.csproj` so `ValidateAll_AcceptsTheShippedTemplates` and
+    the `Shipped*` tests can see the real templates from the test output dir.
+  - Verified GREEN: filtered run → 15/15 passed (matches plan's stated
+    count exactly). Full suite → 71/71. Build → 0 Warning(s), 0 Error(s).
+  - Manually re-verified the 3 edited files' final content by direct read —
+    matches spec §9.3(a)(b)(d) exactly.
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Services\PromptTemplateException.cs`, `IPromptTemplateService.cs`,
+    `PromptTemplateService.cs`
+  - `Workflow.Tests\PromptTemplateServiceTests.cs`
+- Files modified:
+  - `Workflow\Prompt\review_prompt.md`, `resolve_review_prompt.md`,
+    `implementation_prompt.md`
+  - `Workflow.Tests\Workflow.Tests.csproj`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

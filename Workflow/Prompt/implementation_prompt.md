@@ -4,7 +4,7 @@ Spezifikation:
 {spec_path}
 
 Implementierungsplan:
-{plan_path}_
+{plan_path}
 
 The plans have already been reviewed and approved. Treat them as the canonical source of truth.
 
@@ -91,7 +91,7 @@ Completion requires:
 * all canonical plan tasks completed
 * acceptance criteria satisfied
 * required tests passing
-* appropriate eval gates has been added to qdocimporter/eval
+* the acceptance gate `Workflow\verify.ps1` exits 0
 * type checking passing
 * lint/static analysis passing where applicable
 * no unresolved implementation blockers

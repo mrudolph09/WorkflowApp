@@ -18,13 +18,15 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 4 (canonical Task 4: `PromptTemplateService` + repair the 4 prompt
-templates, `implementationplan.md:1141`) — re-read fresh; remember spec
-§9.3(d) qdocimporter/eval bullet removal (see findings.md).
+Start Phase 5 (canonical Task 5: Auto-answer rule engine,
+`implementationplan.md:1738`) — re-read fresh. Note: `Assets\autoanswer.rules.json`
+already has a `{}` placeholder from Phase 1; this phase replaces it with the
+real rule set and must add the file to git (currently untracked content
+change, not a new path).
 
 ## Current Phase
 
-Phase 4
+Phase 5
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -86,9 +88,25 @@ commands.
 ### Phase 4: `PromptTemplateService` + repair the 4 prompt templates
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:1141` (## Task 4)
-- Note: spec §9.3(d)/§14 — remove the `qdocimporter/eval` bullet from
-  `implementation_prompt.md`, replace with the `verify.ps1` gate. See findings.md.
-- **Status:** pending
+- [x] Re-read all 4 shipped prompt files fresh before editing (task's own
+      requirement) — confirmed they matched the plan's documented state
+      exactly, including the live `qdocimporter/eval` line
+- [x] review_prompt.md: dropped stray article ("produce a" -> "produce")
+- [x] resolve_review_prompt.md: appended the `## Review resolution` guarantee
+      paragraph before the closing line
+- [x] implementation_prompt.md: removed stray `{plan_path}_` underscore;
+      replaced the `qdocimporter/eval` bullet with the `verify.ps1` gate
+      (spec §9.3(d)/§14 — see findings.md resolved-conflict entry)
+- [x] Confirmed only the 6 known tokens remain across all 4 templates (grep)
+- [x] TDD red-green: PromptTemplateServiceTests written, verified RED
+      (CS0246), implemented PromptTemplateException/IPromptTemplateService/
+      PromptTemplateService/PromptVariables, added Content item to
+      Workflow.Tests.csproj so shipped templates reach the test host,
+      verified GREEN (15/15 filtered, incl. the A8 shipped-template
+      assertions and the qdocimport-absence assertion)
+- [x] Full suite 71/71 passed; build 0 warnings/0 errors
+- [x] Commit
+- **Status:** complete
 
 ### Phase 5: Auto-answer rule engine
 

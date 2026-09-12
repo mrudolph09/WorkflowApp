@@ -26,4 +26,10 @@
     <ProjectReference Include="..\Workflow\Workflow.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\Workflow\Prompt\**\*.md" LinkBase="Prompt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

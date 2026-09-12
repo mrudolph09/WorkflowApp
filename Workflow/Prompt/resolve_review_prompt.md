@@ -31,4 +31,7 @@ When finished, report:
 
 If there are no unresolved decisions, consider the implementation plan frozen and ready for execution.
 
+Both {spec_path} and {plan_path} must be written to, even if only to append a short
+`## Review resolution` note recording that no change was required.
+
 Please do not output the whole review or plan changes. adapting the files is sufficient.
