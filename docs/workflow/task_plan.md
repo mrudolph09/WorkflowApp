@@ -18,15 +18,12 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 5 (canonical Task 5: Auto-answer rule engine,
-`implementationplan.md:1738`) — re-read fresh. Note: `Assets\autoanswer.rules.json`
-already has a `{}` placeholder from Phase 1; this phase replaces it with the
-real rule set and must add the file to git (currently untracked content
-change, not a new path).
+Start Phase 6 (canonical Task 6: `ArtifactWatcher`,
+`implementationplan.md:2298`) — re-read fresh.
 
 ## Current Phase
 
-Phase 5
+Phase 6
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -111,7 +108,14 @@ commands.
 ### Phase 5: Auto-answer rule engine
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:1738` (## Task 5)
-- **Status:** pending
+- [x] TDD red-green: EscapeDecoderTests + AutoAnswerServiceTests written,
+      verified RED (CS0103/CS0246), implemented AutoAnswerRule/RuleSet,
+      EscapeDecoder, IAutoAnswerService/AutoAnswerService, replaced the
+      Task-1 `{}` placeholder with the real shipped rule set, added Content
+      item to Workflow.Tests.csproj, verified GREEN
+- [x] Full suite 92/92 passed; build 0 warnings/0 errors
+- [x] Commit
+- **Status:** complete
 
 ### Phase 6: `ArtifactWatcher`
 

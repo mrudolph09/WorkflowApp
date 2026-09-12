@@ -162,6 +162,32 @@ actually happened, not what was planned.
     `implementation_prompt.md`
   - `Workflow.Tests\Workflow.Tests.csproj`
 
+### Phase 5: Auto-answer rule engine (canonical Task 5)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-12
+- Actions taken:
+  - RED: wrote `EscapeDecoderTests.cs` and `AutoAnswerServiceTests.cs`
+    verbatim from the plan. Verified fails with CS0103/CS0246 (types missing).
+  - GREEN: implemented `AutoAnswerRule`/`AutoAnswerRuleSet`, `EscapeDecoder`,
+    `IAutoAnswerService`/`AutoAnswerService` verbatim per the plan. Replaced
+    the Task-1 `{}` placeholder `Workflow\Assets\autoanswer.rules.json` with
+    the real 4-rule shipped set (claude-bypass-permissions,
+    claude-trust-folder, codex-yolo-warning, generic-yes-no). Added the
+    matching Content item to `Workflow.Tests.csproj`.
+  - Verified GREEN: filtered run → 21 passed (plan said 22 - same kind of
+    off-by-one documentation slip seen in Tasks 2/3, not a real gap). Full
+    suite → 92/92. Build → 0 Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Models\AutoAnswerRule.cs`
+  - `Workflow\Services\EscapeDecoder.cs`, `IAutoAnswerService.cs`,
+    `AutoAnswerService.cs`
+  - `Workflow.Tests\EscapeDecoderTests.cs`, `AutoAnswerServiceTests.cs`
+- Files modified:
+  - `Workflow\Assets\autoanswer.rules.json` (placeholder -> real rule set)
+  - `Workflow.Tests\Workflow.Tests.csproj`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

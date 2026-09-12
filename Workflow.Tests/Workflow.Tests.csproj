@@ -30,6 +30,9 @@
     <Content Include="..\Workflow\Prompt\**\*.md" LinkBase="Prompt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="..\Workflow\Assets\autoanswer.rules.json" LinkBase="Assets">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

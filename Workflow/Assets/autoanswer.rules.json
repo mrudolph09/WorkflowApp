@@ -1,1 +1,32 @@
-{}
+{
+  "version": 1,
+  "quietPeriodMs": 1500,
+  "settleTimeoutMs": 60000,
+  "maxAnswersPerPhase": 5,
+  "rules": [
+    {
+      "id": "claude-bypass-permissions",
+      "pattern": "(?is)bypass permissions mode",
+      "send": "2\\r",
+      "description": "claude --dangerously-skip-permissions warning. Option 2 is 'Yes, I accept'. The default selection is 'No, exit', so sending Enter alone would abort the run."
+    },
+    {
+      "id": "claude-trust-folder",
+      "pattern": "(?is)do you trust the files in this folder",
+      "send": "\\r",
+      "description": "Trust dialog. Option 1 'Yes, proceed' is preselected, so Enter is correct."
+    },
+    {
+      "id": "codex-yolo-warning",
+      "pattern": "(?is)(--yolo|full auto|auto-approve).{0,200}(continue|proceed|accept)",
+      "send": "\\r",
+      "description": "codex --yolo confirmation. The affirmative option is preselected."
+    },
+    {
+      "id": "generic-yes-no",
+      "pattern": "(?is)\\(y/n\\)\\s*$",
+      "send": "y\\r",
+      "description": "Plain readline-style yes/no fallback."
+    }
+  ]
+}
