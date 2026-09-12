@@ -18,12 +18,13 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 3 (canonical Task 3: `TaskFolderService`,
-`implementationplan.md:749`) — re-read that section fresh before implementing.
+Start Phase 4 (canonical Task 4: `PromptTemplateService` + repair the 4 prompt
+templates, `implementationplan.md:1141`) — re-read fresh; remember spec
+§9.3(d) qdocimporter/eval bullet removal (see findings.md).
 
 ## Current Phase
 
-Phase 3
+Phase 4
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -75,7 +76,12 @@ commands.
 ### Phase 3: `TaskFolderService`
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:749` (## Task 3)
-- **Status:** pending
+- [x] TDD red-green: TaskFolderServiceTests written, verified RED
+      (CS0234/CS0246), implemented TaskNameValidation/ITaskFolderService/
+      TaskFolderService, verified GREEN
+- [x] Full suite 56/56 passed; build 0 warnings/0 errors
+- [x] Commit
+- **Status:** complete
 
 ### Phase 4: `PromptTemplateService` + repair the 4 prompt templates
 

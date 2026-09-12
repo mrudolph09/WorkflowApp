@@ -102,6 +102,25 @@ actually happened, not what was planned.
   - `Workflow.Tests\TaskPathsTests.cs`, `PhaseCatalogTests.cs`,
     `WorkingDirectoryPathTests.cs`
 
+### Phase 3: `TaskFolderService` (canonical Task 3)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-12
+- Actions taken:
+  - RED: wrote `TaskFolderServiceTests.cs` verbatim from the plan (name
+    validation matrix, EnsureCreated, DirectoryAlreadyExisted, Rename incl.
+    case-only rename and drive-root regression). Verified fails with
+    CS0234/CS0246 (`Workflow.Services`/`TaskFolderService` did not exist).
+  - GREEN: implemented `TaskNameValidation.cs`, `ITaskFolderService.cs`,
+    `TaskFolderService.cs` verbatim per the plan.
+  - Verified GREEN: filtered run → 37 passed; full suite → 56/56; build →
+    0 Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Models\TaskNameValidation.cs`
+  - `Workflow\Services\ITaskFolderService.cs`, `TaskFolderService.cs`
+  - `Workflow.Tests\TaskFolderServiceTests.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
