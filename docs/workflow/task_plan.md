@@ -18,12 +18,13 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 14 (canonical Task 14: Shell view model, composition root and
-theme, `implementationplan.md:7371`) — re-read fresh.
+Start Phase 15 (canonical Task 15: XAML views, `implementationplan.md:7916`)
+— re-read fresh. This is what makes the app actually render/run correctly
+(see findings.md — Task 14's clean build did not mean the app works yet).
 
 ## Current Phase
 
-Phase 14
+Phase 15
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -285,7 +286,24 @@ commands.
 ### Phase 14: Shell view model, composition root and theme
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:7371` (## Task 14)
-- **Status:** pending
+- [x] TDD red-green: MainWindowViewModelTests written, verified RED (CS0246),
+      implemented ITaskTabViewModelFactory/TaskTabViewModelFactory/
+      MainWindowViewModel verbatim, rewrote App.xaml (MahApps + MaterialDesign
+      merge order, dark theme) and App.xaml.cs (manual composition root: nine
+      services, one window, startup-error dialog, unhandled-exception
+      boundary) verbatim
+- [x] Fixed 2 real analyzer issues (CA2000 x2, same established narrow-pragma
+      pattern as Tasks 11/13) — see findings.md
+- [x] Confirmed the plan's own Step 7 caution (build should fail naming
+      `Styles\TabControlStyles.xaml`/`Views\MainWindow.xaml`, missing until
+      Task 15) does NOT apply here — both are runtime pack-URI/StaticResource
+      resolutions, not build-time checks; `Views\MainWindow.xaml(.cs)` already
+      exist as the untouched default scaffold — see findings.md
+- [x] 10/10 new tests pass (matches plan's Step 7 exactly); full suite
+      198/200 (2 known deferred ConPTY streaming failures); build 0
+      warnings/0 errors
+- [x] Commit
+- **Status:** complete
 
 ### Phase 15: XAML views
 

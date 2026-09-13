@@ -495,6 +495,49 @@ actually happened, not what was planned.
   - `Workflow\ViewModels\PhaseIndicatorViewModel.cs`, `TaskTabViewModel.cs`
   - `Workflow.Tests\TaskTabViewModelTests.cs`
 
+### Phase 14: Shell view model, composition root and theme (canonical Task 14)
+
+- **Status:** complete (manual runtime verification of the app rendering
+  correctly still pending — Task 15 supplies the actual view content)
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - RED: wrote `MainWindowViewModelTests.cs` verbatim from the plan. Verified
+    fails with CS0246 (types missing).
+  - GREEN: implemented `ITaskTabViewModelFactory`/`TaskTabViewModelFactory`,
+    `MainWindowViewModel` verbatim; rewrote `App.xaml` (MahApps + Material
+    Design merge order copied from the verified in-repo sample, dark theme,
+    4 converter resources) and `App.xaml.cs` (manual composition root wiring
+    settings/prompts/auto-answer/orchestrator/factory, startup prompt-
+    template validation gate, unhandled-exception message-box boundary)
+    verbatim per the plan.
+  - Build failed: `CA2000` x2 (`WebViewEnvironmentProvider`/
+    `TerminalViewModel` created inline in `App.xaml.cs`'s composition root
+    and in the test's `StubFactory.Create()`) — same downstream consequence
+    of Task 11's `IDisposable` fix as seen in Task 13. Fixed with the same
+    established narrow, commented `#pragma warning disable/restore CA2000`
+    pattern.
+  - Investigated the plan's own Step 7 caution that the build should fail
+    here (naming `Styles\TabControlStyles.xaml`/`Views\MainWindow.xaml`,
+    both nominally Task 15 deliverables): `dotnet build` succeeded fully
+    clean instead. Root cause (not assumed): `Views\MainWindow.xaml(.cs)`
+    already exist as the untouched default WPF-template scaffold from before
+    this session started (satisfies `new MainWindow()`); `App.xaml`'s
+    `TabControlStyles.xaml` reference is a runtime pack-URI resolution, not
+    a build-time check — same category as Task 11's `StaticResource` finding.
+    Recorded in findings.md so the clean build isn't misread as proof the
+    app already renders/runs; it does not yet, until Task 15 supplies real
+    content for both files.
+  - Verified GREEN: filtered run → 10/10 passed (matches the plan's Step 7
+    exactly). Full suite: 198/200 (2 known, deferred ConPTY streaming
+    failures, unrelated). Build: 0 Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\ViewModels\MainWindowViewModel.cs`
+  - `Workflow\Services\ITaskTabViewModelFactory.cs`, `TaskTabViewModelFactory.cs`
+  - `Workflow.Tests\MainWindowViewModelTests.cs`
+- Files modified:
+  - `Workflow\App.xaml`, `Workflow\App.xaml.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

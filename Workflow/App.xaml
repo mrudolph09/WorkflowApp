@@ -1,9 +1,35 @@
-﻿<Application x:Class="Workflow.App"
+<Application x:Class="Workflow.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:Workflow"
-             StartupUri="MainWindow.xaml">
+             xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+             xmlns:converters="clr-namespace:Workflow.Converters">
     <Application.Resources>
-         
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+
+                <!-- MahApps -->
+                <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Controls.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Fonts.xaml" />
+
+                <!-- Material Design -->
+                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesignTheme.Defaults.xaml" />
+
+                <!-- Colour theme: dark, because the app is dominated by a terminal. -->
+                <materialDesign:MahAppsBundledTheme BaseTheme="Dark" PrimaryColor="Indigo" SecondaryColor="Cyan" />
+
+                <!-- Material Design: MahApps compatibility -->
+                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.MahApps;component/Themes/MaterialDesignTheme.MahApps.Defaults.xaml" />
+
+                <!-- Application styles -->
+                <ResourceDictionary Source="pack://application:,,,/Workflow;component/Styles/TabControlStyles.xaml" />
+
+            </ResourceDictionary.MergedDictionaries>
+
+            <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+            <converters:InverseBooleanToVisibilityConverter x:Key="InverseBooleanToVisibilityConverter" />
+            <converters:PhaseStatusToBrushConverter x:Key="PhaseStatusToBrushConverter" />
+            <converters:PhaseStatusToIconKindConverter x:Key="PhaseStatusToIconKindConverter" />
+
+        </ResourceDictionary>
     </Application.Resources>
 </Application>
