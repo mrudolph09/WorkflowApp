@@ -224,6 +224,55 @@ a hard gate this session can self-certify.
 | Task 6 (`ArtifactWatcherTests.AnyContentChanged_DoesNotFireWhileAFileIsExclusivelyLocked`): failed with `Assert.Throws() Failure: Exception type was not an exact match — Expected: OperationCanceledException, Actual: TaskCanceledException`. Root cause: `Task.WaitAsync(CancellationToken)` throws `TaskCanceledException` (a subtype of `OperationCanceledException`) on cancellation; xUnit's `Assert.ThrowsAsync<T>` requires an *exact* type match, unlike `Assert.ThrowsAnyAsync<T>`. Every *other* cancellation assertion in this exact same test file already correctly used `ThrowsAnyAsync` — this one test was the sole, inconsistent outlier in the plan's own verbatim test code. | Changed this one assertion from `Assert.ThrowsAsync<OperationCanceledException>` to `Assert.ThrowsAnyAsync<OperationCanceledException>`, matching the established pattern used by every sibling test in the file. Re-ran: 12/12 passed, stable across 2 consecutive runs (these tests depend on real filesystem/timer timing). |
 | Plan Task 1 Step 8a's "policy probe" (a bare interface member, expecting `error IDE0040`) is specified to be added to `Workflow.Tests\PlaceholderTests.cs`. Verified this does NOT fail the build — probe built clean with 0 errors. Root cause (systematic-debugging, not assumed): spec §4.3 itself documents that `Workflow\.editorconfig` has `root = true` and lives inside `Workflow\Workflow\`, so `Workflow.Tests\` (a sibling directory) does **not** inherit it. `dotnet_style_require_accessibility_modifiers = always:error` — the setting that turns a bare interface member into a build error — lives only in that `.editorconfig`, not in `Directory.Build.props`/`.roslyn` (which only sets `AnalysisMode`, `TreatWarningsAsErrors`, `EnforceCodeStyleInBuild`, etc., repo-wide). So a probe in `Workflow.Tests` can never demonstrate this specific rule regardless of whether the `.roslyn` import is wired correctly — it is testing the wrong scope. | Implementation-detail correction to the *verification step only* (nothing shipped changes): re-ran the probe as a temporary file inside the `Workflow` project instead (`Workflow\PolicyProbeTemp.cs`, delebted after). Confirmed `error IDE0040` fires there, proving both the `Directory.Build.props` → `.roslyn` import AND the `.editorconfig` scoping are wired correctly. Build is clean (0/0) again after removing the temp probe. No change to `Workflow.Tests\PlaceholderTests.cs` beyond leaving it as originally shipped (no probe residue). |
 
+## Ruling: subagent-driven-development applied without its worktree/ledger scaffolding
+
+Per `superpowers:executing-plans`, subagents being available in this
+environment means `superpowers:subagent-driven-development` is the preferred
+process — invoked and read in full at the start of Phase 15.
+
+**Ruling:** applying only its core task loop (fresh implementer subagent per
+canonical task → self-test/commit → review → fix loop if needed), NOT its
+separate worktree-per-plan or `scripts/sdd-workspace` ledger machinery.
+Rationale: Phases 1-14 are already 14 commits deep directly on `master`
+(the repo's only branch, no worktree ever created for this plan — an
+established pattern this session did not originate), and this project
+already has its own execution-state ledger doing the exact job the skill's
+ledger would duplicate: `docs/workflow/{task_plan,findings,progress}.md`,
+which task_plan.md's own source-of-truth hierarchy places above
+conversational/tooling context. Introducing a second, competing ledger and
+retroactively forking a worktree 14/17 tasks into an already-committed
+branch would fragment tracking for no benefit with 3 tasks remaining
+(Task 15: XAML views, Task 16: app icon, Task 17: acceptance gate).
+Cost if wrong: the final whole-branch review this skill also calls for
+would need to look across all 17 tasks/commits rather than just the last 3
+— acceptable, since every earlier task already had its own build+test
+verification recorded in progress.md.
+
+## Ruling: Task 16 generator defect (PackIcon renders as fully transparent)
+
+Task 16 implementer subagent found: the plan's own verbatim `tools\GenerateIcon\Program.cs`
+renders `MaterialDesignThemes.Wpf.PackIcon` (a `Control`) directly via `RenderTargetBitmap` in a
+bare `[STAThread] Main` with no `System.Windows.Application`/merged theme resources. Confirmed
+(not assumed): `icon.Style`/`icon.Template` are both `null`, `ApplyTemplate()` returns `false`,
+`VisualTreeHelper.GetChildrenCount(icon)` is `0` — `PackIcon`'s default `ControlTemplate` never
+resolves outside an `Application` with the `MaterialDesignThemes.Wpf` theme merged, so every
+rendered frame is fully transparent (confirmed empirically: 0 non-zero-alpha pixels; produced ICO
+was structurally valid but only 1223 bytes, failing `Icon_IsLargerThanAPlaceholder`'s >4096 floor).
+Ruled out the glyph data itself being at fault: rendering the same `PackIconKind.ArmFlex` path
+data through a plain `System.Windows.Shapes.Path` (`Geometry.Parse(icon.Data)`) produced ~58%
+pixel coverage.
+
+**Ruling:** apply the implementer's proposed minimal, intent-preserving fix — keep sourcing
+`Kind = PackIconKind.ArmFlex`'s path data from a real `PackIcon` instance (preserving the plan's
+stated rationale: stay in sync with the library, no magic strings), but render a
+`System.Windows.Shapes.Path` built from `icon.Data` instead of rendering the `PackIcon` control
+itself (a `Shape` draws itself directly, no `ControlTemplate` needed). This is an
+implementation-detail deviation in a one-shot dev tool (`tools\GenerateIcon`, not part of the
+shipped product, not under the production analyzer policy) — consistent with every prior
+plan-code-defect fix in this project (Tasks 8/9/11/13/14). Cost if wrong: a mis-rendered
+application icon, would be visually obvious immediately (Step 6's own visual check) and cheap to
+redo.
+
 ## Resources
 
 - Spec: `docs/superpowers/specs/specification.md`

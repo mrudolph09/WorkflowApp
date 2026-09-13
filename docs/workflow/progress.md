@@ -538,6 +538,56 @@ actually happened, not what was planned.
 - Files modified:
   - `Workflow\App.xaml`, `Workflow\App.xaml.cs`
 
+### Phase 16: ArmFlex application icon (canonical Task 16) — executed before Phase 15
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - Executed via subagent-driven-development (fresh implementer subagent,
+    then a fresh task-reviewer subagent), per the ruling in findings.md.
+    Reordered before Phase 15 because Phase 15's own Step 6 names this exact
+    dependency (`Workflow\Assets\workflow.ico` must exist for
+    `<ApplicationIcon>` to build).
+  - Implementer wrote `tools\GenerateIcon\GenerateIcon.csproj`/`Program.cs`
+    (not added to `Workflow.sln`) and `Workflow.Tests\IconTests.cs` verbatim
+    per the plan. Ran the generator; `IconTests` failed 1/2
+    (`Icon_IsLargerThanAPlaceholder`: 1223 bytes vs required >4096).
+  - Diagnosed and reported (not guessed): rendering `PackIcon` (a `Control`)
+    directly via `RenderTargetBitmap` in a bare console `Main` produces
+    fully transparent frames — `Style`/`Template` never resolve without an
+    `Application` with the MaterialDesignThemes theme merged
+    (`ApplyTemplate()` false, 0 visual children, 0 non-zero-alpha pixels).
+    Confirmed the `ArmFlex` geometry itself was fine by manually rendering
+    `Geometry.Parse(icon.Data)` via a plain `Path` (~58% coverage).
+    Escalated as BLOCKED with a verified candidate fix rather than applying
+    a deviation from the plan's verbatim code unilaterally.
+  - Ruled: apply the proposed fix — keep sourcing `Kind = PackIconKind.ArmFlex`
+    geometry from a real `PackIcon` instance, but render a
+    `System.Windows.Shapes.Path` (`Geometry.Parse(icon.Data)`) instead of the
+    `PackIcon` control itself. Resumed the implementer with this ruling.
+  - Implementer applied the fix (fully-qualifying `System.Windows.Shapes.Path`
+    to resolve a `CS0104` ambiguity against `System.IO.Path`, no behavioural
+    difference), regenerated the icon (12259 bytes, 6 frames), reran
+    `IconTests` (2/2), full suite (199/202: 2 known deferred ConPTY + 1
+    orchestrator test that failed only under full-suite load but passed
+    10/10 in isolation — confirmed pre-existing, unrelated flakiness), build
+    (0/0), and committed (`f7efbbb`).
+  - Task-reviewer subagent independently re-verified rather than trusting
+    the report: decoded all 6 committed PNG frames directly (58-68%
+    non-transparent coverage, exact Indigo-400 fill colour), confirmed
+    `PackIcon.Data` is genuinely `System.String` via reflection on the
+    actual DLL, confirmed `Workflow.sln`/`Workflow.csproj` correctly
+    untouched, re-ran `IconTests` independently (2/2). Verdict: Spec ✅
+    compliant, Task quality **Approved**, 3 Minor findings (the flaky
+    orchestrator test, Step 6's visual check being unwireable until Phase
+    15, and an unconfirmed low-risk `Path`-vs-`ControlTemplate` scaling
+    nuance) — none blocking, deferred to the final whole-branch review.
+- Files created:
+  - `tools\GenerateIcon\GenerateIcon.csproj`, `Program.cs` (dev tool, not
+    in `Workflow.sln`, not under the production analyzer policy)
+  - `Workflow\Assets\workflow.ico`
+  - `Workflow.Tests\IconTests.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

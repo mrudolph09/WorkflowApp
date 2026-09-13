@@ -18,9 +18,11 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 15 (canonical Task 15: XAML views, `implementationplan.md:7916`)
-— re-read fresh. This is what makes the app actually render/run correctly
-(see findings.md — Task 14's clean build did not mean the app works yet).
+Phase 16 is complete (see below). Start Phase 15 (canonical Task 15: XAML
+views, `implementationplan.md:7916`) — re-read fresh; this is what makes the
+app actually render/run correctly (see findings.md — Task 14's clean build
+did not mean the app works yet). Being executed via a dispatched implementer
+subagent per the ruling in findings.md.
 
 ## Current Phase
 
@@ -313,7 +315,38 @@ commands.
 ### Phase 16: ArmFlex application icon
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:8328` (## Task 16)
-- **Status:** pending
+- Executed out of order, before Phase 15, via a dispatched implementer
+  subagent — Phase 15's own Step 6 names this exact dependency
+  (`Workflow\Assets\workflow.ico` must exist for `<ApplicationIcon>` to build)
+- [x] Implemented `tools\GenerateIcon` (generator project, NOT added to
+      `Workflow.sln`) + `Workflow.Tests\IconTests.cs` verbatim per the plan
+- [x] Found and fixed 1 real defect in the plan's own verbatim
+      `Program.cs`: rendering `PackIcon` (a `Control`) directly via
+      `RenderTargetBitmap` in a bare console `Main` produces fully
+      transparent frames (`Style`/`Template` never resolve outside an
+      `Application` with the theme merged) — see findings.md ruling. Fixed
+      by sourcing geometry from a real `PackIcon.Data` string but rendering
+      a `System.Windows.Shapes.Path` (`Geometry.Parse`) instead of the
+      Control itself.
+- [x] Task review (dispatched subagent): Spec ✅ compliant, Task quality
+      Approved. Independently re-verified the fix (decoded all 6 committed
+      PNG frames: 58-68% non-transparent coverage, correct Indigo-400 fill
+      color) and re-ran `IconTests` (2/2). 3 Minor findings, none
+      blocking, recorded below.
+- [x] 2/2 IconTests pass; full suite 199/202 (2 known deferred ConPTY +
+      1 confirmed-flaky `WorkflowOrchestratorTests.Phases_ChainThroughAllFourStations`,
+      passes 10/10 in isolation, unrelated to this change); build 0/0
+- [x] Commit (f7efbbb)
+- **Status:** complete
+- **Deferred minors (for final whole-branch review):**
+  1. The flaky orchestrator test above — pre-existing, load-related, not
+     a regression from this task.
+  2. Step 6's visual taskbar/title-bar check not yet meaningful — the icon
+     isn't wired into `Workflow.csproj` until Phase 15.
+  3. Unconfirmed low-risk nuance: rendering via `Path`+`Stretch="Uniform"`
+     may normalize scaling slightly differently than `PackIcon`'s real
+     `ControlTemplate` would (could not decompile the library to confirm);
+     measured coverage looks proportionate, not mis-scaled.
 
 ### Phase 17: Acceptance gate (`verify.ps1`)
 
