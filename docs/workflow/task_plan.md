@@ -18,12 +18,12 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 9 (canonical Task 9: `WorkflowOrchestrator`,
-`implementationplan.md:4240`) — re-read fresh.
+Start Phase 10 (canonical Task 10: Terminal web assets,
+`implementationplan.md:5116`) — re-read fresh.
 
 ## Current Phase
 
-Phase 9
+Phase 10
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -204,7 +204,21 @@ commands.
 ### Phase 9: `WorkflowOrchestrator`
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:4240` (## Task 9)
-- **Status:** pending
+- [x] TDD red-green: BracketedPasteTests/FakeTerminalController/
+      WorkflowOrchestratorTests written, verified RED (CS0246), implemented
+      BracketedPaste/PhaseProgress/ITerminalController/ManualPhaseSignal/
+      IWorkflowOrchestrator/WorkflowOrchestrator verbatim
+- [x] Fixed 2 real defects in the plan's own verbatim code (findings.md):
+      CA1002 (FakeTerminalController's public List<T> properties) and
+      CA1865 (EndsWith(string) vs EndsWith(char))
+- [x] Fixed 6 real test bugs (systematic-debugging) in
+      WorkflowOrchestratorTests.cs itself — missing `ReadyGate.SetResult()`
+      and/or `EmitOutput()` called before `StartSession`'s reset wiped it out
+      — see findings.md
+- [x] 16/16 pass, stable across 2 runs (timing-sensitive); full suite
+      139/141 (2 known deferred ConPTY streaming failures); build 0/0
+- [x] Commit
+- **Status:** complete
 
 ### Phase 10: Terminal web assets (xterm.js vendoring)
 

@@ -329,6 +329,45 @@ actually happened, not what was planned.
 - Files modified:
   - `Workflow\AssemblyInfo.cs` (assembly-level `DefaultDllImportSearchPaths`)
 
+### Phase 9: `WorkflowOrchestrator` (canonical Task 9)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-12/13
+- Actions taken:
+  - RED: wrote `BracketedPasteTests.cs`, `Fakes/FakeTerminalController.cs`,
+    `WorkflowOrchestratorTests.cs` verbatim from the plan. Verified fails
+    with CS0246 (types missing).
+  - GREEN attempt 1: implemented `BracketedPaste.cs`, `PhaseProgress.cs`,
+    `ITerminalController.cs`, `ManualPhaseSignal.cs`,
+    `IWorkflowOrchestrator.cs`/`WorkflowOrchestrator.cs` verbatim. Build
+    failed: `CA1002` on `FakeTerminalController`'s public `List<string>`
+    properties, `CA1865` on a single-char `EndsWith(string)` call. Fixed
+    both (Collection<T>; EndsWith(char)).
+  - Ran the 16 tests: 7 failed. Applied systematic-debugging: traced the
+    exact interaction between `FakeTerminalController.StartSession`'s
+    counter reset and each failing test's call ordering. Root cause: 5
+    tests never called `ReadyGate.SetResult()` (hanging forever); one more
+    called `EmitOutput()` before `RunAsync` started, so `StartSession`'s
+    reset silently discarded it and Gate A never opened, causing the
+    "prompt sent promptly" test to instead wait out the full 2s ceiling.
+  - Fixed all 6 test-code defects: added `ReadyGate.SetResult()` where
+    missing; moved/added `EmitOutput()` calls to ~200ms after `RunAsync`
+    starts (after `StartSession` has already reset the counters) in the 3
+    tests that needed Gate A to open promptly, matching the pattern the
+    plan's own correctly-written regression tests already used.
+  - Verified GREEN: 16/16 passed. Re-ran once more (timing-sensitive async
+    tests) - stable both times.
+  - Full suite: 139/141 (2 known, deferred ConPTY streaming failures from
+    Task 8, unrelated to this task). Build: 0 Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Services\BracketedPaste.cs`, `ITerminalController.cs`,
+    `ManualPhaseSignal.cs`, `IWorkflowOrchestrator.cs`,
+    `WorkflowOrchestrator.cs`
+  - `Workflow\Models\PhaseProgress.cs`
+  - `Workflow.Tests\BracketedPasteTests.cs`,
+    `WorkflowOrchestratorTests.cs`, `Fakes\FakeTerminalController.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
