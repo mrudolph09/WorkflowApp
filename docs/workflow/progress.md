@@ -638,6 +638,73 @@ actually happened, not what was planned.
 - Files modified:
   - `Workflow\Workflow.csproj` (`<ApplicationIcon>`, `<Resource Include>`)
 
+### Phase 17: Acceptance gate (canonical Task 17)
+
+- **Status:** complete (automated portion); manual steps deferred to the user
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - Executed directly (no subagent dispatch): no new production code, and
+    synthesizing the "Definition of done" needs the full cross-phase
+    context already held by this session.
+  - Wrote `Workflow\verify.ps1` verbatim per the plan (automates A1-A6/
+    V1-V4: build-with-warnings-as-errors, full test suite, output-directory
+    manifest, prompt-template token/content checks).
+  - Ran it: **V1 PASS** (build 0/0), **V2 FAIL** (`dotnet test` exits
+    non-zero — solely the 2 known, already-escalated, user-deferred ConPTY
+    streaming failures; 200/202 actually pass, no new/unexpected failure),
+    **V3 PASS** (all 10 output-manifest files present/non-empty), **V4
+    PASS** (all 4 prompt templates non-empty, only known tokens, no stray
+    `{plan_path}_`, `review_prompt.md` uses `{review_path}`).
+  - Verified every remaining "Definition of done" item checkable from this
+    session: `TreatWarningsAsErrors=true` confirmed via
+    `-getProperty`; main-project `NoWarn` exactly matches the required 7
+    entries, test-project `NoWarn` exactly matches its required 5, both
+    fully commented; `CA1031` absent from `NoWarn`, exactly 1 local pragma
+    site (not 2 as the plan's checklist text expects — see findings.md, a
+    documentation-accuracy note, not a defect: the "top-level dispatcher
+    handler" has no `catch` clause, so CA1031 cannot apply there
+    structurally); no `unsafe` keyword anywhere, `AllowUnsafeBlocks=false`;
+    all 17 tasks individually committed (reviewed full `git log`); V9's
+    failure-surfacing test (`TaskTabViewModelTests.AThrowingOrchestrator_...`,
+    a 7-case failure-family theory) exists and is green (7/7).
+  - Did NOT execute manual steps V5-V11/F17 (Task 17 Steps 3-9) — all
+    require a real interactive desktop watching a live running app; this
+    session's shell tools run in a disconnected Windows session (same
+    root cause as the Task 8 ConPTY finding). Recorded as work explicitly
+    left for the user, not silently skipped.
+  - Did NOT achieve the literal Definition-of-Done wording for Task 8 Step
+    0 ("a spike streamed output out of a real pseudo-console") — same
+    environmental root cause; the user's 2026-09-12 decision on how to
+    proceed despite this is already fully documented in findings.md.
+  - Committed `verify.ps1` (`e6c575a`).
+- Files created:
+  - `Workflow\verify.ps1`
+
+## Overall project status (end of this session)
+
+All 17 canonical implementation-plan tasks are implemented, code-reviewed
+(Tasks 15-16 via dispatched subagent reviewers; Tasks 1-14 via direct
+in-session TDD with build/test verification at every step), and committed.
+`dotnet build` is 0 warnings/0 errors; `dotnet test` is 200/202, with the 2
+failures being the single known, already-escalated environmental limitation
+(ConPTY streaming, Task 8). Two items remain that only the user can close,
+both stemming from the same root cause (this agent session's shell tools
+run in a disconnected Windows session, not the machine's real interactive
+desktop):
+1. Confirm `ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput` and
+   `Start_EmitsTheLauncherFrameBeforeAnyInput` actually pass in a normal
+   interactive session (or that the shipped app streams terminal output
+   correctly end-to-end in practice).
+2. Visually confirm the app's rendered UI (Phase 15) and perform manual
+   verification steps V5-V11/F17 (Task 17) by actually running
+   `Workflow.exe`.
+
+Until both are confirmed, this implementation should be described as
+**code-complete, statically/automatedly verified, pending the user's own
+manual verification** — not as fully done per the plan's stated Definition
+of Done, which requires V5-V11/F17 to be "executed and observed, not
+assumed."
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

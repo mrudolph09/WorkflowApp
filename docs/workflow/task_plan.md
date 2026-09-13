@@ -18,18 +18,31 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Phases 15 and 16 are both complete. Start Phase 17 (canonical Task 17:
-acceptance gate, `implementationplan.md:8531`) — re-read fresh. This is the
-final task: run `verify.ps1` and confirm all A1-A9/F1-F21 acceptance
-criteria. Must explicitly re-surface, before declaring the feature complete:
-(1) the OPEN ITEM below (the 2 deferred ConPTY streaming tests need the
-user's own manual confirmation), and (2) Phase 15's deferred visual/runtime
-confirmation (same root cause — this session cannot observe a real rendered
-window, per the session-1/session-3 finding from Task 8).
+All 17 canonical tasks are implemented, tested (where automatable), and
+committed. Nothing further for an agent session to do here — what remains
+is entirely the user's own manual verification, in a normal interactive
+session:
+1. Run `pwsh -NoProfile -File Workflow\verify.ps1` — expect it to still
+   report the same single failure (V2, the 2 ConPTY streaming tests) unless
+   run from a real interactive desktop, in which case those 2 tests may
+   well pass and the gate may exit 0.
+2. Launch `Workflow.exe` and perform manual steps V5-V11 and F17
+   (`implementationplan.md:8651-8746`) — the full pipeline run, external
+   kill, broken auto-answer rule, orphan-process check, startup gate, tab
+   switching, and drive-root working directory.
+3. Confirm Phase 15's visual rendering looks correct (MetroWindow shell,
+   `+` button, tab template, 30/70 task view, ArmFlex icon in taskbar/
+   title bar/content).
+
+If all of the above pass, the feature is complete per the plan's
+Definition of Done. If any fail, that is real, actionable signal this
+session's environment could not obtain — reopen the relevant phase with
+that finding.
 
 ## Current Phase
 
-Phase 17
+None — all 17 phases implemented; awaiting the user's manual verification
+(see Next Step)
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -408,7 +421,61 @@ commands.
 - Canonical task: `docs/superpowers/plans/implementationplan.md:8531` (## Task 17)
 - Overall completion requires all A1–A9 / F1–F21 acceptance criteria (spec §15)
   satisfied, not merely that code has been written.
-- **Status:** pending
+- Executed directly (not dispatched to a subagent): no new production code,
+  and the "Definition of done" synthesis needs the full cross-phase context
+  this session already holds.
+- [x] Wrote `Workflow\verify.ps1` verbatim per the plan
+- [x] Ran the gate (`pwsh -NoProfile -File Workflow\verify.ps1`): **exits 1**
+      — V1 (build, no warnings) PASS, V3 (output manifest) PASS, V4 (prompt
+      tokens) PASS, V2 (`dotnet test` exits 0) **FAIL** — solely because of
+      the 2 known, already-escalated, user-deferred ConPTY streaming test
+      failures from Task 8 (200/202 tests actually pass). No other/new
+      failure appeared.
+- [x] Verified every "Definition of done" item that can be checked from
+      this session:
+      - `Directory.Build.props` imports `Workflow\.roslyn`; `-getProperty:TreatWarningsAsErrors`
+        prints `true` — confirmed.
+      - `NoWarn` (main projects) contains exactly `CA2007, CA1303,
+        SYSLIB1054, CA1003, CA1812, CA1848, CA1515`, each commented;
+        test-project `NoWarn` contains exactly `CA1707, CA1822, CA2007,
+        CA1303, CA1861`, each commented — confirmed via direct read.
+      - `CA1031` absent from `NoWarn`; exactly one local
+        `#pragma warning disable/restore CA1031` site
+        (`ConPtySession.cs:288-290`, the PTY read loop) — confirmed via
+        repo-wide grep. Found and recorded a documentation-accuracy note
+        (not a defect): the plan's own checklist text expects *two* such
+        sites ("...and the top-level dispatcher handler"), but
+        `App.xaml.cs`'s `OnDispatcherUnhandledException` has no `catch`
+        clause at all (it's an event handler receiving an already-caught
+        `Exception`), so CA1031 structurally cannot apply there — see
+        findings.md.
+      - No `unsafe` keyword anywhere; `AllowUnsafeBlocks=false` in
+        `Workflow\.roslyn` — confirmed via repo-wide grep.
+      - Every task (1-17) has its own commit; full history reviewed via
+        `git log --oneline` — confirmed.
+      - Shipped prompt templates asserted by tests (A8) — done in Task 4,
+        re-confirmed passing here (V4 above).
+      - V9 (failure surfacing): `TaskTabViewModelTests.AThrowingOrchestrator_SurfacesAMessageInsteadOfAnUnobservedTaskException`
+        exists (a 7-case `[Theory]`, one per failure family per spec §12.1)
+        and is green (7/7) — confirmed.
+- [x] Commit (`e6c575a`)
+- **Status:** complete (automated portion); manual steps V5-V11 and F17
+  NOT executed — see below
+- **NOT satisfied, by design of this session's constraints (not a defect):**
+  - `verify.ps1` does not currently exit 0 (blocked solely by the Task 8
+    OPEN ITEM).
+  - Manual steps V5-V11 and F17 (Steps 3-9 of this task) all require a
+    real interactive desktop session watching a live, running
+    `Workflow.exe` — this session's shell tools run in a disconnected
+    Windows session (session 1 vs. the real interactive session 3; see
+    findings.md Task 8) and cannot perform them. Not attempted, per the
+    same precedent already established and accepted by the user for the
+    ConPTY tests and Phase 15's visual check.
+  - Task 8 Step 0's spike did **not** achieve real pseudo-console
+    streaming (root-caused to the same session-disconnection issue) — the
+    Definition of Done's literal wording ("a spike streamed output out of
+    a real pseudo-console") is not met; what *was* done, per the user's
+    2026-09-12 decision, is documented in full in findings.md.
 
 ## Key Questions
 

@@ -273,6 +273,22 @@ plan-code-defect fix in this project (Tasks 8/9/11/13/14). Cost if wrong: a mis-
 application icon, would be visually obvious immediately (Step 6's own visual check) and cheap to
 redo.
 
+## Task 17: Definition-of-done text vs. actual, correct implementation (CA1031 site count)
+
+The plan's "Definition of done" (implementationplan.md:8777-8779) expects **two** local
+`#pragma warning disable CA1031` sites: "the PTY read loop and the top-level dispatcher handler".
+Verified by grep (`catch\s*(\s*Exception` across the whole tree, excluding `bin`/`obj`): only
+**one** such site exists — `Workflow\Terminal\ConPtySession.cs:288-290` (the PTY read loop).
+`App.xaml.cs`'s `OnDispatcherUnhandledException` (Task 14, the "top-level dispatcher handler")
+is a `DispatcherUnhandledExceptionEventArgs` event handler that *receives* an already-caught
+`Exception` as `e.Exception` — it contains no `catch` clause at all, so CA1031 (which fires only
+on `catch` clauses catching `System.Exception`/a base type) structurally cannot apply there
+regardless of implementation. This is a stale/inaccurate expectation in the plan's own checklist
+text, not a gap in the implementation: the build is 0 warnings/0 errors, and the actual dispatcher
+resilience boundary (spec's stated intent) is satisfied by the event-handler pattern itself,
+which needs no suppression. No code change; recorded so the Definition-of-done checklist is
+graded against what is actually correct rather than a miscounted expectation.
+
 ## Resources
 
 - Spec: `docs/superpowers/specs/specification.md`
