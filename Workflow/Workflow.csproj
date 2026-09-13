@@ -8,6 +8,7 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>Workflow</RootNamespace>
     <AssemblyName>Workflow</AssemblyName>
+    <ApplicationIcon>Assets\workflow.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,6 +32,7 @@
     <Content Include="Assets\Terminal\**\*.*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Resource Include="Assets\workflow.ico" />
   </ItemGroup>
 
 </Project>

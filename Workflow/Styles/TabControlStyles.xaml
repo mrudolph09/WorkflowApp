@@ -1,0 +1,65 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:mah="http://metro.mahapps.com/winfx/xaml/controls"
+                    xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes">
+
+    <Style x:Key="WorkflowTabItemStyle" TargetType="TabItem" BasedOn="{StaticResource MahApps.Styles.TabItem}">
+        <Setter Property="mah:TabControlHelper.CloseButtonEnabled" Value="True" />
+        <Setter Property="mah:TabControlHelper.Underlined" Value="TabItems" />
+        <Setter Property="mah:TabControlHelper.CloseTabCommand"
+                Value="{Binding DataContext.CloseTabCommand,
+                                RelativeSource={RelativeSource AncestorType=TabControl}}" />
+        <Setter Property="mah:TabControlHelper.CloseTabCommandParameter" Value="{Binding}" />
+    </Style>
+
+    <Style x:Key="WorkflowTabControlStyle" TargetType="TabControl">
+        <Setter Property="Background" Value="{DynamicResource MaterialDesignPaper}" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="ItemContainerStyle" Value="{StaticResource WorkflowTabItemStyle}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabControl">
+                    <DockPanel LastChildFill="True">
+
+                        <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="8,4,8,0">
+                            <TabPanel x:Name="HeaderPanel"
+                                      DockPanel.Dock="Left"
+                                      IsItemsHost="True"
+                                      Panel.ZIndex="1"
+                                      KeyboardNavigation.TabIndex="1" />
+
+                            <Button x:Name="AddTabButton"
+                                    DockPanel.Dock="Left"
+                                    Width="28"
+                                    Height="28"
+                                    Margin="8,0,0,0"
+                                    VerticalAlignment="Center"
+                                    ToolTip="Neuen Task öffnen"
+                                    Style="{StaticResource MaterialDesignFloatingActionMiniButton}"
+                                    Command="{Binding AddTaskTabCommand}">
+                                <materialDesign:PackIcon Kind="Plus" Width="18" Height="18" />
+                            </Button>
+                        </DockPanel>
+
+                        <!-- The stock TabControl template uses ContentSource="SelectedContent",
+                             which is shorthand for binding Content, ContentTemplate,
+                             ContentTemplateSelector AND ContentStringFormat. TransitioningContentControl
+                             is a ContentControl, so ContentSource is not available and the
+                             bindings must be written out. Binding Content alone leaves the host
+                             with no template for a TaskTabViewModel, and WPF falls back to
+                             ToString() - the window then shows the type name instead of the task
+                             UI supplied via TabControl.ContentTemplate. See spec 10.3 / F18. -->
+                        <mah:TransitioningContentControl x:Name="PART_SelectedContentHost"
+                                                         Transition="Left"
+                                                         Content="{TemplateBinding SelectedContent}"
+                                                         ContentTemplate="{TemplateBinding SelectedContentTemplate}"
+                                                         ContentTemplateSelector="{TemplateBinding SelectedContentTemplateSelector}"
+                                                         ContentStringFormat="{TemplateBinding SelectedContentStringFormat}"
+                                                         Margin="8" />
+                    </DockPanel>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+</ResourceDictionary>

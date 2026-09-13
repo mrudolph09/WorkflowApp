@@ -1,0 +1,35 @@
+<UserControl x:Class="Workflow.Views.PhaseIndicatorView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+             xmlns:vm="clr-namespace:Workflow.ViewModels"
+             d:DataContext="{d:DesignInstance Type=vm:PhaseIndicatorViewModel}"
+             mc:Ignorable="d">
+    <StackPanel Margin="0,0,24,0" HorizontalAlignment="Left">
+        <StackPanel Orientation="Horizontal">
+            <materialDesign:PackIcon Width="22"
+                                     Height="22"
+                                     VerticalAlignment="Center"
+                                     Kind="{Binding Status, Converter={StaticResource PhaseStatusToIconKindConverter}}"
+                                     Foreground="{Binding Status, Converter={StaticResource PhaseStatusToBrushConverter}}" />
+
+            <TextBlock Margin="8,0,0,0"
+                       VerticalAlignment="Center"
+                       Text="{Binding DisplayName}"
+                       Foreground="{Binding Status, Converter={StaticResource PhaseStatusToBrushConverter}}" />
+        </StackPanel>
+
+        <Button Margin="30,2,0,0"
+                Padding="0"
+                HorizontalAlignment="Left"
+                Style="{StaticResource MaterialDesignFlatButton}"
+                FontSize="10"
+                Content="Phase abschliessen"
+                ToolTip="Diese Phase manuell beenden, falls die Artefakte nicht erkannt werden"
+                Visibility="{Binding IsActive, Converter={StaticResource BooleanToVisibilityConverter}}"
+                Command="{Binding DataContext.CompleteCurrentPhaseCommand,
+                                  RelativeSource={RelativeSource AncestorType=UserControl, AncestorLevel=2}}" />
+    </StackPanel>
+</UserControl>
