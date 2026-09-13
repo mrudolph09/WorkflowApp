@@ -394,6 +394,46 @@ actually happened, not what was planned.
     `xterm.css`, `addon-fit.js`
   - `Workflow.Tests\TerminalAssetTests.cs`
 
+### Phase 11: WebView2 terminal host (canonical Task 11)
+
+- **Status:** complete (manual verification V5-V8 deferred to Task 17, per
+  the plan)
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - Implemented `IWebViewEnvironmentProvider`/`WebViewEnvironmentProvider`,
+    `TerminalViewModel` (implements `ITerminalController`, the seam Task 9's
+    orchestrator drives), `TerminalView.xaml`/`.xaml.cs` verbatim per the
+    plan. No automated tests exist for this task (the plan states WebView2
+    needs a message pump and a real browser process; mocking it would test
+    the mock).
+  - Build failed with 5 real analyzer errors, all on the plan's own verbatim
+    code, none previously encountered: CS8602 (WebView2's nullable
+    `CoreWebView2` after a successful `EnsureCoreWebView2Async`), CA1508
+    (double-checked-locking pattern in `WebViewEnvironmentProvider` -
+    analyzer can't see the concurrent-caller case), CA1001
+    (`WebViewEnvironmentProvider` owns `_gate` but wasn't `IDisposable`),
+    CA2213 x2 (`TerminalViewModel._session`/`_sessionLifetime` genuinely are
+    disposed inside `DisposeSession()`, via `Interlocked.Exchange` then
+    disposing the local - the analyzer can't trace that indirection).
+  - Fixed all 5: null-forgiving operator; narrow pragma suppressions
+    (CA1508, CA2213 x2) with comments, matching the established local-pragma
+    pattern from Tasks 8/9; implemented `IDisposable` on
+    `WebViewEnvironmentProvider`.
+  - Rebuilt: 0 Warning(s), 0 Error(s) - including `TerminalView.xaml`'s
+    references to Task 12's not-yet-written converters. Investigated why
+    (the plan warned this build step should run after Task 12): WPF's XAML
+    compiler does not statically validate `StaticResource` key resolution;
+    an unresolved key is a runtime `XamlParseException`, not a build error.
+    Recorded so this isn't misread later as proof the converters already
+    exist.
+  - Full suite: 146/148 (2 known, deferred ConPTY failures, unrelated).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Services\IWebViewEnvironmentProvider.cs`,
+    `WebViewEnvironmentProvider.cs`
+  - `Workflow\ViewModels\TerminalViewModel.cs`
+  - `Workflow\Views\TerminalView.xaml`, `TerminalView.xaml.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

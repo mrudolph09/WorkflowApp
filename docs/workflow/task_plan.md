@@ -18,12 +18,14 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 11 (canonical Task 11: WebView2 terminal host,
-`implementationplan.md:5366`) — re-read fresh.
+Start Phase 12 (canonical Task 12: Converters, behaviours and styles,
+`implementationplan.md:5979`) — re-read fresh. This unblocks the actual
+runtime resource resolution for TerminalView.xaml's converters (see
+findings.md — build already passes, but they don't exist at runtime yet).
 
 ## Current Phase
 
-Phase 11
+Phase 12
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -237,7 +239,21 @@ commands.
 ### Phase 11: WebView2 terminal host
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:5366` (## Task 11)
-- **Status:** pending
+- No automated tests for this task (manual only, deferred to Task 17 per the
+  plan itself — WebView2 needs a message pump and a real browser process).
+- [x] Implemented IWebViewEnvironmentProvider/WebViewEnvironmentProvider,
+      TerminalViewModel (ITerminalController impl), TerminalView.xaml(.cs)
+      verbatim per the plan
+- [x] Fixed 5 real analyzer defects (findings.md): CS8602, CA1508 (double-
+      checked-locking blind spot), CA1001, CA2213 x2 (Interlocked.Exchange
+      dispose-tracing blind spot)
+- [x] Build succeeded immediately (0/0) even referencing Task 12's
+      not-yet-existing converters — clarified in findings.md why (XAML
+      StaticResource keys are a runtime, not build-time, concern)
+- [x] Full suite 146/148 (2 known deferred failures); build 0/0
+- [x] Commit
+- **Status:** complete (manual verification steps V5-V8 deferred to Task 17,
+  per the plan's own instruction)
 
 ### Phase 12: Converters, behaviours and styles
 
