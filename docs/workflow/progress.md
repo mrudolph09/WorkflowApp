@@ -434,6 +434,32 @@ actually happened, not what was planned.
   - `Workflow\ViewModels\TerminalViewModel.cs`
   - `Workflow\Views\TerminalView.xaml`, `TerminalView.xaml.cs`
 
+### Phase 12: Converters, behaviours and styles (canonical Task 12)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - Added `Xunit.StaFact` 1.1.11 to `Workflow.Tests.csproj` for `[StaFact]`
+    (RichTextBox tests need an STA thread).
+  - RED: wrote `ConverterTests.cs`, `RichTextBoxAssistTests.cs` verbatim.
+    Verified fails with CS0234 (`Workflow.Converters`/`Workflow.Behaviors`
+    missing).
+  - GREEN: implemented `PhaseStatusToBrushConverter`,
+    `PhaseStatusToIconKindConverter`, `InverseBooleanToVisibilityConverter`,
+    `RichTextBoxAssist` verbatim per the plan. Clean build first try (no new
+    analyzer surprises this time).
+  - Verified GREEN: 18/18 passed (matches plan exactly). Full suite:
+    164/166 (2 known, deferred ConPTY failures). Build: 0 Warning(s), 0
+    Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Converters\PhaseStatusToBrushConverter.cs`,
+    `PhaseStatusToIconKindConverter.cs`, `InverseBooleanToVisibilityConverter.cs`
+  - `Workflow\Behaviors\RichTextBoxAssist.cs`
+  - `Workflow.Tests\ConverterTests.cs`, `RichTextBoxAssistTests.cs`
+- Files modified:
+  - `Workflow.Tests\Workflow.Tests.csproj` (Xunit.StaFact)
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

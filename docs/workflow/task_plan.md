@@ -18,14 +18,12 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 12 (canonical Task 12: Converters, behaviours and styles,
-`implementationplan.md:5979`) — re-read fresh. This unblocks the actual
-runtime resource resolution for TerminalView.xaml's converters (see
-findings.md — build already passes, but they don't exist at runtime yet).
+Start Phase 13 (canonical Task 13: `PhaseIndicatorViewModel` and
+`TaskTabViewModel`, `implementationplan.md:6476`) — re-read fresh.
 
 ## Current Phase
 
-Phase 12
+Phase 13
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -258,7 +256,17 @@ commands.
 ### Phase 12: Converters, behaviours and styles
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:5979` (## Task 12)
-- **Status:** pending
+- [x] Added `Xunit.StaFact` 1.1.11 package reference for `[StaFact]`
+- [x] TDD red-green: ConverterTests + RichTextBoxAssistTests written,
+      verified RED (CS0234), implemented PhaseStatusToBrushConverter/
+      PhaseStatusToIconKindConverter/InverseBooleanToVisibilityConverter/
+      RichTextBoxAssist verbatim, verified GREEN (18/18, matches plan exactly)
+- [x] Full suite 164/166 (2 known deferred failures); build 0/0
+- [x] Commit
+- **Status:** complete
+- Note: this task's own text creates no styles files (TabControlStyles.xaml/
+  PhaseIndicatorStyles.xaml) despite its title — only converters + behavior.
+  Watch for where those actually get created (likely Task 15).
 
 ### Phase 13: `PhaseIndicatorViewModel` and `TaskTabViewModel`
 
