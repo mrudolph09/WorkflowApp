@@ -18,15 +18,18 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Phase 16 is complete (see below). Start Phase 15 (canonical Task 15: XAML
-views, `implementationplan.md:7916`) — re-read fresh; this is what makes the
-app actually render/run correctly (see findings.md — Task 14's clean build
-did not mean the app works yet). Being executed via a dispatched implementer
-subagent per the ruling in findings.md.
+Phases 15 and 16 are both complete. Start Phase 17 (canonical Task 17:
+acceptance gate, `implementationplan.md:8531`) — re-read fresh. This is the
+final task: run `verify.ps1` and confirm all A1-A9/F1-F21 acceptance
+criteria. Must explicitly re-surface, before declaring the feature complete:
+(1) the OPEN ITEM below (the 2 deferred ConPTY streaming tests need the
+user's own manual confirmation), and (2) Phase 15's deferred visual/runtime
+confirmation (same root cause — this session cannot observe a real rendered
+window, per the session-1/session-3 finding from Task 8).
 
 ## Current Phase
 
-Phase 15
+Phase 17
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -40,6 +43,14 @@ fully satisfied until the user confirms these pass in a normal
 interactive session (or the app is otherwise shown to stream terminal
 output correctly end-to-end). Re-surface this explicitly at Task 17
 (verify.ps1) and before declaring the overall feature complete.
+
+Same root cause, same deferral, second instance (Phase 15): the app's
+actual rendered UI (MetroWindow shell, tab template, task view layout) has
+NOT been visually confirmed by this agent session — only statically
+verified (clean build, every binding/resource key traced to a real
+registration). Needs the user to actually launch `Workflow.exe` and confirm
+the window renders as intended (spec V5). Re-surface at Task 17 alongside
+the ConPTY item above.
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -310,7 +321,51 @@ commands.
 ### Phase 15: XAML views
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:7916` (## Task 15)
-- **Status:** pending
+- Executed via subagent-driven-development (fresh implementer, then a fresh
+  task-reviewer)
+- [x] Created `Workflow\Styles\TabControlStyles.xaml` (WorkflowTabItemStyle +
+      WorkflowTabControlStyle, incl. the close-tab-button wiring from Step 5),
+      `Workflow\Views\PhaseIndicatorView.xaml(.cs)`,
+      `Workflow\Views\TaskTabView.xaml(.cs)`; moved `MainWindow.xaml(.cs)`
+      from the project root into `Workflow\Views\` (namespace
+      `Workflow.Views`, base type `MetroWindow`); registered
+      `Assets\workflow.ico` in `Workflow.csproj` (`<ApplicationIcon>` +
+      `<Resource Include>`) — all verbatim per the plan
+- [x] No new test file (manual verification deferred to Task 17, per the
+      brief's own `Test: manual (Task 17, V5)`)
+- [x] **Known limitation, not a code defect:** visual rendering could NOT be
+      confirmed from this session — same session-1 (disconnected)/session-3
+      (real interactive desktop) split documented for Task 8 applies equally
+      here. Verified correctness instead via a clean, 0-warning/0-error
+      build under the full analyzer policy, plus an exhaustive manual/static
+      cross-check of every `{StaticResource ...}` key and `{Binding ...}`
+      path against real registrations and view-model members (including
+      tracing the `AncestorLevel=2` binding through the actual visual tree:
+      `PhaseIndicatorView` → `TaskTabView`, confirmed correct since
+      `ItemsControl`/`WrapPanel`/`ScrollViewer` don't count as `UserControl`
+      ancestors)
+- [x] Task review (dispatched subagent, independently re-verified rather
+      than trusting the report — re-traced every binding, re-confirmed
+      every resource key including 7 not on the plan's pre-cleared list,
+      re-ran the build): Spec ✅ compliant, Task quality **Approved**. 2
+      Minor findings, neither blocking (see below).
+- [x] Full suite 200/202 (2 known deferred ConPTY failures only, no other
+      flake this run); build 0 warnings/0 errors
+- [x] Commit (af0c8a4)
+- **Status:** complete — code-complete and statically verified; actual
+  rendering still needs the user's own confirmation (same OPEN ITEM
+  category as the ConPTY streaming tests — see task_plan.md's OPEN ITEM
+  section, to be re-surfaced at Task 17)
+- **Deferred minors (for final whole-branch review):**
+  1. The plan's own "verified resource keys" list omitted
+     `MaterialDesignFlatButton` and 6 theme-brush `DynamicResource` keys
+     that its own sample code actually uses — a documentation gap in the
+     plan, not an implementation defect (the reviewer independently
+     confirmed all 7 are real, present resources in
+     MaterialDesignThemes.Wpf 5.3.2).
+  2. Stale `obj\` build artifacts from before the `MainWindow` move
+     (regenerated correctly on next build; gitignored, untracked) — a
+     `dotnet clean` removes them if ever confusing during debugging.
 
 ### Phase 16: ArmFlex application icon
 

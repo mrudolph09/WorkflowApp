@@ -588,6 +588,56 @@ actually happened, not what was planned.
   - `Workflow\Assets\workflow.ico`
   - `Workflow.Tests\IconTests.cs`
 
+### Phase 15: XAML views (canonical Task 15)
+
+- **Status:** complete (code-complete, statically verified; actual
+  rendering deferred to the user — see task_plan.md OPEN ITEM)
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - Executed via subagent-driven-development (fresh implementer, then a
+    fresh task-reviewer), per the ruling in findings.md.
+  - Implementer created `Workflow\Styles\TabControlStyles.xaml`
+    (`WorkflowTabItemStyle`/`WorkflowTabControlStyle`, incl. the Step 5
+    close-tab-button wiring folded in), `Workflow\Views\PhaseIndicatorView.xaml(.cs)`,
+    `Workflow\Views\TaskTabView.xaml(.cs)`; moved `MainWindow.xaml(.cs)` from
+    the project root into `Workflow\Views\` via `git mv` and rewrote both
+    (namespace `Workflow.Views`, base type `MetroWindow`); registered
+    `Assets\workflow.ico` in `Workflow.csproj` — all verbatim per the plan.
+  - Reported `DONE_WITH_CONCERNS`: could not launch `Workflow.exe` or
+    screenshot the rendered window, for the same session-1
+    (disconnected)/session-3 (real interactive desktop) reason documented
+    in Task 8. Verified correctness instead by manually cross-checking
+    every `{StaticResource ...}` key and `{Binding ...}` path against real
+    registrations/view-model members, and tracing the
+    `RelativeSource AncestorType=UserControl, AncestorLevel=2` binding
+    through the actual visual tree.
+  - Build: 0 warnings/0 errors. Full suite: 200/202 (only the 2 known,
+    pre-existing, deferred ConPTY streaming failures — no other flake this
+    run). Committed (`af0c8a4`).
+  - Task-reviewer subagent independently re-verified rather than trusting
+    the report: re-traced the `AncestorLevel=2` binding through the real
+    visual tree established by the diff (`ItemsControl`/`WrapPanel` don't
+    count as `UserControl` ancestors, so level 2 correctly lands on
+    `TaskTabView`), independently re-checked every binding path against the
+    real view-model source, and independently confirmed 7 resource keys
+    used in the plan's own sample code that weren't on the plan's
+    pre-cleared "verified resource keys" list (`MaterialDesignFlatButton` +
+    6 theme-brush keys) by inspecting the compiled
+    `MaterialDesignThemes.Wpf.dll` 5.3.2 resources directly. Re-ran the
+    build independently (0/0). Verdict: Spec ✅ compliant, Task quality
+    **Approved**. 2 Minor findings (a documentation gap in the plan's
+    resource-key list; stale gitignored `obj\` build artifacts from before
+    the file move) — neither blocking, deferred to the final whole-branch
+    review.
+- Files created:
+  - `Workflow\Styles\TabControlStyles.xaml`
+  - `Workflow\Views\PhaseIndicatorView.xaml`, `PhaseIndicatorView.xaml.cs`
+  - `Workflow\Views\TaskTabView.xaml`, `TaskTabView.xaml.cs`
+- Files moved/rewritten:
+  - `Workflow\MainWindow.xaml(.cs)` → `Workflow\Views\MainWindow.xaml(.cs)`
+- Files modified:
+  - `Workflow\Workflow.csproj` (`<ApplicationIcon>`, `<Resource Include>`)
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
