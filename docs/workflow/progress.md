@@ -368,6 +368,32 @@ actually happened, not what was planned.
   - `Workflow.Tests\BracketedPasteTests.cs`,
     `WorkflowOrchestratorTests.cs`, `Fakes\FakeTerminalController.cs`
 
+### Phase 10: Terminal web assets (canonical Task 10)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - Confirmed npm/node available (npm 10.9.2, node v22.16.0).
+  - `npm pack @xterm/xterm@5.5.0` + `npm pack @xterm/addon-fit@0.10.0`,
+    extracted, copied `xterm.js`/`xterm.css`/`addon-fit.js`, deleted tarballs
+    and `package/` dirs. Verified exactly the 5 expected files remain.
+  - Wrote `terminal.html` and `terminal.js` verbatim per the plan (message
+    protocol: out/clear/ready/in/resize).
+  - Wrote `TerminalAssetTests.cs` and ran it directly (no implementation gap
+    to TDD through - the assets already existed): all 7 passed immediately,
+    without adding the plan's Step 5 Content item to
+    `Workflow.Tests.csproj`. Verified via `ls` that the 5 files really do
+    reach `Workflow.Tests\bin\...\Assets\Terminal\` - MSBuild propagates a
+    referenced project's Content items transitively. Recorded as a
+    discovered simplification in findings.md; skipped the redundant step.
+  - Full suite: 146/148 (2 known, deferred ConPTY failures). Build: 0
+    Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Assets\Terminal\terminal.html`, `terminal.js`, `xterm.js`,
+    `xterm.css`, `addon-fit.js`
+  - `Workflow.Tests\TerminalAssetTests.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |

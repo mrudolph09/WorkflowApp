@@ -18,12 +18,12 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 10 (canonical Task 10: Terminal web assets,
-`implementationplan.md:5116`) — re-read fresh.
+Start Phase 11 (canonical Task 11: WebView2 terminal host,
+`implementationplan.md:5366`) — re-read fresh.
 
 ## Current Phase
 
-Phase 10
+Phase 11
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -223,7 +223,16 @@ commands.
 ### Phase 10: Terminal web assets (xterm.js vendoring)
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:5116` (## Task 10)
-- **Status:** pending
+- [x] Vendored @xterm/xterm 5.5.0 + @xterm/addon-fit 0.10.0 via npm pack/tar,
+      copied only xterm.js/xterm.css/addon-fit.js, deleted tarballs/package
+      dirs — verified exactly 5 files remain
+- [x] Wrote terminal.html + terminal.js per the message protocol
+- [x] TDD: TerminalAssetTests written and passed immediately (7/7) — see
+      findings.md re: skipping the plan's redundant Step 5 (MSBuild already
+      propagates Workflow.csproj's Content items transitively)
+- [x] Full suite 146/148 (2 known deferred failures); build 0/0
+- [x] Commit
+- **Status:** complete
 
 ### Phase 11: WebView2 terminal host
 
