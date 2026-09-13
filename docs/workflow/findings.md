@@ -81,6 +81,127 @@ canonical plan's own explicit, already-approved instruction. No further user
 confirmation is being requested for this specific point; it is recorded here
 for auditability per the "Plan deviations" protocol.
 
+## Task 8 spike (spec §6.3.1 / plan D15) — BLOCKING finding, escalated to user
+
+**Status: spike run to completion; root cause identified as environmental, not
+fixable by changing the ConPTY call sequence. Escalating per the plan's own
+"if the spike cannot be made to work, stop and escalate" instruction.**
+
+### What was done
+
+A standalone `net8.0` console app was built at
+`%TEMP%\claude\...\scratchpad\conpty-spike\` (outside the solution, per Step 0)
+implementing the exact documented call sequence (CreatePipe x2 →
+CreatePseudoConsole → InitializeProcThreadAttributeList →
+UpdateProcThreadAttribute → CreateProcess → synchronous FileStream.Read loop).
+
+**Baseline run** (`pwsh -NoLogo -NoExit`, matching `ConPtySessionTests`):
+reproduced the spec's own documented finding byte-for-byte: all native calls
+return success, the child *is* running (its own prompt appears — see below),
+but **zero bytes** are ever read from the output pipe for the child's actual
+output.
+
+**Explicit-resize hypothesis** (spec §6.3.1: "Output appears only after an
+explicit ResizePseudoConsole (115–126 bytes)"): tested directly — calling
+`ResizePseudoConsole` after `CreateProcess` does unblock the read, but only
+for a **blank redraw frame** (measured 115 bytes for `cmd.exe`, 126 for
+`pwsh.exe` — this exact 115–126 range matches the spec's own number
+independently). The frame is `<ESC>[?25l<ESC>[2J<ESC>[m<ESC>[H` + blank lines
++ a title-set sequence — i.e. the PTY's own virtual screen buffer is
+genuinely empty of the child's real output, not merely un-flushed.
+
+**Simplest-possible-child control** (`cmd.exe /c echo HELLO_FROM_CMD`, no
+PSReadLine/interactivity involved at all): identical failure. Rules out
+anything PowerShell-specific.
+
+**The most load-bearing observation:** in every run, the child's own prompt
+or output text (`PS C:\...\>`, `HELLO_FROM_CMD`, `WF_MARKER_OK`) appeared
+**directly in the spike's own captured stdout**, as plain unescaped text,
+with no `[reader]` log prefix — i.e. it never went through the `appRead`
+pipe at all. It is reaching some other, real, rendering console.
+
+**Environment diagnostics run from inside the spike / the shell hosting it:**
+- `Environment.UserInteractive = True`; `GetProcessWindowStation()` returns a
+  valid handle named `WinSta0` (the normal interactive window station).
+- `[Console]::WindowWidth` from the shell hosting these tool calls throws
+  "Das Handle ist ungültig" (invalid handle), and `IsOutputRedirected` /
+  `IsInputRedirected` are both `True`.
+- **`query session` shows this automation session (session 1) as `Getr.`
+  (disconnected), while a separate session (3, named `console`) is `Verb.`
+  (connected)** — i.e. there IS a normal interactive desktop session on this
+  machine, but the session this agent's shell tools execute in is a
+  *different*, disconnected one.
+
+### Untested candidates from the plan — outcome
+
+1. **Overlapped I/O + named pipes** — not attempted (largest rewrite; given
+   the evidence below points at session/desktop attachment rather than the
+   pipe mechanism, this was deprioritised, not ruled impossible).
+2. **`PSEUDOCONSOLE_INHERIT_CURSOR` (dwFlags=1)** — tried. Made things
+   *worse*: `ClosePseudoConsole` then hung indefinitely (had to add a 25s
+   watchdog + force-kill to recover). A regression, not a fix.
+3. **Inheritable `SECURITY_ATTRIBUTES` on the pipes instead of NULL** —
+   tried. No change in behaviour at all versus the baseline.
+
+### Root cause assessment (systematic-debugging Phase 1-3 applied)
+
+The evidence is consistent with: **ConPTY's underlying console-subsystem
+plumbing (the hidden `OpenConsole.exe`/`conhost.exe` host it spins up) does
+not render/stream correctly when the calling process runs in a disconnected
+Windows session**, which is exactly the kind of session this agent's shell
+tools run under on this machine (session 1, disconnected, vs. the real
+interactive desktop at session 3). This is an environmental condition of
+*how this spike was executed*, not a defect in the documented P/Invoke
+sequence — the sequence matches Microsoft's own `CreatePseudoConsole` sample
+and every individual API call reports success with correctly-populated
+data (attribute list bytes, HRESULTs), exactly as the spec's original probe
+also found.
+
+This has not been proven with 100% certainty (the true fix — running the
+identical spike from an actual interactive session 3 process — is not
+something this agent can do from here), but three independent lines of
+evidence converge on it: (a) the exact byte-range match with the spec's own
+number, (b) the plain-text leak of child output bypassing the pipe entirely,
+and (c) the concrete, verifiable session-disconnection fact from `query
+session`.
+
+### Why this blocks the plan as written
+
+Spec A9 requires: "The ConPTY spike (§6.3.1) has been run and its result
+recorded... `ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput`
+passes against a real pseudo-console." Plan D15 / Task 8 Step 0 requires all
+three exit criteria (marker round-trip, launcher-frame-before-input, proven
+sequence written back) before Step 1 may proceed. If this agent's execution
+context cannot itself validate streaming — regardless of which of the
+remaining candidates is tried — then the automated `dotnet test` run for
+`ConPtySessionTests` in *this* environment cannot be expected to pass either,
+even once real production code is written, because the underlying session
+constraint applies equally to `dotnet test`'s test-host process.
+
+This is an **architectural/environmental** blocker per the "Plan deviations"
+protocol (not an implementation detail), because it affects whether Task 8's
+own stated acceptance gate is achievable from this session at all - escalated
+to the user rather than silently choosing a path.
+
+### User decision (2026-09-12)
+
+Presented 4 options. User chose: **implement `ConPtySession` exactly as
+documented in spec §6.3 / plan Task 8 (it matches Microsoft's canonical
+sample and every individual native call already reports success here), run
+every other Task 8 test to green, and treat the two tests that require real
+sustained streaming
+(`Start_RunsACommandAndStreamsItsOutput`, `Start_EmitsTheLauncherFrameBeforeAnyInput`)
+as written-but-to-be-verified-by-the-user** in a normal interactive session
+(or by running the shipped app). Proceeding on this basis: Task 8's code is
+implemented verbatim per the plan; the two streaming-dependent tests are run
+and their actual result here is reported honestly (not assumed), and flagged
+for the user's own manual confirmation per spec V5/A9 rather than treated as
+a hard gate this session can self-certify.
+
+| Task 8: `[DefaultDllImportSearchPaths(DllImportSearchPath.System32)]` on the `NativeMethods` class (exactly as the plan's snippet has it) fails with `error CS0592` — the attribute is only valid on a method or an assembly, never a class. A real defect in the plan's own code, not something the analyzer-conformance section anticipated. | Moved the attribute to assembly scope: `[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]` in `Workflow\AssemblyInfo.cs`, with a comment explaining why (satisfies CA5392 for every `[DllImport]` in the assembly, since all P/Invoke here is kernel32). Removed the invalid class-level attribute, kept an explanatory comment in `NativeMethods.cs` pointing at `AssemblyInfo.cs`. |
+| Task 8: `ConPtySession.Resize` calls `NativeMethods.ResizePseudoConsole(...)` without consuming its HRESULT return value -> `error CA1806` (already `error` via `.editorconfig`, not just `.roslyn`). | Discarded the result explicitly (`_ = NativeMethods.ResizePseudoConsole(...)`) with a comment: a resize failure isn't fatal, the terminal just keeps its previous size. |
+| Task 8 (`ConPtySessionTests.cs`, verbatim plan code): `RunAndCaptureAsync` creates `new SemaphoreSlim(0, 1)` without `using` -> real `CA2000` (never disposed). `Start_EmitsTheLauncherFrameBeforeAnyInput` has `exitCode is null ? ... : ...` where CA1508 statically proves `exitCode` "always null", because its static, single-threaded dataflow analysis cannot see that the `Exited` event's lambda assigns it concurrently, from a different thread, which is exactly the race the message exists to report. | `SemaphoreSlim`: added `using`. `CA1508`: narrow `#pragma warning disable/restore CA1508` around just that `Assert.True` call, with a comment explaining the analyzer's blind spot - consistent with how `CA1031` is already suppressed elsewhere in this codebase (local pragma, never a project-wide `NoWarn`). |
+
 ## Issues Encountered
 
 | Issue | Resolution |

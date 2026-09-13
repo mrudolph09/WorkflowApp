@@ -238,6 +238,97 @@ actually happened, not what was planned.
   - `Workflow\Services\ISettingsService.cs`, `SettingsService.cs`
   - `Workflow.Tests\SettingsServiceTests.cs`
 
+### Phase 8: ConPTY terminal session (canonical Task 8) — BLOCKED at Step 0
+
+- **Status:** blocked
+- **Started:** 2026-09-12
+- Actions taken:
+  - Built a standalone throwaway spike console app at
+    `%TEMP%\claude\...\scratchpad\conpty-spike\` per Step 0 (outside the
+    solution/analyzer policy, as instructed).
+  - Ran the exact documented baseline sequence against `pwsh -NoLogo -NoExit`:
+    reproduced the spec's "zero bytes for the child's own output" finding
+    exactly, with every native call reporting success.
+  - Tested the explicit-`ResizePseudoConsole` hypothesis directly: confirmed
+    it unblocks a blank redraw frame only (115 bytes for `cmd.exe`, 126 for
+    `pwsh.exe` - matches the spec's own "115-126 bytes" independently), never
+    real content.
+  - Ran a control with the simplest possible child (`cmd.exe /c echo`):
+    identical failure, ruling out anything PowerShell/PSReadLine-specific.
+  - Tried 2 of the plan's 3 "untested candidates": `PSEUDOCONSOLE_INHERIT_CURSOR`
+    (dwFlags=1) made things worse (hung `ClosePseudoConsole` indefinitely -
+    recovered via a watchdog force-exit); inheritable `SECURITY_ATTRIBUTES`
+    on the pipes made no difference.
+  - Ran environment diagnostics: `Environment.UserInteractive=True`,
+    `GetProcessWindowStation()` returns a valid `WinSta0` handle, BUT
+    `query session` shows this agent's own session (1) as disconnected
+    (`Getr.`) while a separate session (3, `console`) is the connected,
+    real interactive desktop.
+  - Concluded (systematic-debugging Phases 1-3): the evidence points at an
+    environmental/session-attachment issue with ConPTY's hidden console host
+    in a disconnected session, not a defect in the documented P/Invoke
+    sequence. Full evidence chain recorded in findings.md.
+  - Recorded this as an architectural/environmental blocker per the Plan
+    Deviations protocol and escalated to the user rather than guessing.
+- Files created: none in the repo (spike lives entirely under the session
+  scratchpad directory, outside `docs/workflow` and outside the solution).
+
+### Phase 8 continued: production implementation after user decision
+
+- **Status:** complete (native layer + all non-streaming behavior); 2 tests
+  deferred to user manual verification (see task_plan.md OPEN ITEM)
+- Actions taken:
+  - User chose: implement `ConPtySession` exactly as documented (spec §6.3
+    matches Microsoft's canonical sample; every native call already
+    succeeds), run every test, report the 2 streaming-dependent tests'
+    actual result honestly rather than assume.
+  - RED: wrote `ShellLocatorTests.cs`, `ConPtySessionTests.cs` verbatim.
+    Verified fails with CS0234 (`Workflow.Terminal` namespace missing).
+  - GREEN attempt 1: implemented `NativeStructs.cs`, `NativeMethods.cs`,
+    `SafePseudoConsoleHandle.cs`, `SafeProcThreadAttributeList.cs`,
+    `ShellLocator.cs`, `ITerminalSession.cs`/`ITerminalSessionFactory`,
+    `ConPtySessionFactory.cs`, `ConPtySession.cs` verbatim per the plan.
+    Build failed: `CS0592` - `[DefaultDllImportSearchPaths]` is invalid on a
+    class (only method/assembly). Fixed by moving it to
+    `[assembly: ...]` in `AssemblyInfo.cs`.
+  - Build failed again: `CA1806` on `ConPtySession.Resize`'s discarded
+    `ResizePseudoConsole` HRESULT. Fixed by discarding explicitly (`_ = ...`)
+    with a comment.
+  - Build failed again (test project): `CA2000` (undisposed `SemaphoreSlim`
+    in `RunAndCaptureAsync`) + `CA1508` (false-positive on
+    `exitCode is null` across an async event-handler race in
+    `Start_EmitsTheLauncherFrameBeforeAnyInput`). Fixed: `using` for the
+    semaphore; narrow `#pragma warning disable/restore CA1508` for the
+    ternary, matching the established local-pragma pattern used for CA1031
+    elsewhere in this codebase.
+  - GREEN: full solution build → 0 Warning(s), 0 Error(s).
+  - Ran the 7 non-streaming tests (ShellLocator x2, ConPtySession start/stop/
+    dispose/resize/double-start/write-before-start x5): **all 7 passed**,
+    confirming the native P/Invoke layer, safe-handle ownership and process
+    lifecycle are correct.
+  - Ran the 2 streaming tests separately: both **failed**, with the exact
+    diagnostic message the test itself was designed to produce
+    ("the pseudo-console produced no bytes at all... see Step 0"), matching
+    the Step 0 spike's finding precisely. Reported honestly, not silently
+    marked passing.
+  - Verified no orphan `pwsh`/`powershell` processes survive the test run
+    (Get-CimInstance parent-process/command-line inspection - all 4
+    processes present afterward were pre-existing, unrelated tooling: an
+    OpenBrain hook script, the persistent tool-host shell, VS Code's
+    integrated-terminal shell integration, and the Claude Code shell
+    launcher itself).
+  - Full suite: 123/125 passed (the 2 known, deferred failures accounted
+    for). Build: 0 Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Terminal\ITerminalSession.cs`, `ConPtySession.cs`,
+    `ConPtySessionFactory.cs`, `ShellLocator.cs`
+  - `Workflow\Terminal\Native\NativeStructs.cs`, `NativeMethods.cs`,
+    `SafePseudoConsoleHandle.cs`, `SafeProcThreadAttributeList.cs`
+  - `Workflow.Tests\ShellLocatorTests.cs`, `ConPtySessionTests.cs`
+- Files modified:
+  - `Workflow\AssemblyInfo.cs` (assembly-level `DefaultDllImportSearchPaths`)
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
@@ -251,6 +342,12 @@ actually happened, not what was planned.
 | `dotnet test` filtered to Task 2 tests (after impl) | same | all pass | 18 passed | PASS (GREEN) |
 | `dotnet test Workflow.sln` (full suite) | all tests | all pass | 19/19 passed | PASS |
 | `dotnet build Workflow.sln -c Debug` (after Task 2) | full solution | 0/0 | 0 Warning(s), 0 Error(s) | PASS |
+| ConPtySessionTests + ShellLocatorTests (7 non-streaming) | start/stop/dispose/resize/double-start/write-before-start | all pass | 7/7 passed | PASS |
+| `ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput` | real pseudo-console | WF_MARKER_OK streams back | empty buffer, assertion failed | FAIL (expected per spike; deferred to user manual verification) |
+| `ConPtySessionTests.Start_EmitsTheLauncherFrameBeforeAnyInput` | real pseudo-console | non-zero bytes before input | 0 bytes, diagnostic message fired | FAIL (expected per spike; deferred to user manual verification) |
+| `dotnet build Workflow.sln -c Debug` (after Task 8) | full solution | 0/0 | 0 Warning(s), 0 Error(s) | PASS |
+| `dotnet test Workflow.sln` (after Task 8) | full suite | all pass | 123/125 (2 known deferred failures) | PARTIAL - see above |
+| Orphan process check (Get-CimInstance) | pwsh/powershell after ConPtySession tests | no orphans from the test run | all present processes pre-existing/unrelated | PASS |
 
 ## Error Log
 

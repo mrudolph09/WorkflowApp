@@ -18,15 +18,25 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 8 (canonical Task 8: ConPTY terminal session,
-`implementationplan.md:3274`) — re-read fresh. **BLOCKING per spec §6.3.1/
-plan D15: this task opens with a mandatory spike before any ConPtySession
-code is written or committed** — the documented native call sequence is
-proven NOT to stream output on this machine. Do not skip the spike.
+Start Phase 9 (canonical Task 9: `WorkflowOrchestrator`,
+`implementationplan.md:4240`) — re-read fresh.
 
 ## Current Phase
 
-Phase 8
+Phase 9
+
+## OPEN ITEM carried forward (must be resolved before final completion)
+
+`ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput` and
+`Start_EmitsTheLauncherFrameBeforeAnyInput` fail in this agent session
+(environmental — see findings.md) and were explicitly deferred to the
+user's own manual verification per their decision on 2026-09-12. The
+"required tests passing" / "no unresolved implementation blockers"
+completion bars in this job's instructions and spec A9/V5 are NOT
+fully satisfied until the user confirms these pass in a normal
+interactive session (or the app is otherwise shown to stream terminal
+output correctly end-to-end). Re-surface this explicitly at Task 17
+(verify.ps1) and before declaring the overall feature complete.
 
 ## Source-of-truth hierarchy (binding for this execution)
 
@@ -153,7 +163,43 @@ commands.
   proven sequence differs from spec §6.3, update the spec section before
   committing `ConPtySession` code (this is an allowed implementation-detail
   deviation per the plan review notes — record the actual sequence found).
-- **Status:** pending
+- [x] Ran the Step 0 spike (standalone console app, outside the solution).
+      Reproduced the spec's documented "zero bytes" finding exactly, tried
+      the explicit-resize hypothesis (matches spec's 115-126 byte number
+      independently), tried 2 of 3 "untested candidates" (INHERIT_CURSOR:
+      regression/hang; inheritable pipe security attributes: no change).
+- [x] Diagnosed likely root cause: this agent's shell tools execute in a
+      disconnected Windows session (session 1), distinct from the machine's
+      real interactive desktop (session 3) — see findings.md for full
+      evidence chain.
+- **User decision (2026-09-12):** implement `ConPtySession` exactly as
+  documented, run everything, report the 2 streaming tests' actual result
+  honestly, defer their final confirmation to the user's own manual
+  verification. See findings.md.
+- [x] Implemented native layer verbatim per plan Steps 3-6 (NativeStructs,
+      NativeMethods, SafePseudoConsoleHandle, SafeProcThreadAttributeList,
+      ShellLocator) + Step 7 (ITerminalSession/ITerminalSessionFactory,
+      ConPtySession, ConPtySessionFactory)
+- [x] Fixed 3 more real defects found during the build (not in canonical plan
+      text) — see findings.md: `[DefaultDllImportSearchPaths]` on a class is
+      `CS0592` (moved to assembly level in AssemblyInfo.cs); `CA1806` on the
+      discarded `ResizePseudoConsole` HRESULT; `CA2000`
+      (undisposed SemaphoreSlim) + `CA1508` (false-positive dead-code check
+      across an async event-handler race) in `ConPtySessionTests.cs`.
+- [x] 7/7 non-streaming ConPtySession + ShellLocator tests pass (start/stop/
+      dispose/resize/double-start-throws/write-before-start-throws) —
+      confirms the native P/Invoke layer, safe handles and process lifecycle
+      are all correct.
+- [x] The 2 streaming tests fail here exactly as the Step 0 spike predicted
+      (same diagnostic message), consistent with the environmental
+      diagnosis. Deferred to user per their decision — see OPEN ITEM above.
+- [x] No orphan pwsh/powershell processes left behind (Step 9) — verified via
+      Get-CimInstance parent/command-line inspection.
+- [x] Full solution build 0 warnings/0 errors; full suite 123/125 (2 known,
+      deferred failures)
+- [x] Commit
+- **Status:** complete (native layer + all non-streaming behavior); 2 tests
+  deferred to user manual verification — see OPEN ITEM
 
 ### Phase 9: `WorkflowOrchestrator`
 
