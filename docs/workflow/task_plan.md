@@ -18,12 +18,12 @@ Build the Workflow WPF (.NET 8) task-orchestration app exactly as specified in
 
 ## Next Step
 
-Start Phase 13 (canonical Task 13: `PhaseIndicatorViewModel` and
-`TaskTabViewModel`, `implementationplan.md:6476`) — re-read fresh.
+Start Phase 14 (canonical Task 14: Shell view model, composition root and
+theme, `implementationplan.md:7371`) — re-read fresh.
 
 ## Current Phase
 
-Phase 13
+Phase 14
 
 ## OPEN ITEM carried forward (must be resolved before final completion)
 
@@ -271,7 +271,16 @@ commands.
 ### Phase 13: `PhaseIndicatorViewModel` and `TaskTabViewModel`
 
 - Canonical task: `docs/superpowers/plans/implementationplan.md:6476` (## Task 13)
-- **Status:** pending
+- [x] TDD red-green: TaskTabViewModelTests written, verified RED (CS0246),
+      implemented IDirectoryPickerService/DirectoryPickerService/
+      PhaseIndicatorViewModel/TaskTabViewModel verbatim
+- [x] Fixed 2 real analyzer issues (CA1062 ctor null-check, CA2000 x2 in
+      test helper) and 1 real logic defect (SyncFolder clobbering the
+      startup-error ValidationMessage) — see findings.md
+- [x] 24/24 pass (matches plan exactly); full suite 188/190 (2 known
+      deferred failures); build 0/0
+- [x] Commit
+- **Status:** complete
 
 ### Phase 14: Shell view model, composition root and theme
 

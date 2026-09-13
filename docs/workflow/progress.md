@@ -460,6 +460,41 @@ actually happened, not what was planned.
 - Files modified:
   - `Workflow.Tests\Workflow.Tests.csproj` (Xunit.StaFact)
 
+### Phase 13: `PhaseIndicatorViewModel` and `TaskTabViewModel` (canonical Task 13)
+
+- **Status:** complete
+- **Started/Completed:** 2026-09-13
+- Actions taken:
+  - RED: wrote `TaskTabViewModelTests.cs` verbatim from the plan. Verified
+    fails with CS0246 (types missing).
+  - GREEN attempt 1: implemented `IDirectoryPickerService`/
+    `DirectoryPickerService`, `PhaseIndicatorViewModel`, `TaskTabViewModel`
+    verbatim. Build failed: `CA1062` (ctor dereferences `settings` without a
+    null check) - fixed with `ArgumentNullException.ThrowIfNull(settings)`.
+    Build failed again: `CA2000` x2 in the test's `Create()` helper, a
+    downstream consequence of `WebViewEnvironmentProvider` now being
+    `IDisposable` (Task 11's own CA1001 fix) - fixed with a narrow, commented
+    pragma suppression.
+  - Ran the 24 tests: 1 failed
+    (`StartWorkflow_CannotExecuteWhileStartupErrorsArePresent` - expected the
+    startup-error `ValidationMessage` to survive setting a valid name/
+    directory, got `null`). Diagnosed root cause: `SyncFolder()`
+    unconditionally overwrites `ValidationMessage` from folder-name
+    validation on every change, clobbering the startup-error message even
+    though `CanStartWorkflow()` correctly still returns false. A real defect
+    in the plan's own verbatim code, not a test bug.
+  - Fixed: added a guard at the top of `SyncFolder()` - while startup errors
+    are present, set `ValidationMessage` to the first one and return before
+    touching folder validation/creation at all.
+  - Verified GREEN: 24/24 passed (matches the plan's stated count exactly).
+    Full suite: 188/190 (2 known, deferred ConPTY failures, unrelated).
+    Build: 0 Warning(s), 0 Error(s).
+  - `git add` + commit.
+- Files created:
+  - `Workflow\Services\IDirectoryPickerService.cs`, `DirectoryPickerService.cs`
+  - `Workflow\ViewModels\PhaseIndicatorViewModel.cs`, `TaskTabViewModel.cs`
+  - `Workflow.Tests\TaskTabViewModelTests.cs`
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
