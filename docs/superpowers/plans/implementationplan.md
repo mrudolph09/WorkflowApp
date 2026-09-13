@@ -7753,10 +7753,15 @@ public sealed partial class MainWindowViewModel : ObservableObject
 
 - [ ] **Step 5: Rewrite `App.xaml`**
 
-The merge order is load-bearing and is copied from the verified in-repo sample
-`C:\Users\Marco\Documents\repo\wpf\MaterialDesignInXaml.Examples\MahApps\MahApps.Basic\App.xaml`.
-Changing it makes MahApps controls render unstyled. `StartupUri` is removed so the window can be
-constructed with an injected `DataContext`.
+The merge order is load-bearing: changing it makes MahApps controls render unstyled. `StartupUri`
+is removed so the window can be constructed with an injected `DataContext`.
+
+> **Do not re-copy the dictionary paths from the in-repo sample**
+> `C:\Users\Marco\Documents\repo\wpf\MaterialDesignInXaml.Examples\MahApps\MahApps.Basic\App.xaml`.
+> The *order* there is right, but that sample pins `MaterialDesignThemes.MahApps` 0.1.5 on
+> netcoreapp3.1, and its `MaterialDesignTheme.Defaults.xaml` path does not exist in the 5.3.2
+> packages this project pins — it crashes the app at startup. Use `MaterialDesign2.Defaults.xaml`
+> (corrected 2026-09-13; see spec §10.1).
 
 ```xml
 <Application x:Class="Workflow.App"
@@ -7772,8 +7777,11 @@ constructed with an injected `DataContext`.
                 <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Controls.xaml" />
                 <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Fonts.xaml" />
 
-                <!-- Material Design -->
-                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesignTheme.Defaults.xaml" />
+                <!-- Material Design. NOTE (corrected 2026-09-13): MaterialDesignThemes 5.x has
+                     no MaterialDesignTheme.Defaults.xaml - it was split into
+                     MaterialDesign2/MaterialDesign3 variants. Using the old v4 path here
+                     crashes the app at startup with XamlParseException. See spec 10.1. -->
+                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesign2.Defaults.xaml" />
 
                 <!-- Colour theme: dark, because the app is dominated by a terminal. -->
                 <materialDesign:MahAppsBundledTheme BaseTheme="Dark" PrimaryColor="Indigo" SecondaryColor="Cyan" />

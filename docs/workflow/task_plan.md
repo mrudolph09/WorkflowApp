@@ -57,13 +57,25 @@ interactive session (or the app is otherwise shown to stream terminal
 output correctly end-to-end). Re-surface this explicitly at Task 17
 (verify.ps1) and before declaring the overall feature complete.
 
-Same root cause, same deferral, second instance (Phase 15): the app's
-actual rendered UI (MetroWindow shell, tab template, task view layout) has
-NOT been visually confirmed by this agent session — only statically
-verified (clean build, every binding/resource key traced to a real
-registration). Needs the user to actually launch `Workflow.exe` and confirm
-the window renders as intended (spec V5). Re-surface at Task 17 alongside
-the ConPTY item above.
+~~Same root cause, same deferral, second instance (Phase 15)~~ — **largely
+resolved 2026-09-13.** This item was raised because the app's rendered UI
+had never been exercised. It since was, twice:
+1. The user launched the app and it **crashed at startup** —
+   `XamlParseException` on `App.xaml` line 15: MaterialDesignThemes 5.3.2
+   has no `MaterialDesignTheme.Defaults.xaml` (v5 split it into
+   MaterialDesign2/3). Root-caused, fixed in code + spec + plan, and pinned
+   by a new regression test (`AppResourceTests`) — see findings.md.
+2. That also disproved the assumption behind this OPEN ITEM: this session
+   **can** launch the app and inspect its windows (the Task 8 session
+   limitation is specific to ConPTY/console attachment, not WPF). Verified
+   after the fix: the process runs with a visible `HwndWrapper` window
+   titled `Workflow`, no error dialog, empty stderr — which proves the
+   whole XAML graph resolves (App.xaml, MainWindow, tab template, all
+   views, every `StaticResource` key, the icon) and that the F17 startup
+   gate found no prompt-template errors.
+
+What still genuinely needs the user: *pixel-level* aesthetic judgement, and
+the manual steps that need a live agent CLI in the terminal (V5-V8, V10).
 
 ## Source-of-truth hierarchy (binding for this execution)
 

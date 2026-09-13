@@ -935,17 +935,29 @@ tabs are created after startup, so the flag has to reach the command itself:
 
 ### 10.1 Theme
 
-`App.xaml` merges dictionaries in this exact order — the order is verified against
-`C:\Users\Marco\Documents\repo\wpf\MaterialDesignInXaml.Examples\MahApps\MahApps.Basic\App.xaml`
-and is load-bearing:
+`App.xaml` merges dictionaries in this exact order — the order is load-bearing:
 
 ```xml
 <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Controls.xaml" />
 <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Fonts.xaml" />
-<ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesignTheme.Defaults.xaml" />
+<ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesign2.Defaults.xaml" />
 <materialDesign:MahAppsBundledTheme BaseTheme="Dark" PrimaryColor="Indigo" SecondaryColor="Cyan" />
 <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.MahApps;component/Themes/MaterialDesignTheme.MahApps.Defaults.xaml" />
 ```
+
+**Corrected 2026-09-13 (was a startup-crashing defect).** The order above was originally copied
+from `C:\Users\Marco\Documents\repo\wpf\MaterialDesignInXaml.Examples\MahApps\MahApps.Basic\App.xaml`,
+which pins `MaterialDesignThemes.MahApps` **0.1.5** on **netcoreapp3.1**. That sample's third
+line reads `Themes/MaterialDesignTheme.Defaults.xaml`, which **does not exist** in the version
+this project pins (`MaterialDesignThemes` **5.3.2**): v5 split it into `MaterialDesign2.Defaults.xaml`
+and `MaterialDesign3.Defaults.xaml`, and requires one of them. Verified by enumerating the real
+`MaterialDesignThemes.Wpf.g.resources` manifest (89 entries: `themes/materialdesign2.defaults.baml`
+and `themes/materialdesign3.defaults.baml` are present, `themes/materialdesigntheme.defaults.baml`
+is not). `MaterialDesign2` is the correct choice here: the app's style keys
+(`MaterialDesignRaisedButton`, `MaterialDesignOutlinedTextBox`, `MaterialDesignFlatButton`, …)
+are Material Design 2 styles, and the `MaterialDesignThemes.MahApps` compatibility dictionary
+targets the same. The other three pack URIs above were each verified against their assembly's
+manifest and are correct. `Workflow.Tests\AppResourceTests` now pins all of this.
 
 Dark base theme: the app is dominated by a terminal, and a dark surface avoids a jarring light
 frame around a dark console. The xterm theme in `terminal.js` is set to match

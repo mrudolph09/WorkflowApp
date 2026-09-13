@@ -11,8 +11,12 @@
                 <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Controls.xaml" />
                 <ResourceDictionary Source="pack://application:,,,/MahApps.Metro;component/Styles/Fonts.xaml" />
 
-                <!-- Material Design -->
-                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesignTheme.Defaults.xaml" />
+                <!-- Material Design. MaterialDesignThemes 5.x split the old
+                     MaterialDesignTheme.Defaults.xaml into MaterialDesign2/MaterialDesign3
+                     variants; MaterialDesign2 is the one the app's style keys are written
+                     against (MaterialDesignRaisedButton, MaterialDesignOutlinedTextBox, ...)
+                     and the one the MahApps compatibility dictionary below targets. -->
+                <ResourceDictionary Source="pack://application:,,,/MaterialDesignThemes.Wpf;component/Themes/MaterialDesign2.Defaults.xaml" />
 
                 <!-- Colour theme: dark, because the app is dominated by a terminal. -->
                 <materialDesign:MahAppsBundledTheme BaseTheme="Dark" PrimaryColor="Indigo" SecondaryColor="Cyan" />

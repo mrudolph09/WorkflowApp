@@ -289,6 +289,89 @@ resilience boundary (spec's stated intent) is satisfied by the event-handler pat
 which needs no suppression. No code change; recorded so the Definition-of-done checklist is
 graded against what is actually correct rather than a miscounted expectation.
 
+## Post-implementation defect: app crashed at startup (XamlParseException) — FIXED
+
+The user launched the app on 2026-09-13 and it crashed immediately:
+
+```
+System.Windows.Markup.XamlParseException
+  App.xaml, Zeile 15, Position 18 - "System.Windows.ResourceDictionary.Source" ...
+  Innere Ausnahme: IOException: Die Ressource "themes/materialdesigntheme.defaults.xaml"
+  kann nicht gefunden werden.
+```
+
+**This is exactly the failure mode the Task 11 and Task 14 findings above predicted twice** —
+pack URIs and `StaticResource` keys are resolved at *runtime*, so a clean build never proved
+they resolve. Both notes said not to misread a clean build as proof the app runs. It wasn't.
+
+### Root cause (verified empirically, not assumed)
+
+`MaterialDesignThemes.Wpf` **5.3.2** contains **no** `Themes/MaterialDesignTheme.Defaults.xaml`.
+Enumerated the assembly's real `MaterialDesignThemes.Wpf.g.resources` manifest (89 entries):
+it has `themes/materialdesign2.defaults.baml` and `themes/materialdesign3.defaults.baml`, but no
+`themes/materialdesigntheme.defaults.baml`. MaterialDesignThemes **5.x split** the old v4
+`MaterialDesignTheme.Defaults.xaml` into MaterialDesign2/MaterialDesign3 variants and requires
+one of them (confirmed against the library's own current documentation: *"Version 5.0.0 and
+later — You must include the default styles for controls … by referencing the appropriate
+`MaterialDesign3.Defaults.xaml` or `MaterialDesign2.Defaults.xaml`"*).
+
+**Why the defect existed:** spec §10.1 states the merge block was "verified against
+`...\MaterialDesignInXaml.Examples\MahApps\MahApps.Basic\App.xaml`". That sample is real, but it
+pins `MaterialDesignThemes.MahApps` **0.1.5** targeting **netcoreapp3.1** — a v3/v4-era stack.
+The v4 path was copied verbatim into the spec, then into the plan (Task 14 Step 5), then into the
+shipped `App.xaml`, without ever being revalidated against the **5.3.2** versions this project
+actually pins. The defect therefore originated in the *spec*, which is why the fix was applied to
+the spec and the plan as well as the code.
+
+Checked every other pack URI in the shipped XAML against its assembly's real manifest — all four
+others are correct (`MahApps.Metro` `styles/controls.baml` + `styles/fonts.baml`;
+`MaterialDesignThemes.MahApps` `themes/materialdesigntheme.mahapps.defaults.baml`; `Workflow`
+`styles/tabcontrolstyles.baml` and `assets/workflow.ico`). Only line 15 was wrong.
+
+### Fix
+
+`MaterialDesignTheme.Defaults.xaml` → `MaterialDesign2.Defaults.xaml` (not MaterialDesign3:
+the app's style keys — `MaterialDesignRaisedButton`, `MaterialDesignOutlinedTextBox`,
+`MaterialDesignFlatButton`, `MaterialDesignFloatingActionMiniButton`, `MaterialDesignIconButton`
+— are Material Design **2** styles, and the `MaterialDesignThemes.MahApps` compatibility
+dictionary targets the same; MaterialDesign3 would be a visual redesign, not a fix). Applied in
+`Workflow\App.xaml`, spec §10.1 and plan Task 14 Step 5.
+
+### Regression test (closes the gap that let this ship)
+
+`Workflow.Tests\AppResourceTests.EveryPackUriInTheShippedXamlNamesAResourceThatExists` scans
+**every** shipped `.xaml` file for `pack://application:,,,/…` URIs, maps each to its
+`<Assembly>.g.resources` entry (`.xaml` → `.baml`; other assets keep their extension) and asserts
+the resource really exists. Written first and confirmed RED with the exact user-facing message
+before the fix, GREEN after. This converts a class of runtime-only startup crashes into an
+ordinary test failure. (An earlier attempt asserted via `ResourceDictionary.Source`, but the
+`pack` scheme's `WebRequest` handler is not registered in a bare test host without a WPF
+`Application` — `NotSupportedException: The URI prefix is not recognized`. Creating an
+`Application` singleton in the suite risks cross-thread affinity problems for the other STA
+tests, so the manifest-level check was chosen instead: deterministic, fast, no WPF runtime.)
+
+## Correction: this session CAN launch and inspect the WPF app (earlier claim was too broad)
+
+Phases 15/16 and the Task 17 write-up recorded that visual verification was impossible here
+because of the session-1 (disconnected) vs session-3 (interactive desktop) split found in Task 8.
+**That over-generalised the Task 8 finding.** Verified on 2026-09-13: launching
+`Workflow\bin\Release\net8.0-windows\Workflow.exe` from this session works — the process stays
+alive and enumerating its top-level windows shows a real, **visible** WPF window
+(`class='HwndWrapper[Workflow;;…]' title='Workflow' visible=True`) plus
+`MediaContextNotificationWindow` (the WPF rendering stack), with no `#32770` MessageBox dialog
+and empty stderr.
+
+The Task 8 limitation is specific to **ConPTY/console attachment** in a disconnected session, not
+to WPF window creation. Consequences:
+- A startup smoke test *is* available here and should be used after any XAML change: process
+  alive + a visible `HwndWrapper` window + no `#32770` dialog is strong evidence the whole XAML
+  graph (App.xaml, MainWindow, the tab template, all views, every `StaticResource` key and the
+  icon) resolved, because any failure throws during window construction.
+- What still genuinely needs the user: *pixel-level* aesthetics, and anything requiring a live
+  agent CLI in the terminal (V5-V8, V10).
+- Absence of the `#32770` dialog additionally proves the prompt-template startup gate found no
+  errors (F17's error dialog would be exactly such a window).
+
 ## Resources
 
 - Spec: `docs/superpowers/specs/specification.md`

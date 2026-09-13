@@ -705,6 +705,58 @@ manual verification** — not as fully done per the plan's stated Definition
 of Done, which requires V5-V11/F17 to be "executed and observed, not
 assumed."
 
+### Post-implementation: startup crash found by the user, root-caused and fixed
+
+- **Status:** fixed, tested, committed
+- **Date:** 2026-09-13
+- What happened:
+  - The user launched the app; it crashed immediately with
+    `XamlParseException` on `App.xaml` line 15 —
+    `IOException: Die Ressource "themes/materialdesigntheme.defaults.xaml"
+    kann nicht gefunden werden.`
+  - This is precisely the failure the Task 11 and Task 14 findings had each
+    predicted: pack URIs / `StaticResource` keys resolve at runtime, so a
+    clean build never proved the app runs.
+- Investigation (systematic-debugging, evidence before fixes):
+  - Enumerated the real `MaterialDesignThemes.Wpf.g.resources` manifest of
+    the pinned 5.3.2 assembly: no `themes/materialdesigntheme.defaults.baml`
+    exists; `themes/materialdesign2.defaults.baml` and
+    `themes/materialdesign3.defaults.baml` do. MaterialDesignThemes 5.x
+    split the old v4 dictionary and requires one of the two (confirmed
+    against the library's current official documentation).
+  - Traced the defect to its source: spec §10.1 copied the merge block from
+    a local sample pinned to `MaterialDesignThemes.MahApps` 0.1.5 /
+    netcoreapp3.1, and it was never revalidated against the 5.3.2 packages
+    this project pins. Spec → plan → code all carried the v4 path.
+  - Checked every *other* pack URI in the shipped XAML against its
+    assembly's manifest — all four correct. Only line 15 was wrong.
+- Fix: `MaterialDesignTheme.Defaults.xaml` → `MaterialDesign2.Defaults.xaml`
+  (MD2, not MD3: the app's style keys are Material Design 2 styles and the
+  MahApps compatibility dictionary targets the same). Applied to
+  `Workflow\App.xaml`, **spec §10.1 and plan Task 14 Step 5** so it cannot
+  re-propagate.
+- Regression test (TDD, RED before GREEN):
+  `Workflow.Tests\AppResourceTests.EveryPackUriInTheShippedXamlNamesAResourceThatExists`
+  checks every pack URI in every shipped `.xaml` against the referenced
+  assembly's real resource manifest. Confirmed RED with the exact
+  user-facing message before the fix; GREEN after.
+- Verification: full suite 201/203 in Release (only the 2 known ConPTY
+  failures; no regressions), build 0 warnings/0 errors, **and an end-to-end
+  startup smoke test**: launched the Release exe and enumerated its windows
+  — visible `HwndWrapper` window titled `Workflow`, WPF rendering stack up,
+  no `#32770` error dialog, empty stderr.
+- Correction recorded in findings.md: this session **can** launch and
+  inspect the WPF app; the Task 8 session-disconnection limit applies to
+  ConPTY/console attachment, not WPF windows. Earlier "visual verification
+  impossible here" claims in Phases 15/16/17 were too broad.
+- Note on the user's own verify.ps1 run: it showed **201/202** — i.e.
+  `ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput` **passes** in a
+  real interactive session, confirming the Task 8 environmental diagnosis.
+  Only `Start_EmitsTheLauncherFrameBeforeAnyInput` still failed there, which
+  makes it the one remaining genuinely-open question (it may be a real
+  timing/behaviour issue rather than environmental, since its sibling now
+  passes).
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
