@@ -1,6 +1,6 @@
 ---
 description: "Canonical Superpowers design specification for workflow-level run tracking, crash recovery ('Continue workflow'), phase-4 completion detection and the prompt auto-submit fix in the Workflow WPF app"
-summary: "Adds a per-task journal file W\\T\\.workflow-state.json (atomic write, stores taskDescription + per-phase status + dismissed; deliberately NOT taskName/workingDirectory, which are derived from the folder and its parent). WorkflowOrchestrator becomes the single journal writer and gains a StartPhase so a run can resume mid-pipeline. At startup TaskRecoveryScanner walks RecentDirectories one level deep, offers at most 5 non-dismissed, incomplete tasks newer than 14 days as prefilled tabs whose button reads 'Continue workflow'; closing such a tab sets dismissed. Journal is authoritative for phase 3 only - missing FilesExist artefacts DEMOTE a phase (and everything after it), never promote. Phase 4 stops being CompletionRule.Manual: implementation_prompt.md must write a non-empty {done_path} = W\\T\\T-done.md as its final action, detected by the existing ArtifactWatcher; the orchestrator deletes a stale marker before arming that watcher, and CompletionRule.Manual is removed as dead. Phase 3 becomes CompletionRule.AllContentChanged (BOTH spec and plan), matching resolve_review_prompt.md. Root cause of 'the prompt does not auto-submit': TerminalViewModel.SendPasteAsync waits a fixed 150 ms before the CR, which Ink coalesces into the paste; fix moves the submit dance into WorkflowOrchestrator behind a quiet-gate with an OutputCount-based verify and one retry, tunables in autoanswer.rules.json (version 2). Out of scope, unchanged: the pre-existing §8.3 hazard where a fresh run in a fully populated folder satisfies phase 1 instantly."
+summary: "Adds a per-task journal file W\\T\\.workflow-state.json (atomic write, stores taskDescription + per-phase status + dismissed; deliberately NOT taskName/workingDirectory, which are derived from the folder and its parent). WorkflowOrchestrator becomes the single journal writer and gains a StartPhase so a run can resume mid-pipeline. At startup TaskRecoveryScanner walks RecentDirectories one level deep, offers at most 5 non-dismissed, incomplete tasks newer than 14 days as prefilled tabs whose button reads 'Continue workflow'; closing such a tab sets dismissed. Journal is authoritative for phase 3 only - missing FilesExist artefacts DEMOTE a phase (and everything after it), never promote. Phase 4 stops being CompletionRule.Manual: implementation_prompt.md must write a non-empty {done_path} = W\\T\\T-done.md as its final action, detected by the existing ArtifactWatcher; the orchestrator deletes a stale marker before arming that watcher, and CompletionRule.Manual is removed as dead. Phase 3 becomes CompletionRule.AllContentChanged (BOTH spec and plan), matching resolve_review_prompt.md. Root cause of 'the prompt does not auto-submit': TerminalViewModel.SendPasteAsync waits a fixed 150 ms before the CR, which Ink coalesces into the paste; fix moves the submit dance into WorkflowOrchestrator behind a quiet-gate with an OutputCount-based verify and one retry, tunables in autoanswer.rules.json (version 2). Out of scope, unchanged: the pre-existing §8.3 hazard where a fresh run in a fully populated folder satisfies phase 1 instantly. Revised 2026-09-14 after independent review: the journal is READ through a tolerant DTO (an unknown phase/status name drops that entry, not the file); reconciled demotions are WRITTEN BACK via a new ITaskStateStore.ReplacePhases so they survive a second crash; the demote-never-promote rule is one shared PhaseReconciliation helper used by both the startup scan and the SyncFolder re-arm; the re-arm resets ResumePhase AND all four indicators when the journal is absent or complete; the paste quiet-gate's baseline starts at SendPaste (LastOutputUtc alone is already stale when SettleAndAnswerAsync returns); the 5 s scan ceiling is enforced on the awaiting side over a thread-safe accumulator because Directory.* blocks past any token; the MRU is snapshotted on the UI thread; and the four submit tunables must be added to AutoAnswerService's private RuleSetDto, not only to AutoAnswerRuleSet."
 paths:
   - "../plans/2026-09-14-workflow-resume-plan.md"
   - "./specification.md"
@@ -122,9 +122,10 @@ Three new units, each with one purpose, plus changes to four existing ones.
 
 ```
                          ┌──────────────────────────┐
-   App.OnStartup ───────▶│   TaskRecoveryScanner    │ reads RecentDirectories,
-                         │  (new, ITaskRecovery-    │ one level deep, returns
-                         │      Scanner)            │ ≤5 RecoverableTask
+   App.OnStartup ───────▶│   TaskRecoveryScanner    │ reads a SNAPSHOT of
+                         │  (new, ITaskRecovery-    │ RecentDirectories, one level
+                         │      Scanner)            │ deep, returns ≤5
+                         │  uses PhaseReconciliation│ RecoverableTask
                          └────────────┬─────────────┘
                                       │ RecoverableTask[]
                                       ▼
@@ -153,6 +154,7 @@ Three new units, each with one purpose, plus changes to four existing ones.
 |---|---|
 | `Workflow/Models/TaskState.cs` | `TaskState`, `TaskPhaseState` — the journal's shape. |
 | `Workflow/Models/RecoverableTask.cs` | `RecoverableTask` — one scan hit: paths + state + resume phase. |
+| `Workflow/Models/PhaseReconciliation.cs` | The demote-never-promote rule (§6.3) and the resume-phase lookup, shared by the scanner and the tab's re-arm path (§6.3.2). |
 | `Workflow/Services/ITaskStateStore.cs` | Journal read/write contract. |
 | `Workflow/Services/TaskStateStore.cs` | Implementation. |
 | `Workflow/Services/ITaskRecoveryScanner.cs` | Startup scan contract. |
@@ -161,6 +163,7 @@ Three new units, each with one purpose, plus changes to four existing ones.
 **Changed files**
 
 `Workflow/Models/TaskPaths.cs`, `Workflow/Models/PhaseCatalog.cs`,
+`Workflow/Models/AutoAnswerRule.cs`, `Workflow/Services/AutoAnswerService.cs`,
 `Workflow/Models/WorkflowPhase.cs`, `Workflow/Services/ArtifactWatcher.cs`,
 `Workflow/Services/PromptTemplateService.cs` (`PromptVariables`),
 `Workflow/Services/IWorkflowOrchestrator.cs`, `Workflow/Services/WorkflowOrchestrator.cs`,
@@ -237,6 +240,15 @@ that a settable collection property requires.
 Enums are serialised **as strings** (`JsonStringEnumConverter`), so a future reordering of
 `WorkflowPhase` cannot silently reinterpret an old journal.
 
+**The write path and the read path are not symmetric.** `TaskState` above is what the store
+*writes*. It is not what the store *reads* into: `JsonStringEnumConverter` throws `JsonException`
+on a string it cannot map to an enum member, which would turn one hand-edited `"phase": "Nonsense"`
+into "the whole journal is invalid" and defeat R3 (§10.1). Reading therefore goes through a
+tolerant DTO whose `phase` and `status` are plain `string?`; entries that do not map to a
+`WorkflowPhase` / `PhaseStatus` member are dropped individually, and everything around them
+survives. Normalisation (§5.4) then rebuilds the full four-element array. Only a document that is
+not valid JSON at all, or whose `version` is too new, makes `TryLoad` return `null`.
+
 ### 5.3 What is deliberately *not* stored
 
 - **`taskName`** — derived from `Path.GetFileName(taskDirectory)`.
@@ -254,11 +266,13 @@ public interface ITaskStateStore
     public TaskState? TryLoad(TaskPaths paths);
     public void SaveDescription(TaskPaths paths, string taskDescription);
     public void RecordPhase(TaskPaths paths, WorkflowPhase phase, PhaseStatus status);
+    public void ReplacePhases(TaskPaths paths, IReadOnlyList<TaskPhaseState> phases);
     public void SetDismissed(TaskPaths paths, bool dismissed);
 }
 ```
 
-Every mutating method is load-modify-save internally and stamps `UpdatedUtc`. Four narrow,
+Every mutating method is load-modify-save internally and stamps `UpdatedUtc` — except
+`ReplacePhases`, which deliberately does not (see its row below). Five narrow,
 intention-revealing methods rather than a raw `Save(TaskState)` — the callers never need to
 assemble a whole `TaskState`, and keeping assembly inside the store means `Phases` is always the
 complete four-element array in catalogue order.
@@ -270,9 +284,10 @@ existing interface in `Workflow/Services` is written that way.
 
 | Method | Contract |
 |---|---|
-| `TryLoad` | Returns `null` for: file absent, unreadable (`IOException` / `UnauthorizedAccessException`), invalid JSON (`JsonException`), or `Version` greater than `CurrentVersion`. Never throws. A `Phases` array that is missing, short, out of order or holds unknown phases is normalised to the full four-element catalogue order, unknown entries dropped, missing ones defaulted to `Pending`. |
+| `TryLoad` | Returns `null` for: file absent, unreadable (`IOException` / `UnauthorizedAccessException`), not valid JSON (`JsonException`), or `Version` greater than `CurrentVersion`. Never throws. A `Phases` array that is missing, short, out of order or holds an unknown phase **or status name** is normalised to the full four-element catalogue order: unmappable entries are dropped one by one (§5.2, tolerant DTO), missing ones default to `Pending`. An unknown phase name therefore costs that one entry, never the whole journal. |
 | `SaveDescription` | Creates the journal if absent (`CreatedUtc` = now, all four phases `Pending`); otherwise overwrites only `TaskDescription`. Also clears `Dismissed` — the user has explicitly started/continued this task. |
 | `RecordPhase` | Creates the journal if absent. Sets that phase's `Status`; sets `CompletedUtc` when and only when `status == PhaseStatus.Completed`, clears it otherwise. |
+| `ReplacePhases` | Overwrites the whole `Phases` array with the supplied one, normalised. **No-op when the journal is absent** — there is nothing to correct. It leaves `UpdatedUtc` untouched: the only caller is the reconciliation of §6.3, which records what the disk already said rather than new progress, and bumping the timestamp would keep a task inside the 14-day window (§6.2) purely because an artefact was deleted. This is the one durable write that exists so that a reconciliation survives a *second* crash (§6.3). |
 | `SetDismissed` | No-op when the journal is absent. |
 
 **Write durability.** Exactly the `SettingsService.Save` pattern (F12): serialise to
@@ -301,7 +316,14 @@ public sealed record RecoverableTask(TaskPaths Paths, TaskState State, WorkflowP
 
 `TaskRecoveryScanner.ScanAsync(CancellationToken)` returns `IReadOnlyList<RecoverableTask>`:
 
-1. For each entry of `ISettingsService.Settings.RecentDirectories`, in order:
+0. Copy `ISettingsService.Settings.RecentDirectories` **synchronously, on the calling thread**,
+   before any worker starts. The caller is `MainWindowViewModel.InitialiseAsync`, i.e. the
+   dispatcher, and `SettingsService.AddRecentDirectory` mutates that very `Collection<string>`
+   from the UI thread — the blank tab is already visible and usable while the scan runs (§6.4).
+   Enumerating the live collection on a worker thread would fault the scan with
+   `InvalidOperationException` the moment the user picks a directory. The worker only ever sees
+   the immutable snapshot.
+1. For each entry of that snapshot, in order:
    - Skip if `!Directory.Exists(entry)`.
    - Enumerate its **immediate** subdirectories (`Directory.EnumerateDirectories`,
      `SearchOption.TopDirectoryOnly`), stopping after **2 000** entries for that directory.
@@ -309,16 +331,39 @@ public sealed record RecoverableTask(TaskPaths Paths, TaskState State, WorkflowP
      result means "not one of ours" — skip silently.
 2. De-duplicate by `TaskPaths.TaskDirectory`, `StringComparison.OrdinalIgnoreCase`.
 3. Drop any task where `State.Dismissed` is true.
-4. Compute `ResumePhase` (§6.3). Drop any task where every phase is `Completed`.
-5. Drop any task where `UpdatedUtc < DateTimeOffset.UtcNow - 14 days`. An `UpdatedUtc` in the
+4. Drop any task where `UpdatedUtc < DateTimeOffset.UtcNow - 14 days`. An `UpdatedUtc` in the
    future (clock skew, or a file copied from another machine) is treated as recent, not dropped.
-6. Order by `UpdatedUtc` descending, `Take(5)`.
+   **This filter runs before reconciliation**, so a journal old enough to be ignored is never
+   written to.
+5. Reconcile against disk and compute `ResumePhase` (§6.3), persisting the reconciliation when it
+   demoted anything (§6.3.1). Drop any task where every phase is `Completed`.
+6. Order by `UpdatedUtc` descending, `Take(5)`. Ordering and capping happen on the *snapshot*
+   returned at the deadline, not inside the worker, so a partial result is still the most recently
+   updated five of what was found.
 
-**Bounding.** The whole scan runs off the UI thread and is cancelled after **5 seconds**; on
-cancellation whatever has been collected so far is returned rather than nothing. Together with
-the 2 000-subdirectory cap this makes a slow or enormous MRU entry — a network share, a OneDrive
-folder, a repository root with thousands of directories — an inconvenience rather than a hang.
-The same class of failure is already acknowledged for `FileSystemWatcher` in BASE §7.5.
+**Bounding.** The whole scan runs off the UI thread and is bounded by a **5-second** deadline;
+whatever has been collected when the deadline passes is returned rather than nothing. Together
+with the 2 000-subdirectory cap this makes a slow or enormous MRU entry — a network share, a
+OneDrive folder, a repository root with thousands of directories — an inconvenience rather than a
+hang. The same class of failure is already acknowledged for `FileSystemWatcher` in BASE §7.5.
+
+**The deadline is enforced on the awaiting side, not only inside the worker.** A cancellation
+token cannot interrupt `Directory.Exists` or the first `MoveNext` of `Directory.EnumerateDirectories`:
+both block inside Win32/SMB, and a disconnected share can hold them for far longer than five
+seconds. `ScanAsync` therefore starts the enumeration on a worker that appends each hit to a
+thread-safe collection, and returns a **snapshot of that collection** as soon as either the worker
+finishes or the deadline expires. A worker still stuck in a blocking call is abandoned, not
+awaited: it holds no disposable resource, it only ever appends, and nothing reads the collection
+after the snapshot is taken. The linked `CancellationTokenSource` is disposed from the worker's
+continuation, so an abandoned worker never observes a disposed token.
+
+This is what makes the 5-second ceiling a real guarantee rather than a best-effort one. It is also
+why the ceiling is a *ceiling on `ScanAsync`*, not a promise that the worker thread has stopped.
+
+**Caller cancellation** behaves the same way as the deadline: the promised partial list is
+returned. In particular the worker is started with `CancellationToken.None`, because handing the
+caller's token to `Task.Run` would make an already-cancelled caller produce a *cancelled task*
+instead of the empty list the contract promises.
 
 **Exception policy.** `IOException`, `UnauthorizedAccessException` and
 `DirectoryNotFoundException` from an individual directory skip that directory and continue. The
@@ -360,6 +405,40 @@ are present, a resume never starts a `FilesExist` phase whose watcher is already
 into phase 1 happens only when spec *or* plan is missing; into phase 2 only when the review is
 missing; into phase 4 only when the done marker is missing. The §8.3 instant-completion hazard is
 therefore unreachable on the recovery path, which is why §2.2 can leave it out of scope.
+
+#### 6.3.1 The demotion must be persisted
+
+Reconciling only the in-memory `TaskState` handed to the recovered tab is not enough, and the
+reason is the *"and every phase after it"* half of the rule.
+
+Worked example. The journal records phases 1–3 `Completed`. `T_plan.md` is deleted outside the
+app. Recovery demotes phases 1–4 in memory and resumes at phase 1. Phase 1 runs and the
+orchestrator writes `RecordPhase(Specification, Completed)` — a load-modify-save that touches
+*only* that one entry. The on-disk journal now reads: phase 1 `Completed` (new), phases 2 and 3
+`Completed` (**stale, never cleared**). Crash again, and the next startup reconciles a journal
+whose phase-2 artefact (`T-review.md`) is present, finds nothing to demote, and resumes at phase 4
+— silently skipping phases 2 and 3. The rule the design calls load-bearing has been lost across
+one restart.
+
+Therefore: **when reconciliation demotes anything, the reconciled array is written back
+immediately**, through `ITaskStateStore.ReplacePhases` (§5.4). The write happens once, at scan
+time, before the task is offered; it is idempotent (a second scan finds nothing left to demote and
+writes nothing) and it leaves `UpdatedUtc` alone so a deleted artefact cannot extend the 14-day
+window. Like every other journal write it is best-effort: a failure degrades recovery and never
+takes down the app (§10.2 W1).
+
+#### 6.3.2 One reconciliation, two callers
+
+The rule is needed in two places — the startup scan (§6.2) and the re-arm path (§6.6), which
+reads the same journals from a fresh tab. Implementing it twice would let the two disagree, and an
+unreconciled §6.6 would resume straight into a phase whose inputs are missing, which is exactly
+what §6.3 exists to prevent.
+
+It is therefore **one shared, pure helper** over `(TaskPaths, TaskState)` —
+`PhaseReconciliation.Reconcile`, returning whether anything was demoted, plus
+`PhaseReconciliation.FirstIncomplete` for the resume phase — used by both callers, each of which
+persists via `ReplacePhases` when the helper reports a demotion. It lives next to the models
+because it is a rule about the journal and the artefacts, not about scanning.
 
 ### 6.4 Startup wiring
 
@@ -419,10 +498,45 @@ would duplicate `CanStartWorkflow` and the `IsRunning` interlock for no gain.
 
 `SyncFolder()` — which already runs, debounced, whenever the name or directory changes and
 already calls `_folders.DirectoryAlreadyExisted(paths)` — additionally calls
-`_stateStore.TryLoad(paths)` after the folder has been resolved. If a journal is found that is
-not fully complete, `ResumePhase` and the indicators are set from it exactly as in §6.5 steps 6–7
-(but **not** `IsNameLocked`: the user is still typing). If no journal is found, or it is complete,
-`ResumePhase` is reset to `null` and the indicators to `Pending`.
+`_stateStore.TryLoad(paths)` after the folder has been resolved, then reconciles it against disk
+with the shared helper of §6.3.2 and persists the result if anything was demoted. One of exactly
+two outcomes follows:
+
+| Journal | `ResumePhase` | The four indicators |
+|---|---|---|
+| Found, and some phase is not `Completed` | that phase | painted from the journal, `Active` shown as `Pending`, exactly as §6.5 step 6 |
+| Absent, **or** every phase `Completed` | `null` | **all four reset to `Pending`** |
+
+`IsNameLocked` is **not** set on this path — the user is still typing.
+
+The re-read happens on **both** of `SyncFolder`'s successful exits, the rename branch included:
+that branch `return`s before the create branch is reached, so a single call at the end of the
+method would leave the postcondition holding on one path and not the other. On the rename path the
+answer is normally unchanged — `TaskFolderService.Rename` moves the whole directory and the journal
+travels with it (§5.1) — which is exactly why re-reading there is safe as well as uniform. The
+postcondition worth naming is:
+
+> After `SyncFolder` returns successfully, `ResumePhase` and the four indicators reflect the
+> journal in the folder that is now on disk.
+
+Note what follows from that: retyping only the *name* renames the folder and carries the journal
+along, so the resume state legitimately survives. The reset cases are reached by changing the
+*working directory*, or by typing a name into a tab that has not yet created a folder.
+
+Both halves of the reset matter, and each has a concrete failure it prevents:
+
+- **Absent journal.** Without the reset, a tab that a moment ago showed task A's green phase 1
+  keeps showing it after the user types task B's name. The indicators would then be claiming that
+  a phase of task B is finished.
+- **Complete journal.** Without the reset, the button correctly flips back to *Start workflow*
+  while all four indicators stay green — an about-to-start run painted as already finished.
+
+**This path is skipped entirely when `IsRecovered` is true.** A recovered tab's resume state was
+established by `LoadForResume` and must not be recomputed: `TaskTabViewModel.StartWorkflow` calls
+`SyncFolder()` directly (bypassing the `IsNameLocked` guard in `ScheduleFolderSync`, which is how
+R12 recreates a folder deleted between scan and *Continue*), and a recompute there would read
+`ResumePhase` back out of the journal microseconds before it is passed to the orchestrator as
+`StartPhase`, and would repaint indicators the orchestrator is about to drive.
 
 This is what makes "closing dismisses it" non-destructive: typing the task's name and directory
 into a fresh tab re-reads the journal, and the button reads *Continue workflow* again. It also
@@ -503,6 +617,32 @@ _stateStore.SaveDescription(paths, TaskDescription);
 ```
 
 so a crash one second after *Start workflow* still recovers a tab with its description intact.
+
+### 7.4 A run clears its own tail first
+
+Immediately after validating `StartPhase`, and before the loop, `RunAsync` rewrites the journal so
+that `StartPhase` and every phase after it read `Pending` with no `completedUtc`
+(`ITaskStateStore.ReplacePhases`, §5.4). Phases *before* `StartPhase` are left exactly as they are.
+
+The invariant this buys is worth stating plainly:
+
+> **The journal never claims a phase is complete that the current run has not run.**
+
+Two reachable situations need it, and neither is covered by §6.3.1 — that rule corrects a journal
+against *disk*, this one corrects it against *what is about to happen*:
+
+1. **Re-running a finished task.** All four phases are `Completed` on disk. The user types the
+   name (§6.6 correctly resets the button and the indicators), presses *Start workflow*, and the
+   app dies during phase 1. Without this rewrite the journal reads phase 1 `Active`, phases 2–4
+   `Completed`, and the next startup offers a recovered tab with **phases 2, 3 and 4 painted
+   green** for work that has not been done — contradicting §6.5 step 6 and A6.
+2. **A crash in the gap between two phases.** `RecordPhase(N, Completed)` and
+   `RecordPhase(N+1, Active)` are two writes. A crash in between, with a stale `Completed` already
+   sitting on phase N+1, lets the next recovery compute `ResumePhase` past it. The window is
+   microseconds wide, and closing it costs one write per run.
+
+`ReplacePhases` does not stamp `UpdatedUtc`, which is right here too: `SaveDescription` has just
+stamped it (§7.3) and the first `RecordPhase` is about to stamp it again.
 
 ---
 
@@ -647,9 +787,11 @@ the phase sequence:
 
 ```
 terminal.SendPaste(renderedPrompt)
+pasteSentUtc := now                              # <-- the gate's initial baseline
 
-# Gate: let the paste drain. Same two gates as SettleAndAnswerAsync.
-wait until (now - terminal.LastOutputUtc) >= PasteQuietPeriodMs,
+# Gate: let the paste drain. The baseline starts at the paste itself, and any output
+# arriving afterwards pushes it forward.
+wait until (now - max(pasteSentUtc, terminal.LastOutputUtc)) >= PasteQuietPeriodMs,
      bounded by PasteSettleTimeoutMs
 
 for attempt in 1 .. MaxSubmitAttempts:          # default 2
@@ -659,6 +801,20 @@ for attempt in 1 .. MaxSubmitAttempts:          # default 2
     if terminal.OutputCount != before: return    # accepted
 # fell through: proceed anyway; the watcher and the manual button still apply
 ```
+
+**Why the baseline must start at the paste and not at `LastOutputUtc` alone.** This is the whole
+gate. `SettleAndAnswerAsync` runs immediately before, and its normal exit - the `rule is null`
+branch - is reached *only after* Gate B has observed `now - LastOutputUtc >= QuietPeriodMs`
+(1500 ms by default, nearly twice `pasteQuietPeriodMs`). So at the moment `SendPromptAsync` is
+entered, `LastOutputUtc` is **already stale by more than the quiet period**. A gate consulting only
+`LastOutputUtc` would find its very first iteration satisfied by that *pre-paste* silence and write
+the CR at once - before the asynchronous PTY echo of the paste has even arrived, which is precisely
+the early-submit failure this change exists to remove. Seeding the baseline at `SendPaste` makes
+the gate wait for `pasteQuietPeriodMs` of genuine *post-paste* silence; later output still pushes
+the baseline forward, so a slow launcher is handled by the same expression.
+
+The cost is one `pasteQuietPeriodMs` per phase - 800 ms, four times per task. That is the price of
+the guarantee and it is deliberately paid.
 
 **Why `OutputCount` is the verification signal** rather than a snapshot diff: the CR is only sent
 *after* the screen has gone quiet, so by construction nothing else is producing output at that
@@ -699,9 +855,27 @@ at version 1 still deserialises:
 | `submitVerifyMs` | 1500 | How long to wait for output proving the CR was accepted. |
 | `maxSubmitAttempts` | 2 | Total CRs written, including the first. |
 
-`AutoAnswerService` already tolerates an override file that omits fields (`PropertyNameCaseInsensitive`,
-missing members left at their default). A `version: 1` override therefore picks up the new
-defaults; no migration, no user action.
+**The values reach the record through `RuleSetDto`, so the DTO is what must change.**
+`AutoAnswerService.Load` does not deserialise an `AutoAnswerRuleSet`; it deserialises a private
+`RuleSetDto` and then *constructs* the record positionally. Positional defaults on the record are
+therefore invisible to deserialisation, and any field absent from the DTO is silently dropped
+however correct the record looks. All four fields must appear on `RuleSetDto` - with the shipped
+defaults as their property initialisers - **and** be passed to the `AutoAnswerRuleSet` constructor.
+
+That is also the whole migration story: the DTO's initialisers mean a `version: 1` override file
+which omits the fields deserialises to the shipped defaults. No migration, no user action.
+
+On top of that, a value of zero or less - an explicit `0`, or a typo - is normalised to the shipped
+default before the set is returned, because each of the four is a duration or an attempt count
+where zero is meaningless.
+
+**A missing or malformed *shipped* rules file keeps throwing, by design.** `Load` has no fallback
+path today and none is added: `File.ReadAllText` propagates, `JsonSerializer.Deserialize`
+propagates `JsonException`, and a `null` document becomes `InvalidOperationException`.
+`Assetsutoanswer.rules.json` is a build artefact copied into the output directory, so its
+absence or corruption is a broken deployment, not a user state. The *override* file is the
+tolerant one, and always was: it is consulted only when `File.Exists` says so, and a malformed
+override is out of scope exactly as it is today.
 
 ---
 
@@ -713,9 +887,9 @@ defaults; no migration, no user action.
 |---|---|---|
 | R1 | Journal is corrupt / truncated / hand-edited into invalid JSON. | `TryLoad` returns `null`; the task is not offered. No crash, no message. |
 | R2 | Journal `Version` > `CurrentVersion` (downgrade after an upgrade). | `TryLoad` returns `null`. Refusing to guess is better than misreading a future schema. |
-| R3 | `Phases` array is short, reordered, or holds an unknown phase name. | Normalised to the four catalogue phases in order; unknown dropped; missing defaulted to `Pending`. |
+| R3 | `Phases` array is short, reordered, or holds an unknown phase or status name. | Normalised to the four catalogue phases in order; unmappable entries dropped individually (the rest of the journal still loads); missing ones defaulted to `Pending`. |
 | R4 | An MRU directory is gone, or on a disconnected share. | Skipped; scan continues. |
-| R5 | The scan exceeds 5 s. | Cancelled; partial results are used. |
+| R5 | The scan exceeds 5 s - including because a worker is blocked inside `Directory.Exists` or `Directory.EnumerateDirectories` on a dead share. | `ScanAsync` returns a snapshot of what has been collected at the deadline; a still-blocked worker is abandoned, not awaited (§6.2). |
 | R6 | A working directory holds thousands of subfolders. | Enumeration stops at 2 000 for that directory. |
 | R7 | More than 5 interrupted tasks qualify. | The 5 most recently updated are offered. The rest keep their journals and are reachable by typing the name (§6.6). |
 | R8 | `updatedUtc` lies in the future. | Treated as recent. |
@@ -723,6 +897,10 @@ defaults; no migration, no user action.
 | R10 | The journal says `Completed` but the artefact was deleted. | Demoted, with every later phase (§6.3). |
 | R11 | The same task is reachable from two MRU entries. | De-duplicated by full path, case-insensitively. |
 | R12 | A recovered task's folder is deleted between scan and Continue. | `SyncFolder`/`EnsureCreated` recreates the folder; the resumed phase re-runs against an empty folder, and §6.3's demotion already prevented resuming past a missing artefact in the normal case. |
+| R13 | The app crashes a *second* time, after a demoted phase has been re-run. | The demotion was written back at scan time (§6.3.1), so the stale `Completed` entries for the later phases are gone and the second recovery does not skip them. |
+| R14 | The user types the name of a task whose journal says a phase is complete but whose artefact is missing. | Reconciled by the same rule as the scan (§6.3.2) before `ResumePhase` is set, so the re-arm path cannot resume into a phase whose inputs are gone either. |
+| R15 | A tab that already shows one task's indicators is pointed at a different working directory, or at a completed task. | Both `ResumePhase` and all four indicators are reset to `null`/`Pending` (§6.6). Retyping only the *name* renames the folder and carries the journal with it, so there the resume state correctly survives. |
+| R16 | The user picks a working directory while the startup scan is still running. | The scan reads a snapshot of the MRU taken on the UI thread before the worker started (§6.2), so `AddRecentDirectory` cannot fault it. |
 
 ### 10.2 Journal writes
 
@@ -731,6 +909,8 @@ defaults; no migration, no user action.
 | W1 | The journal cannot be written (read-only folder, lock, no permission). | Swallowed. The run continues; only recovery is degraded. Same trade-off as `SettingsService` (F12). |
 | W2 | Two app instances run the same task. | Last writer wins. Not detected. Out of scope (§2.2). |
 | W3 | The journal write wakes the `FileSystemWatcher`. | Harmless — one extra debounced re-check of the real rule (§5.4). |
+| W4 | A hand-edited journal holds an unknown `phase` or `status` name. | That entry alone is dropped; the rest of the journal survives and is normalised (§5.2, §5.4). |
+| W5 | The write-back of a reconciliation fails. | Swallowed like every other journal write. Recovery is correct for this session and degrades to the R13 behaviour if the app crashes again. |
 
 ### 10.3 Completion detection
 
@@ -749,7 +929,9 @@ defaults; no migration, no user action.
 | S1 | The launcher produces output continuously (a spinner) after the paste. | The paste quiet-gate times out at `pasteSettleTimeoutMs`; the CR is sent anyway. |
 | S2 | The CR is accepted but produces no output within `submitVerifyMs`. | A second CR is sent. Harmless in an empty input box. |
 | S3 | Both attempts fail. | The prompt sits in the input box; the terminal is live and the user can press Enter, exactly as today. No regression. |
-| S4 | A `%APPDATA%` override at `version: 1` lacks the new fields. | Defaults apply (§9.4). |
+| S4 | A `%APPDATA%` override at `version: 1` lacks the new fields. | The `RuleSetDto` initialisers supply the shipped defaults (§9.4). |
+| S5 | A field is present but set to `0` or a negative number. | Normalised to the shipped default (§9.4). |
+| S6 | The PTY echo of the paste arrives only after `SendPaste` has returned. | The quiet gate's baseline starts at the paste, so the CR is not written until `pasteQuietPeriodMs` of silence has followed the echo (§9.3). |
 
 ### 10.5 Known limitation carried forward
 
@@ -769,9 +951,21 @@ fixture, `IDisposable` cleanup, fakes in `Workflow.Tests/Fakes`).
 - `RecordPhase(Completed)` sets `CompletedUtc`; `RecordPhase(Active)` clears it.
 - `SaveDescription` clears `Dismissed`.
 - Missing file → `null`. Invalid JSON → `null`. `Version = 99` → `null`.
-- A short / reordered / unknown-phase `Phases` array normalises to four phases in catalogue order.
+- A short / reordered / unknown-phase `Phases` array normalises to four phases in catalogue order,
+  and the *valid* entries around an unknown one survive (this is the test that fails if the
+  tolerant read DTO of §5.2 is skipped).
+- An unknown `status` name is dropped the same way, and that phase defaults to `Pending`.
 - A write into a read-only directory does not throw.
+- `SaveDescription` into a task directory that has been deleted **recreates** the directory and the
+  journal - `Save` calls `Directory.CreateDirectory`, so the contract is "does not throw *and*
+  re-creates", not "does nothing".
+- `ReplacePhases` overwrites the whole array, normalises it, leaves `UpdatedUtc` unchanged, and is
+  a no-op when there is no journal.
 - No `.tmp` file is left behind after a successful save.
+
+`PhaseReconciliation` (§6.3.2) has no test class of its own: it is exercised through
+`TaskRecoveryScannerTests` (the scan path) and `TaskTabViewModelTests` (the re-arm path), which is
+where its two callers live and where a divergence between them would actually bite.
 
 **New — `TaskRecoveryScannerTests`**
 - Finds a task; ignores subfolders with no journal.
@@ -783,6 +977,17 @@ fixture, `IDisposable` cleanup, fakes in `Workflow.Tests/Fakes`).
 - Demotion: journal says phase 1 `Completed` but `T_plan.md` is missing ⇒ `ResumePhase ==
   Specification` and phases 2–4 are `Pending`.
 - No demotion for phase 3 when spec and plan are present.
+- **The demotion is persisted (§6.3.1).** Reading the journal back off disk straight after the scan
+  shows the demoted phases as `Pending`, and `UpdatedUtc` is unchanged.
+- **The two-crash regression.** Journal says phases 1–3 `Completed` with `T-review.md` present;
+  delete `T_plan.md`; scan (⇒ resume at phase 1); simulate the resumed phase 1 finishing
+  (`RecordPhase(Specification, Completed)` plus the spec and plan on disk); scan again. The second
+  `ResumePhase` must be `Review`, **not** `Implementation`. This test fails against an
+  in-memory-only reconciliation and is the reason §6.3.1 exists.
+- A scan whose budget has already expired, and a scan given an already-cancelled token, each
+  return a list without throwing (the §6.2 partial-result contract).
+- The MRU is snapshotted: mutating `Settings.RecentDirectories` while the returned task is being
+  awaited does not fault the scan.
 
 **Changed — `ArtifactWatcherTests`**
 - `AllContentChanged`: changing one of two paths does **not** signal; changing both does.
@@ -793,9 +998,15 @@ fixture, `IDisposable` cleanup, fakes in `Workflow.Tests/Fakes`).
   sequence and on `FakeTerminalController.StartedSessions.Count`.
 - `ITaskStateStore` receives `Active`/`Completed` for each executed phase, in order, and nothing
   for skipped phases (fake store recording calls).
+- **The tail is cleared first (§7.4).** With every phase `Completed` in a seeded journal and
+  `StartPhase = ResolveReview`, phases 1–2 keep their `Completed` entries while phases 3–4 are
+  `Pending`/`Active` — phase 4 must not still read `Completed`.
 - A pre-existing `T-done.md` is deleted before phase 4 waits.
 - Submit: with `FakeTerminalController` emitting no output after the CR, exactly
   `maxSubmitAttempts` CRs are written; with output emitted after the first CR, exactly one is.
+- **The paste baseline (§9.3).** With the fake emitting its paste echo only *after* `SendPaste`
+  has returned, no CR may be written before that echo has arrived and `pasteQuietPeriodMs` has
+  elapsed since it. This is the test that fails if the gate reads `LastOutputUtc` alone.
 - `SendPaste` is called once per phase, before the CR.
 
 **Changed — `TaskTabViewModelTests`**
@@ -805,11 +1016,24 @@ fixture, `IDisposable` cleanup, fakes in `Workflow.Tests/Fakes`).
 - `StartWorkflow` on a recovered tab passes `StartPhase == ResumePhase`.
 - `StartWorkflow` calls `SaveDescription` before the run.
 - Typing an existing unfinished task's name into a fresh tab sets `ResumePhase` (§6.6).
+- Pointing that tab at a **different working directory** where the name has no journal resets
+  `ResumePhase` to `null` **and all four indicators to `Pending`** (§6.6, R15). (Retyping only the
+  name renames the folder and carries its journal along, so that case correctly keeps the state.)
+- Retyping it to a **completed** task's name resets both the same way, even though every journal
+  entry says `Completed`.
+- Typing the name of a task whose journal says phase 1 `Completed` while `T_plan.md` is missing
+  yields `ResumePhase == Specification` - the re-arm path reconciles too (§6.3.2, R14).
 - `NotifyClosedByUser` dismisses only when `IsRecovered`.
 
 **Changed — `MainWindowViewModelTests`**
 - `InitialiseAsync` appends one tab per scanner result and selects the first recovered tab.
 - `CloseTab` dismisses a recovered tab; `ShutdownAll` dismisses nothing.
+
+**Changed — `AutoAnswerServiceTests`**
+- A version-1 file that omits the four submit fields yields the shipped defaults (this is the test
+  that fails if the fields are added to `AutoAnswerRuleSet` but not to `RuleSetDto`, §9.4).
+- A version-2 file that sets them yields exactly those values.
+- A field set to `0` falls back to the shipped default.
 
 **Changed — `PhaseCatalogTests`, `TaskPathsTests`, `PromptTemplateServiceTests`, `PlaceholderTests`**
 - The new completion rules; `DoneAbsolute`/`DoneRelative`; the `done_path` token; and (existing
@@ -849,11 +1073,32 @@ fixture, `IDisposable` cleanup, fakes in `Workflow.Tests/Fakes`).
   name and directory into a fresh tab restores the **Continue workflow** button.
 - **A12** A completed task is never offered for recovery.
 - **A13** Startup with no interrupted tasks behaves exactly as today: one blank tab, selected.
+- **A14** A demotion survives a second crash: with phases 1–3 recorded `Completed` and `T_plan.md`
+  deleted, recovery resumes at phase 1; once phase 1 has completed again, a further restart resumes
+  at phase **2**, not phase 4 (§6.3.1, R13).
+- **A15** Pointing a tab at a working directory where the task name has no journal, or typing a
+  completed task's name into a fresh tab, resets both the button caption *and* all four indicators
+  (§6.6, R15).
+- **A16** Typing the name of a task whose journal claims a phase is complete while its artefact is
+  missing yields the same resume phase the startup scan would (§6.3.2, R14).
+- **A17** A `version: 1` `%APPDATA%` override file that omits the four submit fields produces the
+  shipped defaults, and a `version: 2` file that sets them produces those values (§9.4).
+- **A18** Re-running a task whose journal is fully `Completed` and killing the app during phase 1
+  recovers a tab with **all four** indicators grey - the journal never claims a phase the current
+  run has not run (§7.4).
 
 ### 12.3 Verification steps
 
-Automated by `verify.ps1` / `dotnet test`: A1–A5, A9, A11–A13 (view-model level), plus every
-test listed in §11.
+**Automated** by `verify.ps1` / `dotnet test`: A1–A5, A9, A11–A17, plus every test listed in §11.
+A6–A8 and A10 are automated only at view-model / fake-terminal level (there is no real CLI in the
+test run); their end-to-end confirmation is V13, V15 and V16.
+
+**Explicitly not automatable, and why.** The §6.2 deadline is verified by the two contract tests
+(expired budget, cancelled token) rather than by a genuinely blocked worker: blocking
+`Directory.*` behaviour on a dead SMB share cannot be produced from a unit test without a
+file-system abstraction, which this design does not introduce. The remaining evidence for that
+claim is **V18**, and the claim being made is narrow: *`ScanAsync` returns within the deadline*,
+not *the worker thread has stopped*.
 
 Manual, against the real CLIs (extends BASE §15.3's V5–V11):
 
@@ -871,7 +1116,17 @@ Manual, against the real CLIs (extends BASE §15.3's V5–V11):
 - **V17** Delete `T_plan.md` from a task whose journal says phase 1 is complete, then restart.
   The recovered tab must show phase 1 grey and resume at phase 1.
 - **V18** Put a working directory on a disconnected network share into the MRU. The window must
-  still appear promptly and the app must be usable.
+  still appear promptly, the app must stay usable, and the recovered tabs for the *reachable* MRU
+  entries must still appear - within roughly the 5-second deadline, not after the share's SMB
+  timeout.
+- **V19** With a recovered tab open, pick a different working directory in the still-blank tab
+  while the scan is running. Nothing may fault and no error label may appear (R16). Then, in a
+  tab showing an unfinished task's green phase 1, switch the working directory to one where that
+  name has no journal: all four indicators must go grey (A15).
+- **V20** Type the name of a finished task into a fresh tab. All four indicators must read grey and
+  the button must read *Start workflow* (A15).
+- **V21** Re-run that finished task and kill `Workflow.exe` during phase 1. The recovered tab must
+  show all four indicators grey, not phases 2-4 green (A18).
 
 ---
 
@@ -895,3 +1150,11 @@ Manual, against the real CLIs (extends BASE §15.3's V5–V11):
 | D14 | Timing tunables live in `autoanswer.rules.json`. | A new config file; or constants. | That file is already the terminal-timing config (F9); a second file would split one concern in two. |
 | D15 | One button whose label changes. | A separate "Continue workflow" button. | A second button duplicates `CanStartWorkflow` and the `IsRunning` interlock. |
 | D16 | The startup scan is not awaited before the window shows. | Scan synchronously at startup. | A slow or disconnected MRU entry would delay the window. |
+| D17 | A reconciled demotion is written back to the journal (§6.3.1). | Reconcile in memory only. | `RecordPhase` is per-phase, so a resumed run leaves the demoted *later* phases marked `Completed` on disk. One more crash and recovery skips them - losing exactly the "and every phase after it" rule the demotion exists to enforce. |
+| D18 | The reconciliation is one shared helper used by the scan and by the re-arm (§6.3.2). | Implement it in the scanner only. | The re-arm path (§6.6) reads the same journals from a fresh tab. Unreconciled, it resumes into a phase whose inputs are missing, contradicting §6.3's load-bearing consequence. |
+| D19 | The journal is *read* through a tolerant DTO, not directly into `TaskState` (§5.2). | Deserialise `TaskState` with `JsonStringEnumConverter`. | That converter throws on an unmappable enum string, so one hand-edited phase name would make `TryLoad` return `null` and hide the whole task. R3 requires dropping the bad entry, not the journal. |
+| D20 | The paste quiet-gate's baseline starts at `SendPaste` (§9.3). | Read `LastOutputUtc` alone. | The preceding settle loop exits *because* the screen has been quiet for `quietPeriodMs`, so a `LastOutputUtc`-only gate is already satisfied on entry and fires the CR before the paste echo - reproducing the very bug being fixed. |
+| D21 | The five-second scan ceiling is enforced on the awaiting side (§6.2). | Rely on the cancellation token inside the worker. | `Directory.Exists` and the first `MoveNext` of `EnumerateDirectories` block inside Win32/SMB and cannot observe a token, so the token alone makes the ceiling a claim rather than a guarantee. |
+| D22 | The MRU is snapshotted on the UI thread before the worker starts (§6.2). | Enumerate `Settings.RecentDirectories` on the worker. | The blank tab is visible and usable during the scan, and `AddRecentDirectory` mutates that same `Collection<string>` from the UI thread - a directory pick mid-scan would fault the scan with `InvalidOperationException`. |
+| D23 | The four submit tunables are added to `RuleSetDto` as well as to `AutoAnswerRuleSet` (§9.4). | Add them to the record and rely on its positional defaults. | `Load` constructs the record from the DTO; a field absent from the DTO can never be read from the file at all. |
+| D24 | A run clears the journal from `StartPhase` onward before it begins (§7.4). | Let `RecordPhase` overwrite entries as the run reaches them. | `RecordPhase` writes one entry at a time, so re-running a finished task leaves later phases marked `Completed` until the run gets to them - a crash in phase 1 then recovers a tab with phases 2-4 painted green. |

@@ -1,9 +1,10 @@
 ---
 description: "Canonical Superpowers implementation plan for workflow run tracking, crash recovery ('Continue workflow'), phase-4 completion detection and the prompt auto-submit fix"
-summary: "Eleven TDD tasks, in dependency order: (1) TaskPaths gains StateAbsolute/DoneAbsolute/DoneRelative; (2) the {done_path} prompt token plus the implementation_prompt.md completion-signal section and verify.ps1; (3) CompletionRule.AllContentChanged for phase 3; (4) phase 4 becomes FilesExist(DoneAbsolute), CompletionRule.Manual is deleted, stale marker removed before arming the watcher; (5) TaskState model + TaskStateStore (atomic tmp+Move, never throws, normalises the Phases array); (6) WorkflowRunRequest.StartPhase + journal writes from the orchestrator; (7) the auto-submit fix - ITerminalController.SendPaste replaces SendPasteAsync, the submit dance moves into WorkflowOrchestrator.SendPromptAsync behind a quiet gate with an OutputCount verify and one retry, tunables in autoanswer.rules.json v2 normalised on load; (8) TaskRecoveryScanner with the demote-never-promote reconciliation; (9) TaskTabViewModel ResumePhase/IsRecovered/StartButtonLabel/LoadForResume/NotifyClosedByUser; (10) MainWindowViewModel.InitialiseAsync + CloseTab dismissal + App.xaml.cs and TaskTabView.xaml wiring; (11) the full acceptance gate. Signature churn is enumerated per task: TaskTabViewModel's constructor gains ITaskStateStore after settings, which touches four test files."
+summary: "Eleven TDD tasks, in dependency order: (1) TaskPaths gains StateAbsolute/DoneAbsolute/DoneRelative; (2) the {done_path} prompt token plus the implementation_prompt.md completion-signal section and verify.ps1; (3) CompletionRule.AllContentChanged for phase 3; (4) phase 4 becomes FilesExist(DoneAbsolute), CompletionRule.Manual is deleted, stale marker removed before arming the watcher; (5) TaskState model + TaskStateStore (atomic tmp+Move, never throws, READS through a tolerant DTO so an unknown phase/status name drops one entry instead of the file, plus ReplacePhases which does not stamp UpdatedUtc); (6) WorkflowRunRequest.StartPhase + journal writes from the orchestrator + ClearPhasesFrom so a run never leaves a phase it has not run marked Completed; (7) the auto-submit fix - ITerminalController.SendPaste replaces SendPasteAsync, the submit dance moves into WorkflowOrchestrator.SendPromptAsync behind a quiet gate whose baseline STARTS AT THE PASTE, with an OutputCount verify and one retry, tunables added to AutoAnswerService's private RuleSetDto as well as to AutoAnswerRuleSet (the record alone changes nothing); (8) PhaseReconciliation - one shared demote-never-promote helper - plus TaskRecoveryScanner, which persists demotions via ReplacePhases, snapshots the MRU on the caller thread and enforces the 5 s ceiling on the awaiting side over a ConcurrentQueue; (9) TaskTabViewModel ResumePhase/IsRecovered/StartButtonLabel/LoadForResume/NotifyClosedByUser, whose re-arm reconciles, resets ALL FOUR indicators when the journal is absent or complete, and is skipped for a recovered tab; (10) MainWindowViewModel.InitialiseAsync + CloseTab dismissal + App.xaml.cs and TaskTabView.xaml wiring; (11) the full acceptance gate. Signature churn is enumerated per task: TaskTabViewModel's constructor gains ITaskStateStore after settings, which touches four test files. Revised 2026-09-14 after independent review (docs/superpowers/review/2026-09-14-workflow-resume-review.md); all eight findings resolved."
 paths:
   - "../specs/2026-09-14-workflow-resume-design.md"
   - "../specs/specification.md"
+  - "../review/2026-09-14-workflow-resume-review.md"
   - "../../../Workflow/verify.ps1"
 ---
 
@@ -27,7 +28,7 @@ paths:
 - **`IDE0040`**: every interface member must carry an explicit `public` modifier. Match the existing files in `Workflow/Services`.
 - **`CA1002`**: no `public` member may expose `List<T>`. Use `Collection<T>` (as `AppSettings.RecentDirectories` does) or `IReadOnlyList<T>`.
 - **`CA2227`**: a settable collection property needs `[SuppressMessage("Usage", "CA2227", Justification = "System.Text.Json requires a settable collection property to populate this list.")]` — copy the attribute from `Workflow/Models/AppSettings.cs`.
-- **XML doc comments are required** on every public type and member in the `Workflow` project (`GenerateDocumentationFile` is on there; it is off in `Workflow.Tests`). Missing docs are build errors.
+- **XML doc comments on every public type and member in the `Workflow` project** are the house convention and every existing file follows it. They are *not* enforced: `Workflow/.roslyn` sets `GenerateDocumentationFile` but also `NoWarn;1591`, so a missing comment is not a build error. Write them anyway - a file that omits them will stand out in review, and `<inheritdoc />` covers interface implementations.
 - **`UseWPF=true` strips `System.IO` from implicit usings.** Any file touching `Path`, `File` or `Directory` needs an explicit `using System.IO;`.
 - **All user-facing strings are German**, without umlauts in new message text where the existing code avoids them (see `ArtifactWatcher`'s `"Die Ueberwachung …"`). UI labels that already exist in English (`"Start workflow"`) stay English.
 - **Artefact paths may only come from `TaskPaths`.** Never compose `W\T\<something>.md` by hand anywhere else.
@@ -47,6 +48,7 @@ paths:
 |---|---|
 | `Workflow/Models/TaskState.cs` | `TaskState` + `TaskPhaseState` — the journal's shape and its schema version. |
 | `Workflow/Models/RecoverableTask.cs` | `RecoverableTask` — one scan hit: paths, state, resume phase. |
+| `Workflow/Models/PhaseReconciliation.cs` | The demote-never-promote rule and the resume-phase lookup, shared by the startup scan and the tab's re-arm path. |
 | `Workflow/Services/ITaskStateStore.cs` | Journal read/write contract. |
 | `Workflow/Services/TaskStateStore.cs` | Journal implementation: atomic write, never throws, normalises `Phases`. |
 | `Workflow/Services/ITaskRecoveryScanner.cs` | Startup scan contract. |
@@ -544,7 +546,19 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Produces:
   - `public sealed record TaskPhaseState(WorkflowPhase Phase, PhaseStatus Status, DateTimeOffset? CompletedUtc);`
   - `public sealed class TaskState` with `int Version`, `string TaskDescription`, `DateTimeOffset CreatedUtc`, `DateTimeOffset UpdatedUtc`, `bool Dismissed`, `Collection<TaskPhaseState> Phases`, and `public const int CurrentVersion = 1;`
-  - `public interface ITaskStateStore` with `TaskState? TryLoad(TaskPaths paths)`, `void SaveDescription(TaskPaths paths, string taskDescription)`, `void RecordPhase(TaskPaths paths, WorkflowPhase phase, PhaseStatus status)`, `void SetDismissed(TaskPaths paths, bool dismissed)`.
+  - `public interface ITaskStateStore` with `TaskState? TryLoad(TaskPaths paths)`, `void SaveDescription(TaskPaths paths, string taskDescription)`, `void RecordPhase(TaskPaths paths, WorkflowPhase phase, PhaseStatus status)`, `void ReplacePhases(TaskPaths paths, IReadOnlyList<TaskPhaseState> phases)`, `void SetDismissed(TaskPaths paths, bool dismissed)`.
+
+**Two things here are easy to get wrong and are called out because a test pins each:**
+
+1. **The journal is read through a tolerant DTO, never straight into `TaskState`.** With
+   `JsonStringEnumConverter` on the read path, a single `"phase": "Nonsense"` throws
+   `JsonException`, `TryLoad` returns `null`, and the whole task disappears from recovery - so the
+   normaliser never runs and SPEC §5.4/R3 is simply not implemented. Reading goes through
+   `TaskStateDto`, whose `phase` and `status` are `string?`; unmappable entries are dropped one by
+   one (SPEC §5.2, D19).
+2. **`ReplacePhases` exists for one caller**: the reconciliation of SPEC §6.3.1 must be *durable*,
+   or a resumed run leaves the demoted later phases marked `Completed` on disk and the next crash
+   skips them. It is the only mutator that does **not** stamp `UpdatedUtc`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -703,13 +717,95 @@ public sealed class TaskStateStoreTests : IDisposable
     }
 
     [Fact]
-    public void SaveDescription_TaskDirectoryMissing_DoesNotThrow()
+    public void TryLoad_UnknownPhaseName_DropsThatEntryAndKeepsTheRest()
+    {
+        File.WriteAllText(_paths.StateAbsolute, """
+        {
+          "version": 1,
+          "taskDescription": "d",
+          "phases": [
+            { "phase": "Specification", "status": "Completed", "completedUtc": "2026-09-14T09:00:00Z" },
+            { "phase": "Nonsense",      "status": "Completed", "completedUtc": null },
+            { "phase": "Review",        "status": "Completed", "completedUtc": "2026-09-14T10:00:00Z" }
+          ]
+        }
+        """);
+
+        var state = _store.TryLoad(_paths);
+
+        // The unknown entry must cost itself, not the journal (SPEC 5.2 / R3 / D19).
+        Assert.NotNull(state);
+        Assert.Equal("d", state.TaskDescription);
+        Assert.Equal(4, state.Phases.Count);
+        Assert.Equal(PhaseStatus.Completed, state.Phases[0].Status);
+        Assert.Equal(PhaseStatus.Completed, state.Phases[1].Status);
+        Assert.Equal(PhaseStatus.Pending, state.Phases[2].Status);
+        Assert.Equal(PhaseStatus.Pending, state.Phases[3].Status);
+    }
+
+    [Fact]
+    public void TryLoad_UnknownStatusName_DefaultsThatPhaseToPending()
+    {
+        File.WriteAllText(_paths.StateAbsolute, """
+        {
+          "version": 1,
+          "phases": [ { "phase": "Review", "status": "Halfway", "completedUtc": null } ]
+        }
+        """);
+
+        var state = _store.TryLoad(_paths);
+
+        Assert.NotNull(state);
+        Assert.Equal(4, state.Phases.Count);
+        Assert.All(state.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void ReplacePhases_OverwritesTheArrayAndLeavesUpdatedUtcAlone()
+    {
+        _store.SaveDescription(_paths, "d");
+        _store.RecordPhase(_paths, WorkflowPhase.Specification, PhaseStatus.Completed);
+        _store.RecordPhase(_paths, WorkflowPhase.Review, PhaseStatus.Completed);
+
+        var before = _store.TryLoad(_paths)!.UpdatedUtc;
+
+        _store.ReplacePhases(
+            _paths,
+            [.. PhaseCatalog.All.Select(d => new TaskPhaseState(d.Phase, PhaseStatus.Pending, null))]);
+
+        var after = _store.TryLoad(_paths)!;
+
+        Assert.All(after.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+        Assert.All(after.Phases, p => Assert.Null(p.CompletedUtc));
+        Assert.Equal("d", after.TaskDescription);
+
+        // A reconciliation records what the disk already said; it is not progress, so it must not
+        // slide the task forward inside the 14-day recovery window (SPEC 5.4, 6.3.1).
+        Assert.Equal(before, after.UpdatedUtc);
+    }
+
+    [Fact]
+    public void ReplacePhases_NoJournal_IsANoOp()
+    {
+        _store.ReplacePhases(
+            _paths,
+            [.. PhaseCatalog.All.Select(d => new TaskPhaseState(d.Phase, PhaseStatus.Pending, null))]);
+
+        Assert.False(File.Exists(_paths.StateAbsolute));
+    }
+
+    [Fact]
+    public void SaveDescription_TaskDirectoryMissing_RecreatesItAndTheJournal()
     {
         Directory.Delete(_paths.TaskDirectory, recursive: true);
 
         _store.SaveDescription(_paths, "d");
 
-        Assert.Null(_store.TryLoad(_paths));
+        // Save calls Directory.CreateDirectory, so the contract is "does not throw AND recreates".
+        // Asserting Null here would contradict the implementation below; the assertion and the
+        // implementation are chosen together, up front, not reconciled after a red test.
+        Assert.NotNull(_store.TryLoad(_paths));
+        Assert.Equal("d", _store.TryLoad(_paths)!.TaskDescription);
     }
 }
 ```
@@ -808,6 +904,21 @@ public interface ITaskStateStore
     /// <param name="status">The new status.</param>
     public void RecordPhase(TaskPaths paths, WorkflowPhase phase, PhaseStatus status);
 
+    /// <summary>
+    /// Overwrites the whole phase array with <paramref name="phases"/>, normalised. A no-op when
+    /// there is no journal, and the one mutator that leaves <c>UpdatedUtc</c> untouched.
+    /// </summary>
+    /// <param name="paths">The task's path set.</param>
+    /// <param name="phases">The reconciled phases; order and length are normalised.</param>
+    /// <remarks>
+    /// Exists so that the demote-never-promote reconciliation of SPEC section 6.3 is durable.
+    /// <c>RecordPhase</c> touches one entry, so a resumed run would otherwise leave the demoted
+    /// LATER phases marked Completed on disk and the next crash would skip them. The timestamp is
+    /// deliberately not stamped: a reconciliation records what the disk already said, and bumping
+    /// it would keep a task inside the 14-day recovery window purely because a file was deleted.
+    /// </remarks>
+    public void ReplacePhases(TaskPaths paths, IReadOnlyList<TaskPhaseState> phases);
+
     /// <summary>Sets or clears the dismissed flag. A no-op when there is no journal.</summary>
     /// <param name="paths">The task's path set.</param>
     /// <param name="dismissed">The new value.</param>
@@ -831,13 +942,22 @@ namespace Workflow.Services;
 /// <inheritdoc cref="ITaskStateStore" />
 public sealed class TaskStateStore : ITaskStateStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    // Enums as strings and camelCase property names, so the file on disk is exactly the shape
+    // SPEC section 5.2 documents and a future reordering of WorkflowPhase cannot silently
+    // reinterpret an old journal.
+    private static readonly JsonSerializerOptions WriteOptions = new()
     {
         WriteIndented = true,
-        PropertyNameCaseInsensitive = true,
-        // Strings, not ordinals: reordering WorkflowPhase must never silently reinterpret an
-        // existing journal.
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         Converters = { new JsonStringEnumConverter() },
+    };
+
+    // No JsonStringEnumConverter on the READ path: see the remark on TryLoad.
+    private static readonly JsonSerializerOptions ReadOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
     };
 
     /// <inheritdoc />
@@ -852,16 +972,30 @@ public sealed class TaskStateStore : ITaskStateStore
                 return null;
             }
 
-            var state = JsonSerializer.Deserialize<TaskState>(
-                File.ReadAllText(paths.StateAbsolute), JsonOptions);
+            // Deliberately NOT Deserialize<TaskState>. JsonStringEnumConverter throws
+            // JsonException on a string it cannot map to an enum member, so ONE hand-edited
+            // "phase": "Nonsense" would make this method return null and hide the whole task -
+            // and the normaliser below would never run. The DTO keeps phase and status as
+            // strings so an unmappable entry can be dropped on its own (SPEC 5.2, R3, D19).
+            var dto = JsonSerializer.Deserialize<TaskStateDto>(
+                File.ReadAllText(paths.StateAbsolute), ReadOptions);
 
-            if (state is null || state.Version > TaskState.CurrentVersion)
+            if (dto is null || dto.Version > TaskState.CurrentVersion)
             {
                 return null;
             }
 
-            state.Phases = Normalise(state.Phases);
-            return state;
+            return new TaskState
+            {
+                // A journal written before the version field existed reads as 0; treat it as this
+                // build's schema rather than as a downgrade.
+                Version = dto.Version > 0 ? dto.Version : TaskState.CurrentVersion,
+                TaskDescription = dto.TaskDescription ?? string.Empty,
+                CreatedUtc = dto.CreatedUtc,
+                UpdatedUtc = dto.UpdatedUtc,
+                Dismissed = dto.Dismissed,
+                Phases = Normalise(dto.Phases?.Select(ToPhaseState)),
+            };
         }
         catch (JsonException)
         {
@@ -910,6 +1044,24 @@ public sealed class TaskStateStore : ITaskStateStore
     }
 
     /// <inheritdoc />
+    public void ReplacePhases(TaskPaths paths, IReadOnlyList<TaskPhaseState> phases)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(phases);
+
+        var state = TryLoad(paths);
+        if (state is null)
+        {
+            // Nothing on disk to correct. Creating a journal here would invent a task that the
+            // scan has never seen.
+            return;
+        }
+
+        state.Phases = Normalise(phases);
+        Save(paths, state, stampUpdated: false);
+    }
+
+    /// <inheritdoc />
     public void SetDismissed(TaskPaths paths, bool dismissed)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -930,16 +1082,34 @@ public sealed class TaskStateStore : ITaskStateStore
         Phases = Normalise([]),
     };
 
+    // One journal entry, as it appears on disk. Enum.TryParse also accepts a NUMERIC string, so
+    // every parse is followed by Enum.IsDefined - otherwise "phase": "7" would sail through as
+    // (WorkflowPhase)7 and blow up the (int)-indexed callers downstream.
+    private static TaskPhaseState? ToPhaseState(TaskPhaseStateDto? entry)
+    {
+        if (entry is null
+            || !Enum.TryParse<WorkflowPhase>(entry.Phase, ignoreCase: true, out var phase)
+            || !Enum.IsDefined(phase)
+            || !Enum.TryParse<PhaseStatus>(entry.Status, ignoreCase: true, out var status)
+            || !Enum.IsDefined(status))
+        {
+            // Unknown or misspelled name: drop this entry and keep the rest of the journal.
+            return null;
+        }
+
+        return new TaskPhaseState(phase, status, entry.CompletedUtc);
+    }
+
     // A journal may be hand-edited, truncated, or written by an older build. Everything
     // downstream indexes Phases by (int)WorkflowPhase, so the array is rebuilt to exactly the
     // four catalogue phases in order before anyone sees it.
-    private static Collection<TaskPhaseState> Normalise(IEnumerable<TaskPhaseState>? existing)
+    private static Collection<TaskPhaseState> Normalise(IEnumerable<TaskPhaseState?>? existing)
     {
         var byPhase = new Dictionary<WorkflowPhase, TaskPhaseState>();
 
         foreach (var entry in existing ?? [])
         {
-            if (entry is not null && Enum.IsDefined(entry.Phase))
+            if (entry is not null)
             {
                 byPhase[entry.Phase] = entry;
             }
@@ -959,9 +1129,12 @@ public sealed class TaskStateStore : ITaskStateStore
 
     // Mirrors SettingsService.Save: a journal write that fails must never take down a live
     // workflow run. Only recovery is degraded.
-    private static void Save(TaskPaths paths, TaskState state)
+    private static void Save(TaskPaths paths, TaskState state, bool stampUpdated = true)
     {
-        state.UpdatedUtc = DateTimeOffset.UtcNow;
+        if (stampUpdated || state.UpdatedUtc == default)
+        {
+            state.UpdatedUtc = DateTimeOffset.UtcNow;
+        }
 
         if (state.CreatedUtc == default)
         {
@@ -973,7 +1146,7 @@ public sealed class TaskStateStore : ITaskStateStore
         try
         {
             Directory.CreateDirectory(paths.TaskDirectory);
-            File.WriteAllText(temporary, JsonSerializer.Serialize(state, JsonOptions));
+            File.WriteAllText(temporary, JsonSerializer.Serialize(state, WriteOptions));
             File.Move(temporary, paths.StateAbsolute, overwrite: true);
         }
         catch (IOException)
@@ -1005,10 +1178,39 @@ public sealed class TaskStateStore : ITaskStateStore
             // Nothing further can be done.
         }
     }
+
+    // The READ shape. Deliberately not TaskState: every field is as permissive as the file can
+    // be, so a single bad entry costs itself and nothing else (SPEC 5.2).
+    private sealed class TaskStateDto
+    {
+        public int Version { get; set; }
+
+        public string? TaskDescription { get; set; }
+
+        public DateTimeOffset CreatedUtc { get; set; }
+
+        public DateTimeOffset UpdatedUtc { get; set; }
+
+        public bool Dismissed { get; set; }
+
+        public List<TaskPhaseStateDto?>? Phases { get; set; }
+    }
+
+    private sealed class TaskPhaseStateDto
+    {
+        public string? Phase { get; set; }
+
+        public string? Status { get; set; }
+
+        public DateTimeOffset? CompletedUtc { get; set; }
+    }
 }
 ```
 
-Note on `SaveDescription_TaskDirectoryMissing_DoesNotThrow`: `Save` calls `Directory.CreateDirectory`, so the directory is recreated and `TryLoad` will find a journal. If the test as written fails on that last assertion, change it to `Assert.NotNull(_store.TryLoad(_paths));` — the behaviour under test is "does not throw", and recreating the folder is the right outcome.
+`List<T>` is legal on both DTOs: `CA1002` only fires on **public** members, and these are private
+nested classes. `WriteOptions` sets `JsonNamingPolicy.CamelCase` so the file on disk matches the
+JSON sample in SPEC §5.2 verbatim; `ReadOptions` is case-insensitive, so a journal written by any
+earlier build still loads.
 
 - [ ] **Step 6: Run the tests and confirm they pass**
 
@@ -1063,6 +1265,8 @@ public sealed class FakeTaskStateStore : ITaskStateStore
 
     public Collection<(string Directory, bool Dismissed)> Dismissals { get; } = [];
 
+    public Collection<(string Directory, IReadOnlyList<TaskPhaseState> Phases)> Replacements { get; } = [];
+
     // Every method guards its argument. AnalysisMode=All applies to this project too, so CA1062
     // is an error wherever a public method dereferences a parameter it did not null-check.
     public TaskState? TryLoad(TaskPaths paths)
@@ -1092,6 +1296,27 @@ public sealed class FakeTaskStateStore : ITaskStateStore
         state.Phases[(int)phase] = new TaskPhaseState(
             phase, status, status == PhaseStatus.Completed ? DateTimeOffset.UtcNow : null);
         _states[paths.TaskDirectory] = state;
+    }
+
+    public void ReplacePhases(TaskPaths paths, IReadOnlyList<TaskPhaseState> phases)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(phases);
+
+        Replacements.Add((paths.TaskDirectory, phases));
+
+        var state = TryLoad(paths);
+        if (state is null)
+        {
+            // Mirrors the real store: no journal, nothing to correct.
+            return;
+        }
+
+        state.Phases.Clear();
+        foreach (var entry in phases)
+        {
+            state.Phases.Add(entry);
+        }
     }
 
     public void SetDismissed(TaskPaths paths, bool dismissed)
@@ -1150,6 +1375,46 @@ In `Workflow.Tests/WorkflowOrchestratorTests.cs`, add a field `private readonly 
         Assert.DoesNotContain(_progress, p => p.Phase == WorkflowPhase.Specification);
         Assert.DoesNotContain(_progress, p => p.Phase == WorkflowPhase.Review);
         Assert.Single(terminal.StartedSessions);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_ClearsTheJournalTailFromTheStartPhaseBeforeRunning()
+    {
+        // A previously finished task, re-entered at phase 3.
+        var finished = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            finished.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        }
+
+        _state.Seed(_paths, finished);
+
+        using var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+
+        var request = CreateRequest(terminal, signal) with { StartPhase = WorkflowPhase.ResolveReview };
+
+        using var cts = new CancellationTokenSource();
+        var run = CreateOrchestrator().RunAsync(request, cts.Token);
+
+        await WaitForPhaseAsync(WorkflowPhase.ResolveReview);
+
+        var journal = _state.TryLoad(_paths)!;
+
+        // Phases before the start phase keep their record - they are the resumed run's only
+        // evidence that they happened.
+        Assert.Equal(PhaseStatus.Completed, journal.Phases[0].Status);
+        Assert.Equal(PhaseStatus.Completed, journal.Phases[1].Status);
+
+        // The tail was cleared before anything ran; phase 3 is Active because it is running now
+        // and phase 4 must NOT still read Completed (SPEC 7.4, D24).
+        Assert.Equal(PhaseStatus.Active, journal.Phases[2].Status);
+        Assert.Equal(PhaseStatus.Pending, journal.Phases[3].Status);
+        Assert.Null(journal.Phases[3].CompletedUtc);
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
@@ -1219,6 +1484,39 @@ In `Workflow/Services/WorkflowOrchestrator.cs`:
         }
 ```
 
+- still in `RunAsync`, after that validation and **before** the loop, clear the journal's tail:
+
+```csharp
+        // The journal must never claim a phase is complete that THIS run has not run. Re-running
+        // a finished task would otherwise leave phases 2-4 marked Completed until the run reaches
+        // them, so a crash during phase 1 recovers a tab with three phases painted green; and a
+        // crash in the microsecond gap between RecordPhase(N, Completed) and
+        // RecordPhase(N+1, Active) could let the next recovery skip N+1 (SPEC section 7.4, D24).
+        ClearPhasesFrom(request.Paths, request.StartPhase);
+```
+
+and add the helper:
+
+```csharp
+    private void ClearPhasesFrom(TaskPaths paths, WorkflowPhase startPhase)
+    {
+        var existing = _state.TryLoad(paths);
+        if (existing is null)
+        {
+            // No journal yet - nothing to correct. The first RecordPhase will create it.
+            return;
+        }
+
+        // Phases BEFORE the start phase are left exactly as they are: on a resumed run their
+        // green indicators are the only record that they ever happened.
+        _state.ReplacePhases(
+            paths,
+            [.. existing.Phases.Select(entry => (int)entry.Phase < (int)startPhase
+                ? entry
+                : new TaskPhaseState(entry.Phase, PhaseStatus.Pending, null))]);
+    }
+```
+
 - change the loop to `foreach (var definition in PhaseCatalog.All.Skip((int)request.StartPhase))`
 - in `RunPhaseAsync`, pair each progress report with a journal write, **store first** (`Progress.Report` marshals to the UI thread; a busy dispatcher must not delay the durable write):
 
@@ -1282,7 +1580,15 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: `ITerminalController.OutputCount`, `ITerminalController.LastOutputUtc` (existing).
 - Produces:
   - `ITerminalController.SendPaste(string body)` — writes `BracketedPaste.Wrap(body)` and nothing else.
-  - `AutoAnswerRuleSet` gains `PasteQuietPeriodMs`, `PasteSettleTimeoutMs`, `SubmitVerifyMs`, `MaxSubmitAttempts`, all defaulted.
+  - `AutoAnswerRuleSet` gains `PasteQuietPeriodMs`, `PasteSettleTimeoutMs`, `SubmitVerifyMs`, `MaxSubmitAttempts`, all defaulted — **and the same four are added to the private `RuleSetDto` inside `AutoAnswerService` and passed to the constructor**, or the file's values never arrive (Step 3).
+
+**The quiet gate's baseline starts at the paste, not at `LastOutputUtc`.** `SettleAndAnswerAsync`
+runs immediately before `SendPromptAsync`, and its normal exit is reached *only after* Gate B has
+seen `now - LastOutputUtc >= QuietPeriodMs` (1500 ms shipped, nearly twice `pasteQuietPeriodMs`).
+So on entry `LastOutputUtc` is already stale past the paste quiet period: a gate that consults it
+alone breaks out on its first iteration and writes the CR before the paste echo has arrived —
+which is the bug this task exists to fix, reintroduced. Step 9 seeds the baseline at `SendPaste`
+and lets later output push it forward (SPEC §9.3, D20).
 
 - [ ] **Step 1: Write the failing config test**
 
@@ -1322,9 +1628,33 @@ Append to `Workflow.Tests/AutoAnswerServiceTests.cs`. The fixture already has a 
         var set = new AutoAnswerService(path, overridePath: null).RuleSet;
 
         Assert.Equal(10, set.PasteQuietPeriodMs);
+        Assert.Equal(200, set.PasteSettleTimeoutMs);
+        Assert.Equal(20, set.SubmitVerifyMs);
         Assert.Equal(3, set.MaxSubmitAttempts);
     }
+
+    [Fact]
+    public void RuleSet_SubmitFieldSetToZero_FallsBackToTheShippedDefault()
+    {
+        var path = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "pasteQuietPeriodMs": 0, "submitVerifyMs": -1, "maxSubmitAttempts": 0,
+          "rules": []
+        }
+        """);
+
+        var set = new AutoAnswerService(path, overridePath: null).RuleSet;
+
+        Assert.Equal(800, set.PasteQuietPeriodMs);
+        Assert.Equal(1500, set.SubmitVerifyMs);
+        Assert.Equal(2, set.MaxSubmitAttempts);
+    }
 ```
+
+`RuleSet_FileSetsTheSubmitFields_UsesThem` is the test that fails if the four fields are added to
+`AutoAnswerRuleSet` but not to `RuleSetDto` — assert on **all four**, not just two, so a partially
+wired DTO cannot pass.
 
 Note that `WriteRules` always writes the same file name inside the fixture's own temp directory. xUnit constructs a fresh fixture per `[Fact]`, so the two tests cannot collide.
 
@@ -1350,22 +1680,55 @@ public sealed record AutoAnswerRuleSet(
     int MaxSubmitAttempts = 2);
 ```
 
-In `Workflow/Services/AutoAnswerService.cs`, at the end of `Load` (just before it returns the deserialised set), normalise. Do **not** rely on `System.Text.Json` honouring positional-parameter defaults for absent properties — normalising also protects against a user typing `0`:
+**The record is not what is deserialised, so the record alone changes nothing.** Read
+`AutoAnswerService.Load` before editing it: it deserialises a **private `RuleSetDto`** and then
+*constructs* `AutoAnswerRuleSet` positionally from that DTO's properties. A positional default on
+the record is therefore invisible to `System.Text.Json`, and a field that is not on the DTO can
+never be read out of the file at all — the version-2 values would be silently ignored and
+`RuleSet_FileSetsTheSubmitFields_UsesThem` would fail while `..._UsesTheDefaults` passed. Three
+edits are needed, in `Workflow/Services/AutoAnswerService.cs`:
+
+1. Add the four properties to `RuleSetDto`, with the shipped defaults as their initialisers (this
+   is the whole of the version-1 migration story — an override file that omits them deserialises
+   to these values):
 
 ```csharp
-        // A value of zero or less is either an absent property or a user typo; either way the
-        // shipped default is what the orchestrator needs. This makes the version-1 override files
-        // already in %APPDATA% work with no migration.
-        return set with
-        {
-            PasteQuietPeriodMs = set.PasteQuietPeriodMs > 0 ? set.PasteQuietPeriodMs : 800,
-            PasteSettleTimeoutMs = set.PasteSettleTimeoutMs > 0 ? set.PasteSettleTimeoutMs : 15000,
-            SubmitVerifyMs = set.SubmitVerifyMs > 0 ? set.SubmitVerifyMs : 1500,
-            MaxSubmitAttempts = set.MaxSubmitAttempts > 0 ? set.MaxSubmitAttempts : 2,
-        };
+        [JsonPropertyName("pasteQuietPeriodMs")]
+        public int PasteQuietPeriodMs { get; set; } = 800;
+
+        [JsonPropertyName("pasteSettleTimeoutMs")]
+        public int PasteSettleTimeoutMs { get; set; } = 15000;
+
+        [JsonPropertyName("submitVerifyMs")]
+        public int SubmitVerifyMs { get; set; } = 1500;
+
+        [JsonPropertyName("maxSubmitAttempts")]
+        public int MaxSubmitAttempts { get; set; } = 2;
 ```
 
-Apply the same normalisation to the fallback set the method returns when the file is missing or invalid, so every code path yields usable values.
+2. Pass them to the constructor and clamp each one there. A value of zero or less is either a
+   `0` typed into the file or a nonsense duration; either way the shipped default is what the
+   orchestrator needs:
+
+```csharp
+        return new AutoAnswerRuleSet(
+            dto.Version,
+            dto.QuietPeriodMs,
+            dto.SettleTimeoutMs,
+            dto.MaxAnswersPerPhase,
+            rules,
+            dto.PasteQuietPeriodMs > 0 ? dto.PasteQuietPeriodMs : 800,
+            dto.PasteSettleTimeoutMs > 0 ? dto.PasteSettleTimeoutMs : 15000,
+            dto.SubmitVerifyMs > 0 ? dto.SubmitVerifyMs : 1500,
+            dto.MaxSubmitAttempts > 0 ? dto.MaxSubmitAttempts : 2);
+```
+
+3. Nothing else. **There is no fallback rule set in `Load`** — the earlier draft of this plan told
+   you to normalise one, and it does not exist. `File.ReadAllText` propagates, a `JsonException`
+   propagates, and a `null` document becomes `InvalidOperationException`; a missing or malformed
+   *shipped* `Assetsutoanswer.rules.json` is a broken deployment, not a user state, and that
+   pre-existing behaviour is deliberately left alone (SPEC §9.4). Do **not** introduce a fallback
+   set as part of this task.
 
 In `Workflow/Assets/autoanswer.rules.json`, bump the version and add the fields above `"rules"`:
 
@@ -1436,6 +1799,66 @@ Then add:
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
     }
 
+    [Fact]
+    public async Task RunAsync_PasteEchoArrivesAfterSendPasteReturns_DoesNotSubmitBeforeIt()
+    {
+        using var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+
+        // The PTY echoes the bracketed-paste block only 80 ms after SendPaste has returned, and
+        // the launcher answers the CR. The quiet period is longer than the echo delay, so a
+        // correct gate must still be waiting when that echo lands.
+        terminal.PasteEchoDelay = TimeSpan.FromMilliseconds(80);
+        terminal.EmitOutputOnNextCarriageReturn = true;
+
+        var orchestrator = CreateOrchestratorWithRules("""
+        {
+          "version": 2, "quietPeriodMs": 10, "settleTimeoutMs": 300, "maxAnswersPerPhase": 3,
+          "pasteQuietPeriodMs": 300, "pasteSettleTimeoutMs": 3000,
+          "submitVerifyMs": 20, "maxSubmitAttempts": 2,
+          "rules": []
+        }
+        """);
+
+        using var cts = new CancellationTokenSource();
+        var run = orchestrator.RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        await WaitUntilAsync(() => terminal.Sent.Contains("\r"));
+
+        // The whole point: by the time the first carriage return was written, the paste echo had
+        // already been seen. A gate reading LastOutputUtc alone writes it while OutputCount is
+        // still 0, because SettleAndAnswerAsync only ever returns once that timestamp is already
+        // stale past the paste quiet period (SPEC section 9.3, D20).
+        var firstCr = terminal.Sent
+            .Select((text, index) => (text, index))
+            .First(entry => entry.text == "\r")
+            .index;
+
+        Assert.True(
+            terminal.OutputCountAtSend[firstCr] >= 1,
+            "The submitting CR was written before the paste echo arrived.");
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    // The fixture's single rules file is shared by every test in the class; this one needs its
+    // own timings, so it gets its own file.
+    private WorkflowOrchestrator CreateOrchestratorWithRules(string json)
+    {
+        var path = Path.Combine(_root, "rules-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, json);
+
+        return new WorkflowOrchestrator(
+            new PromptTemplateService(_promptDir),
+            new AutoAnswerService(path, overridePath: null),
+            new ArtifactWatcherFactory(),
+            _state,
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromMilliseconds(40));
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(10);
@@ -1463,7 +1886,32 @@ In `Workflow.Tests/Fakes/FakeTerminalController.cs`, replace `SendPasteAsync` an
     /// <summary>When true, a bare carriage return produces output, as a live launcher would.</summary>
     public bool EmitOutputOnNextCarriageReturn { get; set; }
 
-    public void SendPaste(string body) => Pasted.Add(body);
+    /// <summary>
+    /// When set, SendPaste schedules one chunk of output after this delay instead of producing
+    /// none, mimicking the PTY echoing the bracketed-paste block back asynchronously.
+    /// </summary>
+    public TimeSpan PasteEchoDelay { get; set; }
+
+    /// <summary>OutputCount as it stood when each entry of <see cref="Sent"/> was written.</summary>
+    public Collection<long> OutputCountAtSend { get; } = [];
+
+    public void SendPaste(string body)
+    {
+        Pasted.Add(body);
+
+        if (PasteEchoDelay <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        // Deliberately fire-and-forget. The production PTY echo arrives well after SendPaste has
+        // returned, and that asynchrony is exactly what the paste-gate test needs to reproduce.
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(PasteEchoDelay);
+            EmitOutput();
+        });
+    }
 ```
 
 and change `Send` to:
@@ -1471,6 +1919,9 @@ and change `Send` to:
 ```csharp
     public void Send(string text)
     {
+        // Captured BEFORE any emission, so a test can ask what the terminal had produced at the
+        // moment this write happened.
+        OutputCountAtSend.Add(OutputCount);
         Sent.Add(text);
 
         if (EmitOutputOnNextCarriageReturn && text == "\r")
@@ -1552,6 +2003,14 @@ and add the method:
 
         terminal.SendPaste(prompt);
 
+        // The baseline the quiet gate measures from. It MUST start here and not at
+        // terminal.LastOutputUtc: SettleAndAnswerAsync returns precisely because the screen has
+        // been quiet for QuietPeriodMs (1500 ms shipped), so LastOutputUtc is already older than
+        // PasteQuietPeriodMs on entry. Reading it alone satisfies the gate on the first iteration
+        // and writes the CR before the PTY has even echoed the paste - the exact early-submit
+        // failure this method exists to remove (SPEC section 9.3).
+        var quietSince = DateTimeOffset.UtcNow;
+
         var quietPeriod = TimeSpan.FromMilliseconds(configuration.PasteQuietPeriodMs);
         var ceiling = Stopwatch.StartNew();
 
@@ -1559,7 +2018,14 @@ and add the method:
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (DateTimeOffset.UtcNow - terminal.LastOutputUtc >= quietPeriod)
+            // Output arriving after the paste pushes the baseline forward, so a slow launcher and
+            // a chatty one are handled by the same expression.
+            if (terminal.LastOutputUtc > quietSince)
+            {
+                quietSince = terminal.LastOutputUtc;
+            }
+
+            if (DateTimeOffset.UtcNow - quietSince >= quietPeriod)
             {
                 break;
             }
@@ -1612,16 +2078,34 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **Files:**
 - Create: `Workflow/Models/RecoverableTask.cs`
+- Create: `Workflow/Models/PhaseReconciliation.cs`
 - Create: `Workflow/Services/ITaskRecoveryScanner.cs`
 - Create: `Workflow/Services/TaskRecoveryScanner.cs`
 - Create: `Workflow.Tests/TaskRecoveryScannerTests.cs`
 
 **Interfaces:**
-- Consumes: `ITaskStateStore` (Task 5), `ISettingsService` (existing), `TaskPaths` (Task 1).
+- Consumes: `ITaskStateStore` (Task 5, including `ReplacePhases`), `ISettingsService` (existing), `TaskPaths` (Task 1).
 - Produces:
   - `public sealed record RecoverableTask(TaskPaths Paths, TaskState State, WorkflowPhase ResumePhase);`
+  - `public static class PhaseReconciliation` with `bool Reconcile(TaskPaths paths, TaskState state)` and `WorkflowPhase? FirstIncomplete(TaskState state)`.
   - `public interface ITaskRecoveryScanner { public Task<IReadOnlyList<RecoverableTask>> ScanAsync(CancellationToken cancellationToken); }`
   - `TaskRecoveryScanner(ISettingsService settings, ITaskStateStore store, TimeSpan maxAge, int maxTasks, int maxSubdirectoriesPerRoot, TimeSpan scanTimeout)`
+
+**Three things in this task are structural, not cosmetic:**
+
+1. **The reconciliation is a shared public helper, not a private method on the scanner.** Task 9's
+   re-arm path (SPEC §6.6) reads the same journals from a fresh tab and needs the identical rule;
+   two copies would be free to disagree, and an unreconciled re-arm resumes straight into a phase
+   whose inputs have been deleted (SPEC §6.3.2, D18).
+2. **A demotion is written back to the journal immediately.** `RecordPhase` touches one entry, so
+   a resumed run leaves the demoted *later* phases still marked `Completed` on disk; one more
+   crash and recovery skips them (SPEC §6.3.1, D17). The regression test for that two-crash
+   sequence is in Step 1 and it fails against an in-memory-only reconciliation.
+3. **The 5-second ceiling is enforced on the awaiting side, over a thread-safe accumulator, and
+   the MRU is snapshotted on the caller's thread.** A cancellation token cannot interrupt
+   `Directory.Exists` or the first `MoveNext` of `EnumerateDirectories`, and
+   `SettingsService.AddRecentDirectory` mutates the live `Collection<string>` from the UI thread
+   while the scan runs (SPEC §6.2, D21, D22).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1821,6 +2305,105 @@ public sealed class TaskRecoveryScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task ScanAsync_Demotion_IsPersistedWithoutTouchingUpdatedUtc()
+    {
+        var workspace = NewWorkspace("ws");
+        var paths = SeedTask(workspace, "alpha", (WorkflowPhase.Specification, PhaseStatus.Completed));
+
+        File.Delete(paths.PlanAbsolute);
+        var before = _store.TryLoad(paths)!.UpdatedUtc;
+
+        await Create().ScanAsync(CancellationToken.None);
+
+        var onDisk = _store.TryLoad(paths)!;
+
+        Assert.All(onDisk.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+
+        // A reconciliation records what the disk already said. Stamping UpdatedUtc would keep the
+        // task inside the 14-day window purely because a file was deleted (SPEC 5.4, 6.3.1).
+        Assert.Equal(before, onDisk.UpdatedUtc);
+    }
+
+    [Fact]
+    public async Task ScanAsync_ADemotedTailIsNotResurrectedByASecondCrash()
+    {
+        var workspace = NewWorkspace("ws");
+        var paths = SeedTask(
+            workspace,
+            "alpha",
+            (WorkflowPhase.Specification, PhaseStatus.Completed),
+            (WorkflowPhase.Review, PhaseStatus.Completed),
+            (WorkflowPhase.ResolveReview, PhaseStatus.Completed));
+
+        // The plan artefact disappears, so phase 1 - and therefore 2, 3 and 4 - is demoted.
+        File.Delete(paths.PlanAbsolute);
+
+        var first = Assert.Single(await Create().ScanAsync(CancellationToken.None));
+        Assert.Equal(WorkflowPhase.Specification, first.ResumePhase);
+
+        // The resumed run finishes phase 1, then the app dies again. RecordPhase touches ONLY
+        // phase 1, so everything after it must already have been cleared on disk by the scan.
+        File.WriteAllText(paths.PlanAbsolute, "plan");
+        _store.RecordPhase(paths, WorkflowPhase.Specification, PhaseStatus.Completed);
+
+        var second = Assert.Single(await Create().ScanAsync(CancellationToken.None));
+
+        // T-review.md is still on disk, so nothing demotes phase 2 this time round. Had the first
+        // scan reconciled in memory only, the journal would still claim phases 2 and 3 are
+        // Completed and this would read Implementation - silently skipping two phases
+        // (SPEC 6.3.1, R13, D17).
+        Assert.Equal(WorkflowPhase.Review, second.ResumePhase);
+    }
+
+    [Fact]
+    public async Task ScanAsync_BudgetAlreadyExpired_ReturnsAListWithoutThrowing()
+    {
+        var workspace = NewWorkspace("ws");
+        SeedTask(workspace, "alpha");
+
+        var scanner = new TaskRecoveryScanner(
+            _settings, _store, TimeSpan.FromDays(14), 5, 2000, TimeSpan.Zero);
+
+        // The contract is a partial list - never an exception, never a cancelled task.
+        Assert.NotNull(await scanner.ScanAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ScanAsync_TokenAlreadyCancelled_ReturnsAListWithoutThrowing()
+    {
+        var workspace = NewWorkspace("ws");
+        SeedTask(workspace, "alpha");
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        // This is why the worker is started with CancellationToken.None: Task.Run would otherwise
+        // hand back a cancelled task instead of the promised partial list.
+        Assert.NotNull(await Create().ScanAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task ScanAsync_MruMutatedWhileTheScanRuns_DoesNotFault()
+    {
+        var workspace = NewWorkspace("ws");
+        for (var i = 0; i < 40; i++)
+        {
+            SeedTask(workspace, $"task{i}");
+        }
+
+        var scan = Create().ScanAsync(CancellationToken.None);
+
+        // Exactly what the already-visible blank tab does when the user picks a directory while
+        // the startup scan is still running.
+        for (var i = 0; i < 40; i++)
+        {
+            _settings.AddRecentDirectory(Path.Combine(_root, $"extra{i}"));
+        }
+
+        Assert.NotNull(await scan);
+    }
+
+    [Fact]
     public async Task ScanAsync_PhaseThreeCompleted_IsNeverDemotedByDiskEvidence()
     {
         var workspace = NewWorkspace("ws");
@@ -1837,6 +2420,11 @@ public sealed class TaskRecoveryScannerTests : IDisposable
     }
 }
 ```
+
+`ScanAsync_MruMutatedWhileTheScanRuns_DoesNotFault` is a smoke test, and honestly so: the scan may
+finish before the mutations land. The guarantee is *structural* — the worker never sees the live
+collection — and this test exists to fail loudly on the obvious regression, not to prove the
+absence of the race.
 
 - [ ] **Step 2: Run the tests and confirm they fail**
 
@@ -1855,6 +2443,120 @@ namespace Workflow.Models;
 /// <param name="State">The journal, already reconciled against the artefacts on disk.</param>
 /// <param name="ResumePhase">The first phase that is not yet completed.</param>
 public sealed record RecoverableTask(TaskPaths Paths, TaskState State, WorkflowPhase ResumePhase);
+```
+
+Create `Workflow/Models/PhaseReconciliation.cs`:
+
+```csharp
+using System.IO;
+
+namespace Workflow.Models;
+
+/// <summary>
+/// The demote-never-promote rule that reconciles a workflow journal against the artefacts actually
+/// on disk, plus the resume-phase lookup that depends on it.
+/// </summary>
+/// <remarks>
+/// One shared helper rather than a private method on the scanner: the rule is needed by the
+/// startup scan AND by the re-arm path in <c>TaskTabViewModel.SyncFolder</c>, and two copies would
+/// be free to disagree. An unreconciled re-arm would resume straight into a phase whose inputs
+/// have been deleted, which is precisely what this rule exists to prevent (SPEC sections 6.3
+/// and 6.3.2).
+/// </remarks>
+public static class PhaseReconciliation
+{
+    /// <summary>
+    /// Demotes every phase whose recorded completion is no longer backed by its artefacts - and
+    /// every phase after it - to <see cref="PhaseStatus.Pending"/>.
+    /// </summary>
+    /// <param name="paths">The task's path set, used to locate the artefacts.</param>
+    /// <param name="state">The journal, reconciled in place.</param>
+    /// <returns>
+    /// True when at least one phase was demoted, so the caller can persist the corrected array
+    /// through <c>ITaskStateStore.ReplacePhases</c>. False means the journal already agreed with
+    /// the disk and nothing needs writing.
+    /// </returns>
+    /// <remarks>
+    /// Disk evidence may DEMOTE a phase; it may never promote one. Promotion would resurrect the
+    /// hazard where a folder that merely happens to hold a spec and a plan is reported as
+    /// "phase 1 done" for a task that never ran. Demotion is safe: it can only ever cause more
+    /// work to be re-run, never less.
+    /// </remarks>
+    public static bool Reconcile(TaskPaths paths, TaskState state)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(state);
+
+        var demoteFromHere = false;
+
+        for (var i = 0; i < state.Phases.Count; i++)
+        {
+            var entry = state.Phases[i];
+
+            if (!demoteFromHere
+                && entry.Status == PhaseStatus.Completed
+                && !ArtefactsPresent(paths, entry.Phase))
+            {
+                demoteFromHere = true;
+            }
+
+            if (demoteFromHere)
+            {
+                state.Phases[i] = new TaskPhaseState(entry.Phase, PhaseStatus.Pending, null);
+            }
+        }
+
+        // The flag can only have been set by a phase that WAS Completed, so it is exactly
+        // "something was demoted".
+        return demoteFromHere;
+    }
+
+    /// <summary>The first phase in catalogue order that is not completed.</summary>
+    /// <param name="state">The journal, already reconciled.</param>
+    /// <returns>That phase, or null when every phase is completed.</returns>
+    public static WorkflowPhase? FirstIncomplete(TaskState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+
+        foreach (var entry in state.Phases)
+        {
+            if (entry.Status != PhaseStatus.Completed)
+            {
+                return entry.Phase;
+            }
+        }
+
+        return null;
+    }
+
+    // ResolveReview is never demoted: its completion is baseline-relative and leaves no trace on
+    // disk, so the journal is the only evidence there is.
+    private static bool ArtefactsPresent(TaskPaths paths, WorkflowPhase phase) => phase switch
+    {
+        WorkflowPhase.Specification => NonEmpty(paths.SpecAbsolute) && NonEmpty(paths.PlanAbsolute),
+        WorkflowPhase.Review => NonEmpty(paths.ReviewAbsolute),
+        WorkflowPhase.Implementation => NonEmpty(paths.DoneAbsolute),
+        _ => true,
+    };
+
+    private static bool NonEmpty(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists && info.Length > 0;
+        }
+        catch (IOException)
+        {
+            // Unreadable is not the same as absent; do not demote on a transient lock.
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+}
 ```
 
 Create `Workflow/Services/ITaskRecoveryScanner.cs`:
@@ -1921,28 +2623,70 @@ public sealed class TaskRecoveryScanner : ITaskRecoveryScanner
     }
 
     /// <inheritdoc />
-    public Task<IReadOnlyList<RecoverableTask>> ScanAsync(CancellationToken cancellationToken) =>
-        Task.Run(() => Scan(cancellationToken), cancellationToken);
-
-    private IReadOnlyList<RecoverableTask> Scan(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RecoverableTask>> ScanAsync(CancellationToken cancellationToken)
     {
-        // A slow or disconnected MRU entry must be an inconvenience, not a hang: whatever has
-        // been collected when the ceiling is reached is what the user is offered.
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_scanTimeout);
+        // Copied HERE, on the CALLER's thread. MainWindowViewModel.InitialiseAsync runs on the
+        // dispatcher and the blank tab is already visible and usable, so AddRecentDirectory
+        // mutates this very Collection<string> from the UI thread while the scan runs.
+        // Enumerating the live collection on the worker faults the whole scan with
+        // InvalidOperationException the moment the user picks a directory (SPEC 6.2, D22, R16).
+        var roots = _settings.Settings.RecentDirectories.ToList();
 
-        var found = new List<RecoverableTask>();
+        // Appended to as hits are found, so the deadline snapshot below is never empty merely
+        // because one later MRU entry is slow.
+        var found = new ConcurrentQueue<RecoverableTask>();
+
+        var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        budget.CancelAfter(_scanTimeout);
+
+        // CancellationToken.None on purpose: handing the caller's token to Task.Run makes an
+        // already-cancelled caller produce a CANCELLED task instead of the partial list this
+        // method's contract promises.
+        var worker = Task.Run(() => Scan(roots, found, budget.Token), CancellationToken.None);
+
+        // The deadline is enforced HERE, not only inside the worker. Neither Directory.Exists nor
+        // the first MoveNext of Directory.EnumerateDirectories can observe a cancellation token -
+        // both block inside Win32/SMB - so on a disconnected share the worker can outlive the
+        // ceiling by however long the SMB client takes to give up. Waiting out here is what makes
+        // the five seconds a guarantee about ScanAsync rather than a hope (SPEC 6.2, D21, R5).
+        // No ConfigureAwait(false): Directory.Build.props NoWarns CA2007 precisely because
+        // continuations in this application are meant to resume on the UI thread, and the caller
+        // (MainWindowViewModel.InitialiseAsync) adds tabs to an ObservableCollection right after
+        // awaiting this method.
+        await Task.WhenAny(worker, Task.Delay(Timeout.InfiniteTimeSpan, budget.Token));
+
+        // A worker still stuck in that blocking call is abandoned, not awaited: it holds no
+        // disposable resource, it only ever enqueues, and nothing reads the queue after this
+        // snapshot.
+        var snapshot = found.ToArray();
+
+        // Disposed from the worker's continuation rather than here, or an abandoned worker could
+        // observe a disposed token.
+        _ = worker.ContinueWith(
+            _ => budget.Dispose(),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        return [.. snapshot.OrderByDescending(t => t.State.UpdatedUtc).Take(_maxTasks)];
+    }
+
+    private void Scan(
+        IReadOnlyList<string> roots,
+        ConcurrentQueue<RecoverableTask> found,
+        CancellationToken cancellationToken)
+    {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var cutoff = DateTimeOffset.UtcNow - _maxAge;
 
-        foreach (var root in _settings.Settings.RecentDirectories)
+        foreach (var root in roots)
         {
-            if (timeout.IsCancellationRequested)
+            if (cancellationToken.IsCancellationRequested)
             {
-                break;
+                return;
             }
 
-            foreach (var directory in EnumerateTaskFolders(root, timeout.Token))
+            foreach (var directory in EnumerateTaskFolders(root, cancellationToken))
             {
                 if (!seen.Add(directory))
                 {
@@ -1952,15 +2696,10 @@ public sealed class TaskRecoveryScanner : ITaskRecoveryScanner
                 var candidate = TryBuild(root, directory, cutoff);
                 if (candidate is not null)
                 {
-                    found.Add(candidate);
+                    found.Enqueue(candidate);
                 }
             }
         }
-
-        return found
-            .OrderByDescending(t => t.State.UpdatedUtc)
-            .Take(_maxTasks)
-            .ToList();
     }
 
     private IEnumerable<string> EnumerateTaskFolders(string root, CancellationToken cancellationToken)
@@ -2019,64 +2758,25 @@ public sealed class TaskRecoveryScanner : ITaskRecoveryScanner
             return null;
         }
 
-        Reconcile(paths, state);
-
-        var resume = state.Phases.FirstOrDefault(p => p.Status != PhaseStatus.Completed);
-        return resume is null ? null : new RecoverableTask(paths, state, resume.Phase);
-    }
-
-    // Disk evidence may DEMOTE a phase; it may never promote one. Promotion would resurrect the
-    // hazard where a folder that merely happens to hold a spec and a plan is reported as
-    // "phase 1 done" for a task that never ran. Phase 3 is never demoted: its completion is
-    // baseline-relative and leaves no trace on disk, so the journal is the only evidence.
-    private static void Reconcile(TaskPaths paths, TaskState state)
-    {
-        var demoteFromHere = false;
-
-        for (var i = 0; i < state.Phases.Count; i++)
+        // Written back at once when it demotes anything. RecordPhase touches a single entry, so a
+        // resumed run would otherwise leave the demoted LATER phases marked Completed on disk and
+        // the next crash would skip them - losing the "and every phase after it" half of the rule
+        // across one restart (SPEC 6.3.1, D17).
+        if (PhaseReconciliation.Reconcile(paths, state))
         {
-            var entry = state.Phases[i];
-
-            if (!demoteFromHere && entry.Status == PhaseStatus.Completed && !ArtefactsPresent(paths, entry.Phase))
-            {
-                demoteFromHere = true;
-            }
-
-            if (demoteFromHere)
-            {
-                state.Phases[i] = new TaskPhaseState(entry.Phase, PhaseStatus.Pending, null);
-            }
+            _store.ReplacePhases(paths, [.. state.Phases]);
         }
-    }
 
-    private static bool ArtefactsPresent(TaskPaths paths, WorkflowPhase phase) => phase switch
-    {
-        WorkflowPhase.Specification => NonEmpty(paths.SpecAbsolute) && NonEmpty(paths.PlanAbsolute),
-        WorkflowPhase.Review => NonEmpty(paths.ReviewAbsolute),
-        WorkflowPhase.Implementation => NonEmpty(paths.DoneAbsolute),
-        // ResolveReview leaves no disk trace; see the remark on Reconcile.
-        _ => true,
-    };
-
-    private static bool NonEmpty(string path)
-    {
-        try
-        {
-            var info = new FileInfo(path);
-            return info.Exists && info.Length > 0;
-        }
-        catch (IOException)
-        {
-            // Unreadable is not the same as absent; do not demote on a transient lock.
-            return true;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return true;
-        }
+        var resume = PhaseReconciliation.FirstIncomplete(state);
+        return resume is null ? null : new RecoverableTask(paths, state, resume.Value);
     }
 }
 ```
+
+The scanner's `using` block is `System.Collections.Concurrent`, `System.IO` and `Workflow.Models`
+- `System.IO` because `UseWPF` strips it from the implicit set, and `System.Collections.Concurrent`
+for the accumulator. The demote-never-promote rule itself now lives in `PhaseReconciliation`
+(above) and no longer has a private copy here.
 
 - [ ] **Step 5: Run the tests and confirm they pass**
 
@@ -2086,7 +2786,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add Workflow/Models/RecoverableTask.cs Workflow/Services/ITaskRecoveryScanner.cs Workflow/Services/TaskRecoveryScanner.cs Workflow.Tests/TaskRecoveryScannerTests.cs
+git add Workflow/Models/RecoverableTask.cs Workflow/Models/PhaseReconciliation.cs Workflow/Services/ITaskRecoveryScanner.cs Workflow/Services/TaskRecoveryScanner.cs Workflow.Tests/TaskRecoveryScannerTests.cs
 git commit -m "feat(recovery): scan the directory MRU for interrupted tasks
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
@@ -2112,6 +2812,24 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
   - `public void LoadForResume(RecoverableTask task)`
   - `public void NotifyClosedByUser()`
   - constructor: `TaskTabViewModel(ITaskFolderService folders, IWorkflowOrchestrator orchestrator, ISettingsService settings, ITaskStateStore stateStore, IDirectoryPickerService picker, TerminalViewModel terminal, TimeSpan folderDebounce, IReadOnlyList<string> startupErrors)` — `stateStore` inserted after `settings`.
+
+**The re-arm path has three requirements that are easy to miss, and each has a test in Step 1:**
+
+1. **It resets the indicators, not only the button.** SPEC §6.6 requires *both* the absent-journal
+   case and the already-complete case to put all four indicators back to `Pending`. Clearing only
+   `ResumePhase` leaves the previous folder's green phases painted onto a different one - reachable
+   by changing the *working directory*, since retyping the name renames the folder and carries its
+   journal along - and painting a complete journal leaves four green indicators above a button that
+   reads *Start workflow* (R15).
+2. **It reconciles against disk, using the shared `PhaseReconciliation` of Task 8.** Otherwise
+   typing the name of a task whose journal claims phase 1 is complete while `T_plan.md` is gone
+   resumes into phase 2 with no plan — the precise hazard SPEC §6.3 calls load-bearing
+   (SPEC §6.3.2, R14).
+3. **It is skipped when `IsRecovered` is true.** `StartWorkflow` calls `SyncFolder()` directly,
+   bypassing the `IsNameLocked` early-return in `ScheduleFolderSync` (that is how R12 recreates a
+   folder deleted between scan and *Continue*). Without the guard, that call would recompute
+   `ResumePhase` out of the journal microseconds before it is handed to the orchestrator as
+   `StartPhase`, and would repaint indicators the orchestrator is about to drive.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2236,6 +2954,126 @@ Append to `Workflow.Tests/TaskTabViewModelTests.cs` (and add `using Workflow.Tes
         Assert.Equal("Continue workflow", vm.StartButtonLabel);
     }
 
+    [Fact]
+    public void SwitchingToADirectoryWithoutAJournal_ClearsResumeAndRepaintsEveryIndicatorGrey()
+    {
+        var store = new FakeTaskStateStore();
+
+        var other = Path.Combine(_root, "other-workspace");
+        Directory.CreateDirectory(other);
+
+        var alpha = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(alpha.TaskDirectory);
+
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
+        store.Seed(alpha, state);
+
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[0].Status);
+        Assert.Equal(WorkflowPhase.Review, vm.ResumePhase);
+
+        // Same task NAME, different working directory - the case that actually reaches a
+        // different folder. (Retyping the name alone renames the folder and carries its journal
+        // along with it, so the resume state legitimately survives that.) The green indicator
+        // belonged to the old directory's alpha and would otherwise claim that this alpha's
+        // phase 1 is finished (SPEC 6.6, R15).
+        vm.WorkingDirectory = other;
+
+        Assert.Null(vm.ResumePhase);
+        Assert.Equal("Start workflow", vm.StartButtonLabel);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void TypingACompletedTaskName_ClearsResumeAndRepaintsEveryIndicatorGrey()
+    {
+        var store = new FakeTaskStateStore();
+        var paths = new TaskPaths(_root, "fertig");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            state.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        }
+
+        store.Seed(paths, state);
+
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "fertig";
+
+        // The button already reads 'Start workflow' because nothing is resumable. Four green
+        // indicators above it would paint an about-to-start run as already finished.
+        Assert.Null(vm.ResumePhase);
+        Assert.Equal("Start workflow", vm.StartButtonLabel);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void TypingATaskWhoseArtefactVanished_ReconcilesLikeTheStartupScan()
+    {
+        var store = new TaskStateStore();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        store.SaveDescription(paths, "d");
+        File.WriteAllText(paths.SpecAbsolute, "spec");
+        File.WriteAllText(paths.PlanAbsolute, "plan");
+        store.RecordPhase(paths, WorkflowPhase.Specification, PhaseStatus.Completed);
+
+        // The plan is gone, so phase 1 is no longer backed by its artefacts.
+        File.Delete(paths.PlanAbsolute);
+
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+
+        // Without the shared reconciliation this reads Review and resumes phase 2 with no plan
+        // on disk (SPEC 6.3.2, R14).
+        Assert.Equal(WorkflowPhase.Specification, vm.ResumePhase);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void StartWorkflow_OnARecoveredTab_DoesNotRecomputeResumePhase()
+    {
+        var store = new FakeTaskStateStore();
+        var orchestrator = new CapturingOrchestrator();
+        using var vm = Create(orchestrator: orchestrator, stateStore: store);
+
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        // The journal on disk still claims phases 1-3 are complete; the recovered tab was handed
+        // the reconciled view that demoted them. StartWorkflow calls SyncFolder directly, and the
+        // re-arm must not overwrite ResumePhase from that journal (SPEC 6.6).
+        var onDisk = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
+        store.Seed(paths, onDisk);
+
+        var reconciled = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            reconciled.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Pending, null));
+        }
+
+        vm.LoadForResume(new RecoverableTask(paths, reconciled, WorkflowPhase.Specification));
+        vm.StartWorkflowCommand.Execute(null);
+
+        Assert.NotNull(orchestrator.Request);
+        Assert.Equal(WorkflowPhase.Specification, orchestrator.Request.StartPhase);
+    }
+
     private sealed class CapturingOrchestrator : IWorkflowOrchestrator
     {
         public WorkflowRunRequest? Request { get; private set; }
@@ -2345,7 +3183,9 @@ and next to `Header`:
 
 - [ ] **Step 6: Re-arm Continue from `SyncFolder`, and dismiss on close**
 
-At the end of `SyncFolder()`, after the successful `_folders.EnsureCreated(paths); _folderOnDisk = paths.TaskName;` lines, add:
+In `SyncFolder()`, add the refresh on **both** successful exits — after the rename branch's
+`_folderOnDisk = paths.TaskName; InfoMessage = null;` and again after
+`_folders.EnsureCreated(paths); _folderOnDisk = paths.TaskName;`:
 
 ```csharp
             // Typing the name of an unfinished task - including one the user dismissed by closing
@@ -2354,25 +3194,71 @@ At the end of `SyncFolder()`, after the successful `_folders.EnsureCreated(paths
             RefreshResumeStateFromJournal(paths);
 ```
 
+**Both call sites, not just the second one.** The rename branch `return`s before the
+`EnsureCreated` lines are ever reached, so a single call at the end of the method leaves the
+postcondition holding on one path and not the other. On the rename path the result is normally
+*unchanged* — `TaskFolderService.Rename` moves the whole directory, journal included, so the
+journal at the new name is the same journal — and calling it there is what makes the
+postcondition uniform and statable:
+
+> After `SyncFolder` returns successfully, `ResumePhase` and the four indicators reflect the
+> journal in the folder that is now on disk.
+
 and add:
 
 ```csharp
+    // SPEC section 6.6. Two outcomes only: a resumable journal paints the indicators and sets
+    // ResumePhase, and anything else - no journal, or a finished one - resets BOTH.
     private void RefreshResumeStateFromJournal(TaskPaths paths)
     {
+        // A recovered tab's resume state came from LoadForResume and must not be recomputed.
+        // StartWorkflow calls SyncFolder directly, bypassing the IsNameLocked guard in
+        // ScheduleFolderSync (that is how a folder deleted between scan and Continue is
+        // recreated), so without this the journal would overwrite ResumePhase microseconds before
+        // it is handed to the orchestrator - and would repaint indicators the orchestrator is
+        // about to drive.
+        if (IsRecovered)
+        {
+            return;
+        }
+
         var state = _stateStore.TryLoad(paths);
 
-        if (state is null)
+        // The same demote-never-promote rule the startup scan applies, from the same helper: an
+        // unreconciled re-arm would resume into a phase whose inputs have been deleted, which is
+        // exactly what the rule exists to prevent (SPEC section 6.3.2).
+        if (state is not null && PhaseReconciliation.Reconcile(paths, state))
         {
+            _stateStore.ReplacePhases(paths, [.. state.Phases]);
+        }
+
+        var next = state is null ? null : PhaseReconciliation.FirstIncomplete(state);
+
+        if (state is null || next is null)
+        {
+            // No journal, or a finished task: this tab is a fresh start and must look like one.
+            // Leaving the indicators alone would keep painting the PREVIOUSLY typed task's green
+            // phases onto this one, or show four green phases above a 'Start workflow' button.
+            ResetPhaseIndicators();
             ResumePhase = null;
             return;
         }
 
         ApplyJournal(state);
+        ResumePhase = next;
+    }
 
-        var next = state.Phases.FirstOrDefault(p => p.Status != PhaseStatus.Completed);
-        ResumePhase = next?.Phase;
+    private void ResetPhaseIndicators()
+    {
+        foreach (var indicator in Phases)
+        {
+            indicator.Status = PhaseStatus.Pending;
+        }
     }
 ```
+
+Add `using Workflow.Models;` if the file does not already have it (it does - `TaskPaths` comes
+from there), and note that `PhaseReconciliation` is the Task 8 helper, not a second copy.
 
 Then add the close hook:
 
@@ -2616,7 +3502,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Add the new manual steps**
 
-In `Workflow/verify.ps1`, append to the `Remaining manual steps` block and change its header to `(V5-V18)`:
+In `Workflow/verify.ps1`, append to the `Remaining manual steps` block and change its header to `(V5-V21)`:
 
 ```powershell
 Write-Host '  V12 Run a task to the end. .workflow-state.json must hold four Completed phases,'
@@ -2630,7 +3516,16 @@ Write-Host '  V16 Every phase must submit its prompt without the user pressing E
 Write-Host '  V17 Delete T_plan.md from a task whose journal says phase 1 is complete, restart:'
 Write-Host '      the recovered tab must show phase 1 grey and resume at phase 1.'
 Write-Host '  V18 Put a disconnected network share in the directory MRU: the window must still'
-Write-Host '      appear promptly and the app must stay usable.'
+Write-Host '      appear promptly, the app must stay usable, and the recovered tabs for the'
+Write-Host '      reachable MRU entries must still appear within roughly five seconds.'
+Write-Host '  V19 Pick a different working directory in the blank tab while the startup scan is'
+Write-Host '      still running: nothing may fault and no error label may appear. Then switch a'
+Write-Host '      tab showing a green phase 1 to a directory where that name has no journal:'
+Write-Host '      all four indicators must go grey.'
+Write-Host '  V20 Type a finished task name into a fresh tab: all four indicators grey and the'
+Write-Host '      button reading "Start workflow".'
+Write-Host '  V21 Re-run that finished task and kill Workflow.exe during phase 1: the recovered'
+Write-Host '      tab must show all four indicators grey, not phases 2-4 green.'
 ```
 
 - [ ] **Step 2: Run the full gate**
@@ -2640,12 +3535,31 @@ Expected: `All automated checks passed.` and exit code 0. Specifically confirm:
 - `dotnet build` produced **no** warnings (they are errors, so a warning fails the build outright).
 - Every prompt token is known — this is where a `{done_path}` typo surfaces.
 
-- [ ] **Step 3: Sanity-check the running app**
+- [ ] **Step 3: Confirm the review-driven acceptance criteria are covered by tests**
+
+These are the criteria the independent review exposed. Each must be a *test that fails against the
+pre-review plan*, not merely a passing suite:
+
+| Criterion | Test |
+|---|---|
+| A14 - a demotion survives a second crash (SPEC §6.3.1) | `TaskRecoveryScannerTests.ScanAsync_ADemotedTailIsNotResurrectedByASecondCrash` |
+| A15 - the re-arm resets the indicators (SPEC §6.6) | `TaskTabViewModelTests.SwitchingToADirectoryWithoutAJournal_...`, `...TypingACompletedTaskName_...` |
+| A16 - the re-arm reconciles against disk (SPEC §6.3.2) | `TaskTabViewModelTests.TypingATaskWhoseArtefactVanished_ReconcilesLikeTheStartupScan` |
+| A17 - the submit tunables arrive from the file (SPEC §9.4) | `AutoAnswerServiceTests.RuleSet_FileSetsTheSubmitFields_UsesThem` + `..._SubmitFieldSetToZero_...` |
+| A18 - a run clears its own tail (SPEC §7.4) | `WorkflowOrchestratorTests.RunAsync_ClearsTheJournalTailFromTheStartPhaseBeforeRunning` |
+| SPEC §5.2 - an unknown phase name costs one entry | `TaskStateStoreTests.TryLoad_UnknownPhaseName_DropsThatEntryAndKeepsTheRest` |
+| SPEC §9.3 - the quiet gate starts at the paste | `WorkflowOrchestratorTests.RunAsync_PasteEchoArrivesAfterSendPasteReturns_DoesNotSubmitBeforeIt` |
+| SPEC §6.2 - the scan returns a partial list, never a cancelled task | `TaskRecoveryScannerTests.ScanAsync_BudgetAlreadyExpired_...`, `..._TokenAlreadyCancelled_...` |
+
+Run: `dotnet test Workflow.sln`
+Expected: every row above present and green.
+
+- [ ] **Step 4: Sanity-check the running app**
 
 Run: `dotnet run --project Workflow\Workflow.csproj -c Debug`
 Expected: the window appears immediately, one blank tab, the button reads **Start workflow**, and no recovery tabs appear when no journal exists anywhere in the MRU.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add Workflow/verify.ps1
@@ -2667,6 +3581,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 | §6.1 `RecoverableTask` | 8 |
 | §6.2 the scan, bounding, exception policy | 8 |
 | §6.3 resume phase + demote-never-promote | 8 |
+| §6.3.1 the demotion is persisted (`ReplacePhases`) | 5 (store), 8 (scanner) |
+| §6.3.2 one shared `PhaseReconciliation`, two callers | 8 (helper + scanner), 9 (re-arm) |
 | §6.4 startup wiring | 10 |
 | §6.5 the recovered tab, `LoadForResume` | 9 |
 | §6.6 re-arming from `SyncFolder` | 9 |
@@ -2674,11 +3590,12 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 | §7.1 `WorkflowRunRequest.StartPhase` | 6 |
 | §7.2 `RunAsync` skip | 6 |
 | §7.3 journal writes, store-first | 6, 9 (`SaveDescription`) |
+| §7.4 a run clears its own tail first | 6 |
 | §8.1 new phase table | 3, 4 |
 | §8.2 `AllContentChanged` | 3 |
 | §8.3 done marker, `{done_path}`, stale-marker guard, drop `Manual` | 1, 2, 4 |
 | §9.1–9.3 the submit fix | 7 |
 | §9.4 configuration | 7 |
-| §10 failure modes | 5 (R1–R3, W1), 8 (R4–R11), 4 (C2), 3 (C4), 7 (S1–S4) |
+| §10 failure modes | 5 (R1–R3, W1, W4), 8 (R4–R11, R13, R16, W5), 9 (R14, R15), 6 (R13 tail), 4 (C2), 3 (C4), 7 (S1–S6) |
 | §11 testing strategy | every task's test step |
 | §12 acceptance criteria | 11 |
