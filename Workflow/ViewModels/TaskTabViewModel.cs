@@ -155,17 +155,54 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _settings.AddRecentDirectory(value);
-        _settings.Save();
-
-        RecentDirectories.Clear();
-        foreach (var directory in _settings.Settings.RecentDirectories)
+        // The MRU stores the normalised form (see WorkingDirectoryPath). If this property kept the
+        // raw picker result - 'C:\work\' against a stored 'C:\work' - the ComboBox's SelectedItem
+        // would match no item and the Selector would push null straight back in here.
+        var normalised = WorkingDirectoryPath.Normalise(value);
+        if (!string.Equals(normalised, value, StringComparison.Ordinal))
         {
-            RecentDirectories.Add(directory);
+            WorkingDirectory = normalised;
+            return;
         }
+
+        _settings.AddRecentDirectory(normalised);
+        _settings.Save();
+        SyncRecentDirectories();
 
         _folderOnDisk = null;
         ScheduleFolderSync();
+    }
+
+    // Deliberately never Clear()s. TaskTabView.xaml binds this collection to the ComboBox's
+    // ItemsSource while SelectedItem is bound TwoWay to WorkingDirectory, so emptying it makes the
+    // Selector drop the selection and write null back into WorkingDirectory. Re-adding the entries
+    // afterwards does not restore the selection: the box goes blank, validation reports a missing
+    // working directory and 'Start workflow' dies the moment a second directory is picked.
+    private void SyncRecentDirectories()
+    {
+        var desired = _settings.Settings.RecentDirectories;
+
+        for (var i = RecentDirectories.Count - 1; i >= 0; i--)
+        {
+            if (!desired.Contains(RecentDirectories[i]))
+            {
+                RecentDirectories.RemoveAt(i);
+            }
+        }
+
+        for (var i = 0; i < desired.Count; i++)
+        {
+            var at = RecentDirectories.IndexOf(desired[i]);
+
+            if (at < 0)
+            {
+                RecentDirectories.Insert(i, desired[i]);
+            }
+            else if (at != i)
+            {
+                RecentDirectories.Move(at, i);
+            }
+        }
     }
 
     private void ScheduleFolderSync()
@@ -195,18 +232,30 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
             return;
         }
 
-        _ = Task.Run(async () =>
+        _ = SyncFolderAfterDebounceAsync(token);
+    }
+
+    // Deliberately NOT Task.Run. ScheduleFolderSync always runs on the UI thread (every caller is
+    // a property setter driven by a binding), so awaiting here captures the dispatcher's
+    // SynchronizationContext and SyncFolder resumes on it. On a pool thread instead, the
+    // ValidationMessage setter's [NotifyCanExecuteChangedFor] raises ICommand.CanExecuteChanged
+    // off the UI thread, WPF's ButtonBase handler touches Button.IsEnabled from there and throws
+    // a cross-thread InvalidOperationException. Nothing awaits this task, so that exception is
+    // swallowed: SyncFolder never reaches EnsureCreated and 'Start workflow' stays disabled for
+    // the rest of the session even though CanStartWorkflow() is true.
+    private async Task SyncFolderAfterDebounceAsync(CancellationToken token)
+    {
+        try
         {
-            try
-            {
-                await Task.Delay(_folderDebounce, token);
-                SyncFolder();
-            }
-            catch (OperationCanceledException)
-            {
-                // Superseded by a later keystroke.
-            }
-        }, token);
+            await Task.Delay(_folderDebounce, token);
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded by a later keystroke.
+            return;
+        }
+
+        SyncFolder();
     }
 
     private void SyncFolder()

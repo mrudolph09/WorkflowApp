@@ -3,13 +3,104 @@
                     xmlns:mah="http://metro.mahapps.com/winfx/xaml/controls"
                     xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes">
 
-    <Style x:Key="WorkflowTabItemStyle" TargetType="TabItem" BasedOn="{StaticResource MahApps.Styles.TabItem}">
-        <Setter Property="mah:TabControlHelper.CloseButtonEnabled" Value="True" />
-        <Setter Property="mah:TabControlHelper.Underlined" Value="TabItems" />
-        <Setter Property="mah:TabControlHelper.CloseTabCommand"
-                Value="{Binding DataContext.CloseTabCommand,
-                                RelativeSource={RelativeSource AncestorType=TabControl}}" />
-        <Setter Property="mah:TabControlHelper.CloseTabCommandParameter" Value="{Binding}" />
+    <!-- Tabs are drawn from scratch rather than derived from MahApps.Styles.TabItem. The MahApps
+         style renders a header as bare accent-coloured text with no surface, which gave the tab
+         strip no visual affordance at all - a user could not tell the headers were tabs, nor that
+         the '+' beside them opened another one. The folder-tab shape below (raised surface, top
+         corner radius, accent bar, shared baseline) is what makes the control self-describing. -->
+
+    <Style x:Key="WorkflowTabItemStyle" TargetType="TabItem">
+        <Setter Property="Foreground" Value="{DynamicResource MaterialDesignBodyLight}" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="Margin" Value="0,0,4,0" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TabItem">
+                    <Border x:Name="Root"
+                            MinHeight="40"
+                            CornerRadius="8,8,0,0"
+                            Background="Transparent"
+                            BorderBrush="Transparent"
+                            BorderThickness="1,1,1,0">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Accent bar marks the selected tab even for colour-blind users,
+                                 because it is a position cue and not only a hue cue. -->
+                            <Border x:Name="Accent"
+                                    Grid.ColumnSpan="2"
+                                    Height="3"
+                                    VerticalAlignment="Top"
+                                    CornerRadius="8,8,0,0"
+                                    Background="{DynamicResource MaterialDesign.Brush.Primary}"
+                                    Visibility="Collapsed" />
+
+                            <ContentPresenter Grid.Column="0"
+                                              ContentSource="Header"
+                                              Margin="16,10,8,10"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True" />
+
+                            <Button x:Name="CloseButton"
+                                    Grid.Column="1"
+                                    Width="24"
+                                    Height="24"
+                                    Margin="0,0,10,0"
+                                    VerticalAlignment="Center"
+                                    Focusable="False"
+                                    ToolTip="Task schliessen"
+                                    Command="{Binding DataContext.CloseTabCommand,
+                                                      RelativeSource={RelativeSource AncestorType=TabControl}}"
+                                    CommandParameter="{Binding}">
+                                <Button.Template>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="CloseChrome"
+                                                Background="Transparent"
+                                                CornerRadius="12">
+                                            <materialDesign:PackIcon Kind="Close"
+                                                                     Width="14"
+                                                                     Height="14"
+                                                                     HorizontalAlignment="Center"
+                                                                     VerticalAlignment="Center" />
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="CloseChrome"
+                                                        Property="Background"
+                                                        Value="{DynamicResource MaterialDesignDivider}" />
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Button.Template>
+                            </Button>
+                        </Grid>
+                    </Border>
+
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource MaterialDesignCardBackground}" />
+                            <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource MaterialDesignDivider}" />
+                            <Setter TargetName="Accent" Property="Visibility" Value="Visible" />
+                            <Setter Property="Foreground" Value="{DynamicResource MaterialDesignBody}" />
+                            <Setter Property="FontWeight" Value="SemiBold" />
+                            <Setter Property="Panel.ZIndex" Value="2" />
+                        </Trigger>
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="IsSelected" Value="False" />
+                                <Condition Property="IsMouseOver" Value="True" />
+                            </MultiTrigger.Conditions>
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource MaterialDesignDivider}" />
+                            <Setter Property="Foreground" Value="{DynamicResource MaterialDesignBody}" />
+                        </MultiTrigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
     </Style>
 
     <Style x:Key="WorkflowTabControlStyle" TargetType="TabControl">
@@ -21,25 +112,61 @@
                 <ControlTemplate TargetType="TabControl">
                     <DockPanel LastChildFill="True">
 
-                        <DockPanel DockPanel.Dock="Top" LastChildFill="False" Margin="8,4,8,0">
-                            <TabPanel x:Name="HeaderPanel"
-                                      DockPanel.Dock="Left"
-                                      IsItemsHost="True"
-                                      Panel.ZIndex="1"
-                                      KeyboardNavigation.TabIndex="1" />
+                        <Grid DockPanel.Dock="Top" Margin="8,0,8,0">
+                            <!-- The baseline runs the full width behind the headers. It is what
+                                 turns a row of separate buttons into one tab strip. -->
+                            <Border Height="1"
+                                    VerticalAlignment="Bottom"
+                                    Background="{DynamicResource MaterialDesignDivider}" />
 
-                            <Button x:Name="AddTabButton"
-                                    DockPanel.Dock="Left"
-                                    Width="28"
-                                    Height="28"
-                                    Margin="8,0,0,0"
-                                    VerticalAlignment="Center"
-                                    ToolTip="Neuen Task öffnen"
-                                    Style="{StaticResource MaterialDesignFloatingActionMiniButton}"
-                                    Command="{Binding AddTaskTabCommand}">
-                                <materialDesign:PackIcon Kind="Plus" Width="18" Height="18" />
-                            </Button>
-                        </DockPanel>
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Bottom">
+                                <TabPanel x:Name="HeaderPanel"
+                                          IsItemsHost="True"
+                                          VerticalAlignment="Bottom"
+                                          Panel.ZIndex="1"
+                                          KeyboardNavigation.TabIndex="1" />
+
+                                <!-- Drawn as an empty tab rather than as a floating action button:
+                                     sharing the tabs' shape and baseline is what tells the user
+                                     that pressing it produces another tab. -->
+                                <Button x:Name="AddTabButton"
+                                        MinHeight="36"
+                                        Margin="6,0,0,0"
+                                        VerticalAlignment="Bottom"
+                                        Cursor="Hand"
+                                        Foreground="{DynamicResource MaterialDesignBodyLight}"
+                                        ToolTip="Neuen Task in einem weiteren Tab öffnen"
+                                        Command="{Binding AddTaskTabCommand}">
+                                    <Button.Template>
+                                        <ControlTemplate TargetType="Button">
+                                            <Border x:Name="Chip"
+                                                    CornerRadius="8,8,0,0"
+                                                    Background="Transparent"
+                                                    BorderBrush="{DynamicResource MaterialDesignDivider}"
+                                                    BorderThickness="1,1,1,0"
+                                                    Padding="12,8">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <materialDesign:PackIcon Kind="Plus"
+                                                                             Width="18"
+                                                                             Height="18"
+                                                                             VerticalAlignment="Center" />
+                                                    <TextBlock Margin="6,0,0,0"
+                                                               VerticalAlignment="Center"
+                                                               Text="Neuer Task" />
+                                                </StackPanel>
+                                            </Border>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="Chip"
+                                                            Property="Background"
+                                                            Value="{DynamicResource MaterialDesignDivider}" />
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Button.Template>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
 
                         <!-- The stock TabControl template uses ContentSource="SelectedContent",
                              which is shorthand for binding Content, ContentTemplate,

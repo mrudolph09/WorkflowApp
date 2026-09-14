@@ -43,9 +43,6 @@ public sealed partial class TerminalViewModel : ObservableObject, ITerminalContr
     private int _disposed;
 
     [ObservableProperty]
-    private string _inputText = string.Empty;
-
-    [ObservableProperty]
     private bool _isTerminalAvailable;
 
     [ObservableProperty]
@@ -301,18 +298,6 @@ public sealed partial class TerminalViewModel : ObservableObject, ITerminalContr
 
         _webView?.Dispose();
         _webView = null;
-    }
-
-    [RelayCommand]
-    private void SendInput()
-    {
-        if (string.IsNullOrEmpty(InputText))
-        {
-            return;
-        }
-
-        Send(InputText + "\r");
-        InputText = string.Empty;
     }
 
     private void OnOutputReceived(object? sender, ReadOnlyMemory<byte> bytes)
