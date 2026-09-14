@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Threading;
@@ -15,9 +15,7 @@ namespace Workflow.ViewModels;
 public sealed partial class TerminalViewModel : ObservableObject, ITerminalController, IDisposable
 {
     private const string VirtualHost = "workflow.terminal";
-    private const string CarriageReturn = "\r";
     private static readonly TimeSpan CoalesceInterval = TimeSpan.FromMilliseconds(16);
-    private static readonly TimeSpan SubmitDelay = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(10);
 
     private readonly IWebViewEnvironmentProvider _environmentProvider;
@@ -215,12 +213,8 @@ public sealed partial class TerminalViewModel : ObservableObject, ITerminalContr
     }
 
     /// <inheritdoc />
-    public async Task SendPasteAsync(string body, CancellationToken cancellationToken)
+    public void SendPaste(string body)
     {
-        // Capture the session this paste belongs to. The orchestrator can advance inside the
-        // submit delay whenever a reused task folder already satisfies a watcher (spec section
-        // 8.3); the carriage return must then be dropped rather than written into the NEXT
-        // launcher, where it would accept the preselected "No, exit".
         var target = _session;
         if (target is null)
         {
@@ -228,28 +222,6 @@ public sealed partial class TerminalViewModel : ObservableObject, ITerminalContr
         }
 
         Write(target, BracketedPaste.Wrap(body));
-
-        using var scope =
-            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _sessionLifetime.Token);
-
-        try
-        {
-            // A separate write: inside the paste block the TUI input box would treat the
-            // carriage return as a literal newline instead of as submit.
-            await Task.Delay(SubmitDelay, scope.Token);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            // The session was replaced while we waited. Dropping the submit is the point.
-            return;
-        }
-
-        if (!ReferenceEquals(_session, target))
-        {
-            return;
-        }
-
-        Write(target, CarriageReturn);
     }
 
     private static void Write(ITerminalSession session, string text) =>

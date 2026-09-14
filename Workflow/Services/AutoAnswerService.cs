@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
@@ -100,12 +100,19 @@ public sealed class AutoAnswerService : IAutoAnswerService
             .Where(r => r.Id.Length > 0 && r.Pattern.Length > 0)
             .ToList();
 
+        // A zero or negative value is either an explicit 0 in the file or a typo; each of the
+        // four is a duration or an attempt count where that is meaningless, so the shipped
+        // default wins (SPEC section 9.4, S5).
         return new AutoAnswerRuleSet(
             dto.Version,
             dto.QuietPeriodMs,
             dto.SettleTimeoutMs,
             dto.MaxAnswersPerPhase,
-            rules);
+            rules,
+            dto.PasteQuietPeriodMs > 0 ? dto.PasteQuietPeriodMs : 800,
+            dto.PasteSettleTimeoutMs > 0 ? dto.PasteSettleTimeoutMs : 15000,
+            dto.SubmitVerifyMs > 0 ? dto.SubmitVerifyMs : 1500,
+            dto.MaxSubmitAttempts > 0 ? dto.MaxSubmitAttempts : 2);
     }
 
     private sealed class RuleSetDto
@@ -121,6 +128,18 @@ public sealed class AutoAnswerService : IAutoAnswerService
 
         [JsonPropertyName("maxAnswersPerPhase")]
         public int MaxAnswersPerPhase { get; set; } = 5;
+
+        [JsonPropertyName("pasteQuietPeriodMs")]
+        public int PasteQuietPeriodMs { get; set; } = 800;
+
+        [JsonPropertyName("pasteSettleTimeoutMs")]
+        public int PasteSettleTimeoutMs { get; set; } = 15000;
+
+        [JsonPropertyName("submitVerifyMs")]
+        public int SubmitVerifyMs { get; set; } = 1500;
+
+        [JsonPropertyName("maxSubmitAttempts")]
+        public int MaxSubmitAttempts { get; set; } = 2;
 
         [JsonPropertyName("rules")]
         public List<RuleDto>? Rules { get; set; }

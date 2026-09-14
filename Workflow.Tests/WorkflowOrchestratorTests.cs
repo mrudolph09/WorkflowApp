@@ -32,7 +32,8 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         _rulesPath = Path.Combine(_root, "rules.json");
         File.WriteAllText(_rulesPath, """
         {
-          "version": 1, "quietPeriodMs": 10, "settleTimeoutMs": 2000, "maxAnswersPerPhase": 3,
+          "version": 2, "quietPeriodMs": 10, "settleTimeoutMs": 2000, "maxAnswersPerPhase": 3,
+          "pasteQuietPeriodMs": 10, "pasteSettleTimeoutMs": 300, "submitVerifyMs": 30, "maxSubmitAttempts": 2,
           "rules": [ { "id": "bypass", "pattern": "(?is)bypass", "send": "2\\r", "description": "" } ]
         }
         """);
@@ -229,9 +230,6 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         terminal.QueueSnapshot("PS>");
         terminal.EmitOutput();
         await WaitUntil(() => terminal.StartedSessions.Count >= 2, cts.Token);
-
-        // Every paste is fully written - including its CR - before the next session starts.
-        Assert.Equal(terminal.Pasted.Count, terminal.SubmitsCompletedBeforeNextSession);
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
@@ -464,6 +462,122 @@ public sealed class WorkflowOrchestratorTests : IDisposable
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_LauncherProducesNoOutputAfterTheCr_SendsASecondCr()
+    {
+        var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var run = CreateOrchestrator().RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        await WaitForPhaseAsync(WorkflowPhase.Specification, cts.Token);
+        await WaitUntilAsync(() => terminal.Pasted.Count == 1 && terminal.Sent.Count(t => t == "\r") == 2);
+
+        Assert.Equal(2, terminal.Sent.Count(t => t == "\r"));
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_LauncherRespondsToTheCr_SendsOnlyOne()
+    {
+        var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+        terminal.EmitOutputOnNextCarriageReturn = true;
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var run = CreateOrchestrator().RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        await WaitForPhaseAsync(WorkflowPhase.Specification, cts.Token);
+        await WaitUntilAsync(() => terminal.Pasted.Count == 1);
+        await Task.Delay(200, cts.Token);
+
+        Assert.Equal(1, terminal.Sent.Count(t => t == "\r"));
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_PasteEchoArrivesAfterSendPasteReturns_DoesNotSubmitBeforeIt()
+    {
+        var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+
+        // The PTY echoes the bracketed-paste block only 80 ms after SendPaste has returned, and
+        // the launcher answers the CR. The quiet period is longer than the echo delay, so a
+        // correct gate must still be waiting when that echo lands.
+        terminal.PasteEchoDelay = TimeSpan.FromMilliseconds(80);
+        terminal.EmitOutputOnNextCarriageReturn = true;
+
+        var orchestrator = CreateOrchestratorWithRules("""
+        {
+          "version": 2, "quietPeriodMs": 10, "settleTimeoutMs": 300, "maxAnswersPerPhase": 3,
+          "pasteQuietPeriodMs": 300, "pasteSettleTimeoutMs": 3000,
+          "submitVerifyMs": 20, "maxSubmitAttempts": 2,
+          "rules": []
+        }
+        """);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var run = orchestrator.RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        await WaitUntilAsync(() => terminal.Sent.Contains("\r"));
+
+        // The whole point: by the time the first carriage return was written, the paste echo had
+        // already been seen. A gate reading LastOutputUtc alone writes it while OutputCount is
+        // still 0, because SettleAndAnswerAsync only ever returns once that timestamp is already
+        // stale past the paste quiet period (SPEC section 9.3, D20).
+        var firstCr = terminal.Sent
+            .Select((text, index) => (text, index))
+            .First(entry => entry.text == "\r")
+            .index;
+
+        Assert.True(
+            terminal.OutputCountAtSend[firstCr] >= 1,
+            "The submitting CR was written before the paste echo arrived.");
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    // The fixture's single rules file is shared by every test in the class; this one needs its
+    // own timings, so it gets its own file.
+    private WorkflowOrchestrator CreateOrchestratorWithRules(string json)
+    {
+        var path = Path.Combine(_root, "rules-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllText(path, json);
+
+        return new WorkflowOrchestrator(
+            new PromptTemplateService(_promptDir),
+            new AutoAnswerService(path, overridePath: null),
+            new ArtifactWatcherFactory(),
+            _state,
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromMilliseconds(40));
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(20);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(25);
+        }
+
+        Assert.Fail("Condition was never met.");
     }
 
     private Task WaitForPhaseAsync(WorkflowPhase phase, CancellationToken cancellationToken) =>

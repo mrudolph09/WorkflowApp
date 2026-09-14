@@ -1,8 +1,12 @@
-{
-  "version": 1,
+﻿{
+  "version": 2,
   "quietPeriodMs": 1500,
   "settleTimeoutMs": 60000,
   "maxAnswersPerPhase": 5,
+  "pasteQuietPeriodMs": 800,
+  "pasteSettleTimeoutMs": 15000,
+  "submitVerifyMs": 1500,
+  "maxSubmitAttempts": 2,
   "rules": [
     {
       "id": "claude-bypass-permissions",

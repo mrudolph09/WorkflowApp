@@ -1,4 +1,4 @@
-namespace Workflow.Services;
+﻿namespace Workflow.Services;
 
 /// <summary>
 /// Everything the orchestrator is allowed to do to a terminal. Implemented by TerminalViewModel
@@ -43,19 +43,14 @@ public interface ITerminalController
     /// <param name="text">Text to send verbatim, including any control characters.</param>
     public void Send(string text);
 
-    /// <summary>
-    /// Writes a bracketed-paste block and then, after a short delay, the submitting CR.
-    /// </summary>
+    /// <summary>Writes a bracketed-paste block. The submitting carriage return is NOT sent.</summary>
     /// <param name="body">The prompt text.</param>
-    /// <param name="cancellationToken">Cancels the pending submit.</param>
-    /// <returns>A task that completes once the submitting CR has been written.</returns>
     /// <remarks>
-    /// Awaitable and session-scoped on purpose. A fire-and-forget delay that later calls
-    /// <c>Send(CR)</c> on whatever session is current can deliver the carriage return into the
-    /// *next* phase's launcher - reachable whenever a reused task folder already satisfies a watcher
-    /// (spec section 8.3) - where it would accept `yo`'s preselected "No, exit".
+    /// Submitting is the orchestrator's job (SPEC section 9.3): it owns the quiet gate and the
+    /// timing configuration, and awaiting the whole sequence inline is what makes a stray
+    /// carriage return unable to reach the next phase's launcher.
     /// </remarks>
-    public Task SendPasteAsync(string body, CancellationToken cancellationToken);
+    public void SendPaste(string body);
 
     /// <summary>Disposes the current session, killing its process tree.</summary>
     public void DisposeSession();

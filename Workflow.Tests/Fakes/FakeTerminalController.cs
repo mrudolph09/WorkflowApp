@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using Workflow.Services;
 
 namespace Workflow.Tests.Fakes;
@@ -54,19 +54,47 @@ public sealed class FakeTerminalController : ITerminalController
     public Task<string> SnapshotAsync(int lines, CancellationToken cancellationToken) =>
         Task.FromResult(_snapshots.Count > 0 ? _snapshots.Dequeue() : string.Empty);
 
-    public void Send(string text) => Sent.Add(text);
-
-    /// <summary>How many pastes had their submitting CR written before a new session started.</summary>
-    public int SubmitsCompletedBeforeNextSession { get; private set; }
-
-    public Task SendPasteAsync(string body, CancellationToken cancellationToken)
+    public void Send(string text)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        // Captured BEFORE any emission, so a test can ask what the terminal had produced at the
+        // moment this write happened.
+        OutputCountAtSend.Add(OutputCount);
+        Sent.Add(text);
 
+        if (EmitOutputOnNextCarriageReturn && text == "\r")
+        {
+            EmitOutput();
+        }
+    }
+
+    /// <summary>When true, a bare carriage return produces output, as a live launcher would.</summary>
+    public bool EmitOutputOnNextCarriageReturn { get; set; }
+
+    /// <summary>
+    /// When set, SendPaste schedules one chunk of output after this delay instead of producing
+    /// none, mimicking the PTY echoing the bracketed-paste block back asynchronously.
+    /// </summary>
+    public TimeSpan PasteEchoDelay { get; set; }
+
+    /// <summary>OutputCount as it stood when each entry of <see cref="Sent"/> was written.</summary>
+    public Collection<long> OutputCountAtSend { get; } = [];
+
+    public void SendPaste(string body)
+    {
         Pasted.Add(body);
-        Sent.Add("\r");
-        SubmitsCompletedBeforeNextSession++;
-        return Task.CompletedTask;
+
+        if (PasteEchoDelay <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        // Deliberately fire-and-forget. The production PTY echo arrives well after SendPaste has
+        // returned, and that asynchrony is exactly what the paste-gate test needs to reproduce.
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(PasteEchoDelay);
+            EmitOutput();
+        });
     }
 
     public void DisposeSession() => DisposeCount++;

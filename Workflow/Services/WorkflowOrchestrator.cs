@@ -133,10 +133,9 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         await SettleAndAnswerAsync(request.Terminal, cancellationToken);
 
         var variables = PromptVariables.For(request.Paths, request.TaskDescription);
-        // Awaited, including the submitting CR, and scoped to THIS session: a detached delay
-        // can deliver the CR into the next phase's launcher whenever a reused task folder
-        // already satisfies a watcher (spec sections 6.5 and 8.3).
-        await request.Terminal.SendPasteAsync(
+
+        await SendPromptAsync(
+            request.Terminal,
             _prompts.Render(definition.PromptFile, variables),
             cancellationToken);
 
@@ -178,6 +177,72 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         {
             // Read-only or no permission. Same fallback as above.
         }
+    }
+
+    // The prompt used to be submitted by writing the paste block and then a carriage return after
+    // a fixed 150 ms. Claude Code's TUI coalesces a paste, so a CR arriving while a multi-kilobyte
+    // prompt is still draining is taken as a literal newline instead of as submit - which is why
+    // the user had to press Enter by hand in every phase. Waiting for the screen to go quiet and
+    // then verifying that the CR produced output removes the dependency on any fixed delay.
+    private async Task SendPromptAsync(
+        ITerminalController terminal,
+        string prompt,
+        CancellationToken cancellationToken)
+    {
+        var configuration = _autoAnswer.RuleSet;
+
+        terminal.SendPaste(prompt);
+
+        // The baseline the quiet gate measures from. It MUST start here and not at
+        // terminal.LastOutputUtc: SettleAndAnswerAsync returns precisely because the screen has
+        // been quiet for QuietPeriodMs (1500 ms shipped), so LastOutputUtc is already older than
+        // PasteQuietPeriodMs on entry. Reading it alone satisfies the gate on the first iteration
+        // and writes the CR before the PTY has even echoed the paste - the exact early-submit
+        // failure this method exists to remove (SPEC section 9.3).
+        var quietSince = DateTimeOffset.UtcNow;
+
+        var quietPeriod = TimeSpan.FromMilliseconds(configuration.PasteQuietPeriodMs);
+        var ceiling = Stopwatch.StartNew();
+
+        while (ceiling.Elapsed < TimeSpan.FromMilliseconds(configuration.PasteSettleTimeoutMs))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Output arriving after the paste pushes the baseline forward, so a slow launcher and
+            // a chatty one are handled by the same expression.
+            if (terminal.LastOutputUtc > quietSince)
+            {
+                quietSince = terminal.LastOutputUtc;
+            }
+
+            if (DateTimeOffset.UtcNow - quietSince >= quietPeriod)
+            {
+                break;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
+        }
+
+        for (var attempt = 0; attempt < configuration.MaxSubmitAttempts; attempt++)
+        {
+            // The carriage return is only ever written once the screen is quiet, so by
+            // construction nothing else is producing output: any new chunk means the launcher
+            // acted on it. That makes OutputCount a cheaper and sharper signal than diffing two
+            // snapshots, which would have to tell spinner frames from real progress.
+            var before = terminal.OutputCount;
+
+            terminal.Send("\r");
+
+            await Task.Delay(TimeSpan.FromMilliseconds(configuration.SubmitVerifyMs), cancellationToken);
+
+            if (terminal.OutputCount != before)
+            {
+                return;
+            }
+        }
+
+        // Both attempts produced nothing. The prompt is sitting in the input box and the terminal
+        // is live: the user can press Enter, exactly as before this fix. Better than blocking.
     }
 
     private async Task SettleAndAnswerAsync(ITerminalController terminal, CancellationToken cancellationToken)

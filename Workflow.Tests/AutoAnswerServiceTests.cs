@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using Workflow.Models;
 using Workflow.Services;
 
@@ -164,5 +164,61 @@ public sealed class AutoAnswerServiceTests : IDisposable
         Assert.NotNull(rule);
         Assert.Equal("claude-trust-folder", rule!.Id);
         Assert.Equal("\r", rule.Send);
+    }
+
+    [Fact]
+    public void RuleSet_FileOmitsTheSubmitFields_UsesTheDefaults()
+    {
+        var path = WriteRules("""
+        {
+          "version": 1, "quietPeriodMs": 1500, "settleTimeoutMs": 60000,
+          "maxAnswersPerPhase": 5, "rules": []
+        }
+        """);
+
+        var set = new AutoAnswerService(path, overridePath: null).RuleSet;
+
+        Assert.Equal(800, set.PasteQuietPeriodMs);
+        Assert.Equal(15000, set.PasteSettleTimeoutMs);
+        Assert.Equal(1500, set.SubmitVerifyMs);
+        Assert.Equal(2, set.MaxSubmitAttempts);
+    }
+
+    [Fact]
+    public void RuleSet_FileSetsTheSubmitFields_UsesThem()
+    {
+        var path = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "pasteQuietPeriodMs": 10, "pasteSettleTimeoutMs": 200,
+          "submitVerifyMs": 20, "maxSubmitAttempts": 3,
+          "rules": []
+        }
+        """);
+
+        var set = new AutoAnswerService(path, overridePath: null).RuleSet;
+
+        Assert.Equal(10, set.PasteQuietPeriodMs);
+        Assert.Equal(200, set.PasteSettleTimeoutMs);
+        Assert.Equal(20, set.SubmitVerifyMs);
+        Assert.Equal(3, set.MaxSubmitAttempts);
+    }
+
+    [Fact]
+    public void RuleSet_SubmitFieldSetToZero_FallsBackToTheShippedDefault()
+    {
+        var path = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "pasteQuietPeriodMs": 0, "submitVerifyMs": -1, "maxSubmitAttempts": 0,
+          "rules": []
+        }
+        """);
+
+        var set = new AutoAnswerService(path, overridePath: null).RuleSet;
+
+        Assert.Equal(800, set.PasteQuietPeriodMs);
+        Assert.Equal(1500, set.SubmitVerifyMs);
+        Assert.Equal(2, set.MaxSubmitAttempts);
     }
 }
