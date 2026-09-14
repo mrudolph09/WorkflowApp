@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Text;
 using Workflow.Models;
@@ -280,10 +280,10 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         Assert.Equal("codex --yolo\r", terminal.Sent.Last(s => s.EndsWith('\r') && s.Contains("codex", StringComparison.Ordinal)));
         WriteArtifacts(_paths.ReviewAbsolute);
 
-        // Phase 3 -> spec content changes.
+        // Phase 3 -> BOTH spec and plan content change (CompletionRule.AllContentChanged).
         await WaitUntil(() => terminal.StartedSessions.Count >= 3, cts.Token);
         await Task.Delay(80, cts.Token);
-        WriteArtifacts(_paths.SpecAbsolute);
+        WriteArtifacts(_paths.SpecAbsolute, _paths.PlanAbsolute);
 
         // Phase 4 -> waits for the manual signal.
         await WaitUntil(() => terminal.StartedSessions.Count >= 4, cts.Token);
@@ -340,6 +340,47 @@ public sealed class WorkflowOrchestratorTests : IDisposable
 
         Assert.True(terminal.DisposeCount >= 1);
     }
+
+    [Fact]
+    public async Task RunAsync_DeletesAStaleDoneMarkerBeforePhaseFourWaits()
+    {
+        await File.WriteAllTextAsync(_paths.DoneAbsolute, "left over from a previous run");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var run = CreateOrchestrator().RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        // Satisfy phases 1-3 so the run reaches phase 4.
+        await WaitForPhaseAsync(WorkflowPhase.Specification, cts.Token);
+        WriteArtifacts(_paths.SpecAbsolute, _paths.PlanAbsolute);
+        await WaitForPhaseAsync(WorkflowPhase.Review, cts.Token);
+        WriteArtifacts(_paths.ReviewAbsolute);
+        await WaitForPhaseAsync(WorkflowPhase.ResolveReview, cts.Token);
+        WriteArtifacts(_paths.SpecAbsolute, _paths.PlanAbsolute);
+        await WaitForPhaseAsync(WorkflowPhase.Implementation, cts.Token);
+
+        // The stale marker must be gone, so phase 4 is still waiting.
+        Assert.False(File.Exists(_paths.DoneAbsolute));
+        Assert.DoesNotContain(
+            _progress, p => p.Phase == WorkflowPhase.Implementation && p.Status == PhaseStatus.Completed);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    private Task WaitForPhaseAsync(WorkflowPhase phase, CancellationToken cancellationToken) =>
+        WaitUntil(
+            () =>
+            {
+                lock (_progress)
+                {
+                    return _progress.Any(p => p.Phase == phase && p.Status == PhaseStatus.Active);
+                }
+            },
+            cancellationToken);
 
     private static async Task WaitUntil(Func<bool> condition, CancellationToken cancellationToken)
     {

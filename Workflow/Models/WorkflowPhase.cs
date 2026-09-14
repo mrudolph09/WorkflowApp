@@ -40,7 +40,4 @@ public enum CompletionRule
 
     /// <summary>Every watched path differs from its baseline hash.</summary>
     AllContentChanged,
-
-    /// <summary>Only the user can end the phase.</summary>
-    Manual,
 }

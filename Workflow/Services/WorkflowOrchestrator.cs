@@ -1,4 +1,5 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
+using System.IO;
 using Workflow.Models;
 using Workflow.Terminal;
 
@@ -61,6 +62,14 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Active));
         request.ManualSignal.Reset();
 
+        // A marker left by a previous run of this task would satisfy the phase-4 watcher in
+        // milliseconds. Deleting it before the baseline is taken removes the failure mode
+        // instead of handling it (SPEC section 8.3).
+        if (definition.Phase == WorkflowPhase.Implementation)
+        {
+            DeleteStaleDoneMarker(request.Paths.DoneAbsolute);
+        }
+
         // The baseline for AnyContentChanged must be captured before the CLI can touch anything.
         using var watcher = _watchers.Create(
             definition.Completion,
@@ -94,13 +103,12 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             _prompts.Render(definition.PromptFile, variables),
             cancellationToken);
 
-        var completion = definition.Completion == CompletionRule.Manual
-            ? request.ManualSignal.WaitAsync(cancellationToken)
-            : await Task.WhenAny(
-                watcher.WaitAsync(cancellationToken),
-                request.ManualSignal.WaitAsync(cancellationToken));
-
-        await completion;
+        // Every phase now has an artefact condition; the manual signal is the escape hatch for
+        // all four, not a completion rule of its own. The doubled await unwraps Task<Task> so a
+        // watcher failure surfaces as ArtifactWatchException instead of being silently dropped.
+        await await Task.WhenAny(
+            watcher.WaitAsync(cancellationToken),
+            request.ManualSignal.WaitAsync(cancellationToken));
 
         request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Completed));
     }
@@ -113,8 +121,26 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             WorkflowPhase.Specification => [paths.SpecAbsolute, paths.PlanAbsolute],
             WorkflowPhase.Review => [paths.ReviewAbsolute],
             WorkflowPhase.ResolveReview => [paths.SpecAbsolute, paths.PlanAbsolute],
+            WorkflowPhase.Implementation => [paths.DoneAbsolute],
             _ => [],
         };
+
+    private static void DeleteStaleDoneMarker(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // Held open by another process. The phase then completes immediately; the user can
+            // still drive the session by hand and 'Task abschliessen' remains available.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Read-only or no permission. Same fallback as above.
+        }
+    }
 
     private async Task SettleAndAnswerAsync(ITerminalController terminal, CancellationToken cancellationToken)
     {

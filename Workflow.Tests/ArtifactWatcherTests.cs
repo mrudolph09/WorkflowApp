@@ -203,16 +203,6 @@ public sealed class ArtifactWatcherTests : IDisposable
     }
 
     [Fact]
-    public async Task Manual_NeverCompletesOnItsOwn()
-    {
-        using var watcher = Create(CompletionRule.Manual, "a.md");
-        await File.WriteAllTextAsync(P("a.md"), "content");
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(700));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => watcher.WaitAsync(cts.Token));
-    }
-
-    [Fact]
     public async Task AllContentChanged_OneOfTwoFilesChanged_DoesNotComplete()
     {
         await File.WriteAllTextAsync(P("spec.md"), "one");

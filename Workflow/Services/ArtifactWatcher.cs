@@ -47,11 +47,6 @@ public sealed class ArtifactWatcher : IArtifactWatcher
             _baseline[path] = ComputeHash(path);
         }
 
-        if (_rule == CompletionRule.Manual)
-        {
-            return;
-        }
-
         Directory.CreateDirectory(directory);
 
         _watcher = new FileSystemWatcher(directory)

@@ -13,7 +13,7 @@ public static class PhaseCatalog
         new PhaseDefinition(
             WorkflowPhase.ResolveReview, "Review umsetzen", "yo", "resolve_review_prompt.md", CompletionRule.AllContentChanged),
         new PhaseDefinition(
-            WorkflowPhase.Implementation, "Implementierung", "yo", "implementation_prompt.md", CompletionRule.Manual),
+            WorkflowPhase.Implementation, "Implementierung", "yo", "implementation_prompt.md", CompletionRule.FilesExist),
     ];
 
     /// <summary>Looks up a single phase definition.</summary>
