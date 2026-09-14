@@ -13,6 +13,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     private readonly IPromptTemplateService _prompts;
     private readonly IAutoAnswerService _autoAnswer;
     private readonly IArtifactWatcherFactory _watchers;
+    private readonly ITaskStateStore _state;
     private readonly TimeSpan _debounce;
     private readonly TimeSpan _pollInterval;
 
@@ -20,18 +21,21 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     /// <param name="prompts">Prompt renderer.</param>
     /// <param name="autoAnswer">Auto-answer rule engine.</param>
     /// <param name="watchers">Artefact watcher factory.</param>
+    /// <param name="state">The per-task workflow journal.</param>
     /// <param name="debounce">Debounce applied to file-system notifications.</param>
     /// <param name="pollInterval">Fallback poll interval for dropped file-system events.</param>
     public WorkflowOrchestrator(
         IPromptTemplateService prompts,
         IAutoAnswerService autoAnswer,
         IArtifactWatcherFactory watchers,
+        ITaskStateStore state,
         TimeSpan debounce,
         TimeSpan pollInterval)
     {
         _prompts = prompts;
         _autoAnswer = autoAnswer;
         _watchers = watchers;
+        _state = state;
         _debounce = debounce;
         _pollInterval = pollInterval;
     }
@@ -41,9 +45,21 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        if (!Enum.IsDefined(request.StartPhase))
+        {
+            throw new ArgumentOutOfRangeException(nameof(request));
+        }
+
+        // The journal must never claim a phase is complete that THIS run has not run. Re-running
+        // a finished task would otherwise leave phases 2-4 marked Completed until the run reaches
+        // them, so a crash during phase 1 recovers a tab with three phases painted green; and a
+        // crash in the microsecond gap between RecordPhase(N, Completed) and
+        // RecordPhase(N+1, Active) could let the next recovery skip N+1 (SPEC section 7.4, D24).
+        ClearPhasesFrom(request.Paths, request.StartPhase);
+
         try
         {
-            foreach (var definition in PhaseCatalog.All)
+            foreach (var definition in PhaseCatalog.All.Skip((int)request.StartPhase))
             {
                 await RunPhaseAsync(request, definition, cancellationToken);
             }
@@ -54,11 +70,32 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         }
     }
 
+    private void ClearPhasesFrom(TaskPaths paths, WorkflowPhase startPhase)
+    {
+        var existing = _state.TryLoad(paths);
+        if (existing is null)
+        {
+            // No journal yet - nothing to correct. The first RecordPhase will create it.
+            return;
+        }
+
+        // Phases BEFORE the start phase are left exactly as they are: on a resumed run their
+        // green indicators are the only record that they ever happened.
+        _state.ReplacePhases(
+            paths,
+            [.. existing.Phases.Select(entry => (int)entry.Phase < (int)startPhase
+                ? entry
+                : new TaskPhaseState(entry.Phase, PhaseStatus.Pending, null))]);
+    }
+
     private async Task RunPhaseAsync(
         WorkflowRunRequest request,
         PhaseDefinition definition,
         CancellationToken cancellationToken)
     {
+        // Store first: Progress.Report marshals to the UI thread, so a busy dispatcher must not
+        // be able to delay the durable write (SPEC section 7.3).
+        _state.RecordPhase(request.Paths, definition.Phase, PhaseStatus.Active);
         request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Active));
         request.ManualSignal.Reset();
 
@@ -110,6 +147,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             watcher.WaitAsync(cancellationToken),
             request.ManualSignal.WaitAsync(cancellationToken));
 
+        _state.RecordPhase(request.Paths, definition.Phase, PhaseStatus.Completed);
         request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Completed));
     }
 

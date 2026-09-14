@@ -1,4 +1,4 @@
-using Workflow.Models;
+﻿using Workflow.Models;
 
 namespace Workflow.Services;
 
@@ -8,12 +8,18 @@ namespace Workflow.Services;
 /// <param name="Terminal">The terminal this run drives.</param>
 /// <param name="ManualSignal">Signal raised by the 'Phase abschliessen' / 'Task abschliessen' buttons.</param>
 /// <param name="Progress">Receives every phase status change.</param>
+/// <param name="StartPhase">
+/// The phase the run begins at. Everything before it is skipped and never reported - a resumed
+/// run's earlier indicators are painted by the tab from the journal, not by the orchestrator.
+/// A defaulted positional parameter, so existing construction sites are unaffected.
+/// </param>
 public sealed record WorkflowRunRequest(
     TaskPaths Paths,
     string TaskDescription,
     ITerminalController Terminal,
     ManualPhaseSignal ManualSignal,
-    IProgress<PhaseProgress> Progress);
+    IProgress<PhaseProgress> Progress,
+    WorkflowPhase StartPhase = WorkflowPhase.Specification);
 
 /// <summary>Drives a task through the four phases.</summary>
 public interface IWorkflowOrchestrator

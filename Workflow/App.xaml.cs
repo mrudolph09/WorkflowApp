@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 using Workflow.Services;
@@ -29,10 +29,13 @@ public partial class App : Application
             Path.Combine(AppContext.BaseDirectory, "Assets", "autoanswer.rules.json"),
             Path.Combine(appData, "autoanswer.rules.json"));
 
+        var stateStore = new TaskStateStore();
+
         var orchestrator = new WorkflowOrchestrator(
             prompts,
             autoAnswer,
             new ArtifactWatcherFactory(),
+            stateStore,
             TimeSpan.FromMilliseconds(750),
             TimeSpan.FromSeconds(1));
 

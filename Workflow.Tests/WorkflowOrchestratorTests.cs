@@ -14,6 +14,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
     private readonly string _rulesPath;
     private readonly TaskPaths _paths;
     private readonly List<PhaseProgress> _progress = [];
+    private readonly FakeTaskStateStore _state = new();
 
     public WorkflowOrchestratorTests()
     {
@@ -54,6 +55,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         new PromptTemplateService(_promptDir),
         new AutoAnswerService(_rulesPath, overridePath: null),
         new ArtifactWatcherFactory(),
+        _state,
         TimeSpan.FromMilliseconds(20),
         TimeSpan.FromMilliseconds(40));
 
@@ -366,6 +368,99 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         Assert.False(File.Exists(_paths.DoneAbsolute));
         Assert.DoesNotContain(
             _progress, p => p.Phase == WorkflowPhase.Implementation && p.Status == PhaseStatus.Completed);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_StartPhaseResolveReview_SkipsPhasesOneAndTwo()
+    {
+        var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+
+        var request = CreateRequest(terminal, signal) with { StartPhase = WorkflowPhase.ResolveReview };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var run = CreateOrchestrator().RunAsync(request, cts.Token);
+
+        await WaitForPhaseAsync(WorkflowPhase.ResolveReview, cts.Token);
+
+        lock (_progress)
+        {
+            Assert.DoesNotContain(_progress, p => p.Phase == WorkflowPhase.Specification);
+            Assert.DoesNotContain(_progress, p => p.Phase == WorkflowPhase.Review);
+        }
+
+        Assert.Single(terminal.StartedSessions);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_ClearsTheJournalTailFromTheStartPhaseBeforeRunning()
+    {
+        // A previously finished task, re-entered at phase 3.
+        var finished = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            finished.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        }
+
+        _state.Seed(_paths, finished);
+
+        var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+
+        var request = CreateRequest(terminal, signal) with { StartPhase = WorkflowPhase.ResolveReview };
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var run = CreateOrchestrator().RunAsync(request, cts.Token);
+
+        await WaitForPhaseAsync(WorkflowPhase.ResolveReview, cts.Token);
+
+        var journal = _state.TryLoad(_paths)!;
+
+        // Phases before the start phase keep their record - they are the resumed run's only
+        // evidence that they happened.
+        Assert.Equal(PhaseStatus.Completed, journal.Phases[0].Status);
+        Assert.Equal(PhaseStatus.Completed, journal.Phases[1].Status);
+
+        // The tail was cleared before anything ran; phase 3 is Active because it is running now
+        // and phase 4 must NOT still read Completed (SPEC 7.4, D24).
+        Assert.Equal(PhaseStatus.Active, journal.Phases[2].Status);
+        Assert.Equal(PhaseStatus.Pending, journal.Phases[3].Status);
+        Assert.Null(journal.Phases[3].CompletedUtc);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task RunAsync_RecordsEveryExecutedPhaseInTheJournal()
+    {
+        var terminal = new FakeTerminalController();
+        var signal = new ManualPhaseSignal();
+        terminal.ReadyGate.TrySetResult();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var run = CreateOrchestrator().RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        await WaitForPhaseAsync(WorkflowPhase.Specification, cts.Token);
+        WriteArtifacts(_paths.SpecAbsolute, _paths.PlanAbsolute);
+        await WaitForPhaseAsync(WorkflowPhase.Review, cts.Token);
+
+        Assert.Equal(
+            new[]
+            {
+                (WorkflowPhase.Specification, PhaseStatus.Active),
+                (WorkflowPhase.Specification, PhaseStatus.Completed),
+                (WorkflowPhase.Review, PhaseStatus.Active),
+            },
+            _state.Recorded.Take(3));
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
