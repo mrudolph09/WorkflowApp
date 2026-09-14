@@ -60,12 +60,24 @@ public partial class App : Application
             startupErrors);
 #pragma warning restore CA2000
 
-        _shell = new MainWindowViewModel(factory, startupErrors);
+        var scanner = new TaskRecoveryScanner(
+            settings,
+            stateStore,
+            maxAge: TimeSpan.FromDays(14),
+            maxTasks: 5,
+            maxSubdirectoriesPerRoot: 2000,
+            scanTimeout: TimeSpan.FromSeconds(5));
+
+        _shell = new MainWindowViewModel(factory, scanner, startupErrors);
 
         var window = new MainWindow { DataContext = _shell };
         window.Closing += (_, _) => _shell.ShutdownAll();
         MainWindow = window;
         window.Show();
+
+        // Not awaited: the window must appear immediately even when an MRU entry is a
+        // disconnected network share. The recovered tabs materialise a moment later.
+        _ = _shell.InitialiseAsync();
 
         if (startupErrors.Count > 0)
         {

@@ -1,5 +1,6 @@
 ﻿using System.IO;
 using System.Windows.Threading;
+using Workflow.Models;
 using Workflow.Services;
 using Workflow.Terminal;
 using Workflow.Tests.Fakes;
@@ -61,7 +62,7 @@ public sealed class MainWindowViewModelTests : IDisposable
     }
 
     private MainWindowViewModel Create(IReadOnlyList<string>? startupErrors = null) =>
-        new(new StubFactory(_settings, startupErrors ?? []), startupErrors ?? []);
+        new(new StubFactory(_settings, startupErrors ?? []), new StubScanner(), startupErrors ?? []);
 
     // --- Regressions pinned by the review -------------------------------------------------
 
@@ -168,5 +169,56 @@ public sealed class MainWindowViewModelTests : IDisposable
         vm.ShutdownAll();
 
         Assert.Empty(vm.Tabs);
+    }
+
+    private sealed class StubScanner(params RecoverableTask[] tasks) : ITaskRecoveryScanner
+    {
+        public Task<IReadOnlyList<RecoverableTask>> ScanAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<RecoverableTask>>(tasks);
+    }
+
+    private RecoverableTask MakeRecoverable(string name)
+    {
+        var paths = new TaskPaths(_root, name);
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        var state = new TaskState { TaskDescription = $"d-{name}", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            state.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Pending, null));
+        }
+
+        return new RecoverableTask(paths, state, WorkflowPhase.Specification);
+    }
+
+    [Fact]
+    public async Task InitialiseAsync_AppendsOneTabPerRecoveredTaskAndSelectsTheFirst()
+    {
+        var shell = new MainWindowViewModel(
+            new StubFactory(_settings, []),
+            new StubScanner(MakeRecoverable("alpha"), MakeRecoverable("beta")),
+            []);
+
+        await shell.InitialiseAsync();
+
+        Assert.Equal(3, shell.Tabs.Count);          // the blank tab plus two recovered ones
+        Assert.Equal("alpha", shell.Tabs[1].TaskName);
+        Assert.Equal("beta", shell.Tabs[2].TaskName);
+        Assert.Same(shell.Tabs[1], shell.SelectedTab);
+
+        shell.ShutdownAll();
+    }
+
+    [Fact]
+    public async Task InitialiseAsync_NothingToRecover_LeavesTheBlankTabSelected()
+    {
+        var shell = new MainWindowViewModel(new StubFactory(_settings, []), new StubScanner(), []);
+
+        await shell.InitialiseAsync();
+
+        Assert.Single(shell.Tabs);
+        Assert.Same(shell.Tabs[0], shell.SelectedTab);
+
+        shell.ShutdownAll();
     }
 }
