@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -14,6 +14,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
     private readonly ITaskFolderService _folders;
     private readonly IWorkflowOrchestrator _orchestrator;
     private readonly ISettingsService _settings;
+    private readonly ITaskStateStore _stateStore;
     private readonly IDirectoryPickerService _picker;
     private readonly ManualPhaseSignal _manualSignal = new();
     private readonly TimeSpan _folderDebounce;
@@ -53,10 +54,18 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private string? _infoMessage;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(StartButtonLabel))]
+    private WorkflowPhase? _resumePhase;
+
+    [ObservableProperty]
+    private bool _isRecovered;
+
     /// <summary>Creates the tab.</summary>
     /// <param name="folders">Task-folder service.</param>
     /// <param name="orchestrator">The four-phase state machine.</param>
     /// <param name="settings">Shared settings, used for the directory MRU.</param>
+    /// <param name="stateStore">The per-task workflow journal, read to re-arm Continue.</param>
     /// <param name="picker">Folder-browser dialog.</param>
     /// <param name="terminal">This tab's terminal.</param>
     /// <param name="folderDebounce">Delay before a name change touches the disk.</param>
@@ -68,6 +77,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
         ITaskFolderService folders,
         IWorkflowOrchestrator orchestrator,
         ISettingsService settings,
+        ITaskStateStore stateStore,
         IDirectoryPickerService picker,
         TerminalViewModel terminal,
         TimeSpan folderDebounce,
@@ -75,10 +85,12 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
     {
         ArgumentNullException.ThrowIfNull(startupErrors);
         ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(stateStore);
 
         _folders = folders;
         _orchestrator = orchestrator;
         _settings = settings;
+        _stateStore = stateStore;
         _picker = picker;
         _folderDebounce = folderDebounce;
         _startupErrors = startupErrors;
@@ -107,6 +119,9 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
     /// <summary>The tab header: the task name, or '(Bezeichnung)' while it is empty.</summary>
     public string Header => string.IsNullOrWhiteSpace(TaskName) ? "(Bezeichnung)" : TaskName.Trim();
 
+    /// <summary>The Start button's caption: 'Continue workflow' once a resume point is known.</summary>
+    public string StartButtonLabel => ResumePhase is null ? "Start workflow" : "Continue workflow";
+
     /// <summary>The four station indicators.</summary>
     public ObservableCollection<PhaseIndicatorViewModel> Phases { get; }
 
@@ -131,6 +146,62 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
         CompleteCurrentPhaseCommand.NotifyCanExecuteChanged();
     }
 
+    /// <summary>Prefills this tab from an interrupted task found by the startup scan.</summary>
+    /// <param name="task">The task to restore.</param>
+    public void LoadForResume(RecoverableTask task)
+    {
+        ArgumentNullException.ThrowIfNull(task);
+
+        // Every assignment below would otherwise schedule the debounced folder sync, which could
+        // try to create - or worse, RENAME - a folder that already holds this task's artefacts.
+        _suppressFolderSync = true;
+
+        try
+        {
+            WorkingDirectory = task.Paths.WorkingDirectory;
+            TaskDescription = task.State.TaskDescription;
+            TaskName = task.Paths.TaskName;
+
+            // The folder and the field now agree, so no rename can ever be attempted.
+            _folderOnDisk = task.Paths.TaskName;
+
+            // The artefact names embed the task name (T_spec.md, T_plan.md, T-review.md,
+            // T-done.md) and the paths are already written into the spec and plan on disk.
+            // Renaming would orphan all of them, so the name is frozen - the same argument
+            // BASE section 8.4 makes for a running pipeline.
+            IsNameLocked = true;
+
+            ApplyJournal(task.State);
+            ResumePhase = task.ResumePhase;
+            IsRecovered = true;
+        }
+        finally
+        {
+            _suppressFolderSync = false;
+        }
+
+        // The startup prompt-template gate still wins over everything (BASE section 9.4).
+        ValidationMessage = _startupErrors.Count > 0
+            ? _startupErrors[0]
+            : _folders.Validate(TaskName, WorkingDirectory) is { IsValid: false } invalid
+                ? invalid.ErrorMessage
+                : null;
+    }
+
+    /// <summary>
+    /// Called when the user closes this tab, as opposed to the application shutting down.
+    /// A recovered task is then not offered again until it is continued (SPEC section 6.7).
+    /// </summary>
+    public void NotifyClosedByUser()
+    {
+        if (!IsRecovered || string.IsNullOrWhiteSpace(WorkingDirectory) || string.IsNullOrWhiteSpace(TaskName))
+        {
+            return;
+        }
+
+        _stateStore.SetDismissed(new TaskPaths(WorkingDirectory, TaskName), dismissed: true);
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -144,6 +215,69 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
         _folderDebounceSource?.Cancel();
         _folderDebounceSource?.Dispose();
         Terminal.Dispose();
+    }
+
+    // An Active entry means the application died while that phase was running. It is about to be
+    // re-run, so it is shown grey, not yellow.
+    private void ApplyJournal(TaskState state)
+    {
+        foreach (var entry in state.Phases)
+        {
+            var indicator = Phases.FirstOrDefault(p => p.Phase == entry.Phase);
+            if (indicator is not null)
+            {
+                indicator.Status = entry.Status == PhaseStatus.Active ? PhaseStatus.Pending : entry.Status;
+            }
+        }
+    }
+
+    // SPEC section 6.6. Two outcomes only: a resumable journal paints the indicators and sets
+    // ResumePhase, and anything else - no journal, or a finished one - resets BOTH.
+    private void RefreshResumeStateFromJournal(TaskPaths paths)
+    {
+        // A recovered tab's resume state came from LoadForResume and must not be recomputed.
+        // StartWorkflow calls SyncFolder directly, bypassing the IsNameLocked guard in
+        // ScheduleFolderSync (that is how a folder deleted between scan and Continue is
+        // recreated), so without this the journal would overwrite ResumePhase microseconds before
+        // it is handed to the orchestrator - and would repaint indicators the orchestrator is
+        // about to drive.
+        if (IsRecovered)
+        {
+            return;
+        }
+
+        var state = _stateStore.TryLoad(paths);
+
+        // The same demote-never-promote rule the startup scan applies, from the same helper: an
+        // unreconciled re-arm would resume into a phase whose inputs have been deleted, which is
+        // exactly what the rule exists to prevent (SPEC section 6.3.2).
+        if (state is not null && PhaseReconciliation.Reconcile(paths, state))
+        {
+            _stateStore.ReplacePhases(paths, [.. state.Phases]);
+        }
+
+        var next = state is null ? null : PhaseReconciliation.FirstIncomplete(state);
+
+        if (state is null || next is null)
+        {
+            // No journal, or a finished task: this tab is a fresh start and must look like one.
+            // Leaving the indicators alone would keep painting the PREVIOUSLY typed task's green
+            // phases onto this one, or show four green phases above a 'Start workflow' button.
+            ResetPhaseIndicators();
+            ResumePhase = null;
+            return;
+        }
+
+        ApplyJournal(state);
+        ResumePhase = next;
+    }
+
+    private void ResetPhaseIndicators()
+    {
+        foreach (var indicator in Phases)
+        {
+            indicator.Status = PhaseStatus.Pending;
+        }
     }
 
     partial void OnTaskNameChanged(string value) => ScheduleFolderSync();
@@ -286,6 +420,13 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
                 _folders.Rename(WorkingDirectory, _folderOnDisk, paths.TaskName);
                 _folderOnDisk = paths.TaskName;
                 InfoMessage = null;
+
+                // Typing the name of an unfinished task - including one the user dismissed by
+                // closing its recovered tab - must bring back 'Continue workflow'. This is what
+                // makes the dismissal non-destructive. Called on BOTH successful exits: this
+                // branch returns before the create branch is reached, so a single call at the end
+                // of the method would leave the postcondition holding on one path only.
+                RefreshResumeStateFromJournal(paths);
                 return;
             }
 
@@ -295,6 +436,8 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
 
             _folders.EnsureCreated(paths);
             _folderOnDisk = paths.TaskName;
+
+            RefreshResumeStateFromJournal(paths);
         }
         catch (IOException ex)
         {
@@ -360,6 +503,11 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
         IsRunning = true;
 
         var paths = new TaskPaths(WorkingDirectory, TaskName);
+
+        // Persist the description BEFORE the run: a crash one second from now must still recover
+        // a tab with its Taskbeschreibung intact.
+        _stateStore.SaveDescription(paths, TaskDescription);
+
         _run = new CancellationTokenSource();
 
         var request = new WorkflowRunRequest(
@@ -367,7 +515,8 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
             TaskDescription,
             Terminal,
             _manualSignal,
-            new Progress<PhaseProgress>(ApplyProgress));
+            new Progress<PhaseProgress>(ApplyProgress),
+            ResumePhase ?? WorkflowPhase.Specification);
 
         _ = RunAsync(request, _run.Token);
     }

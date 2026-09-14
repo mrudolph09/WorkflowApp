@@ -1,9 +1,10 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using Workflow.Models;
 using Workflow.Services;
 using Workflow.Terminal;
+using Workflow.Tests.Fakes;
 using Workflow.ViewModels;
 
 namespace Workflow.Tests;
@@ -49,6 +50,7 @@ public sealed class TaskTabDebounceThreadingTests : IDisposable
         new TaskFolderService(),
         new StubOrchestrator(),
         _settings,
+        new FakeTaskStateStore(),
         new StubDirectoryPicker(),
         new TerminalViewModel(
             new WebViewEnvironmentProvider(),

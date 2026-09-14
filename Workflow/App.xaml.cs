@@ -52,6 +52,7 @@ public partial class App : Application
             new TaskFolderService(),
             orchestrator,
             settings,
+            stateStore,
             new DirectoryPickerService(),
             new WebViewEnvironmentProvider(),
             new ConPtySessionFactory(),

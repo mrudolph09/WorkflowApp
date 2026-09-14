@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
@@ -6,6 +6,7 @@ using System.Windows.Threading;
 using Workflow.Models;
 using Workflow.Services;
 using Workflow.Terminal;
+using Workflow.Tests.Fakes;
 using Workflow.ViewModels;
 
 namespace Workflow.Tests;
@@ -45,7 +46,7 @@ public sealed class TaskTabDirectoryComboBoxTests : IDisposable
         var b = Path.Combine(_root, "bbb"); Directory.CreateDirectory(b);
 
         using var vm = new TaskTabViewModel(
-            new TaskFolderService(), new Orc(), _settings, new Picker(),
+            new TaskFolderService(), new Orc(), _settings, new FakeTaskStateStore(), new Picker(),
             new TerminalViewModel(new WebViewEnvironmentProvider(), new ConPtySessionFactory(), Dispatcher.CurrentDispatcher),
             TimeSpan.FromMilliseconds(50), []);
 
@@ -72,7 +73,7 @@ public sealed class TaskTabDirectoryComboBoxTests : IDisposable
         var a = Path.Combine(_root, "aaa"); Directory.CreateDirectory(a);
 
         using var vm = new TaskTabViewModel(
-            new TaskFolderService(), new Orc(), _settings, new Picker(),
+            new TaskFolderService(), new Orc(), _settings, new FakeTaskStateStore(), new Picker(),
             new TerminalViewModel(new WebViewEnvironmentProvider(), new ConPtySessionFactory(), Dispatcher.CurrentDispatcher),
             TimeSpan.FromMilliseconds(50), []);
 

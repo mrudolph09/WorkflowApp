@@ -1,7 +1,8 @@
-using System.IO;
+﻿using System.IO;
 using System.Windows.Threading;
 using Workflow.Services;
 using Workflow.Terminal;
+using Workflow.Tests.Fakes;
 using Workflow.ViewModels;
 
 namespace Workflow.Tests;
@@ -37,6 +38,7 @@ public sealed class MainWindowViewModelTests : IDisposable
             new TaskFolderService(),
             new StubOrchestrator(),
             settings,
+            new FakeTaskStateStore(),
             new StubPicker(),
             new TerminalViewModel(
                 new WebViewEnvironmentProvider(),

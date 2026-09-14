@@ -1,9 +1,10 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.IO;
 using System.Windows.Threading;
 using Workflow.Models;
 using Workflow.Services;
 using Workflow.Terminal;
+using Workflow.Tests.Fakes;
 using Workflow.ViewModels;
 
 namespace Workflow.Tests;
@@ -36,7 +37,8 @@ public sealed class TaskTabViewModelTests : IDisposable
     private TaskTabViewModel Create(
         IReadOnlyList<string>? startupErrors = null,
         IWorkflowOrchestrator? orchestrator = null,
-        ITaskFolderService? folders = null)
+        ITaskFolderService? folders = null,
+        ITaskStateStore? stateStore = null)
     {
         var terminal = new TerminalViewModel(
             new WebViewEnvironmentProvider(),
@@ -47,6 +49,7 @@ public sealed class TaskTabViewModelTests : IDisposable
             folders ?? new TaskFolderService(),
             orchestrator ?? new StubOrchestrator(),
             _settings,
+            stateStore ?? new FakeTaskStateStore(),
             new StubDirectoryPicker(null),
             terminal,
             folderDebounce: TimeSpan.Zero,
@@ -356,5 +359,272 @@ public sealed class TaskTabViewModelTests : IDisposable
         vm.CloseCommand.Execute(null);
 
         Assert.True(raised);
+    }
+
+    [Fact]
+    public void LoadForResume_PrefillsEveryFieldAndFlipsTheButton()
+    {
+        var store = new FakeTaskStateStore();
+        using var vm = Create(stateStore: store);
+
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        var state = new TaskState { TaskDescription = "die Beschreibung", UpdatedUtc = DateTimeOffset.UtcNow };
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Active, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
+
+        vm.LoadForResume(new RecoverableTask(paths, state, WorkflowPhase.Review));
+
+        Assert.Equal("alpha", vm.TaskName);
+        Assert.Equal("die Beschreibung", vm.TaskDescription);
+        Assert.Equal(_root, vm.WorkingDirectory);
+        Assert.True(vm.IsNameLocked);
+        Assert.True(vm.IsRecovered);
+        Assert.Equal(WorkflowPhase.Review, vm.ResumePhase);
+        Assert.Equal("Continue workflow", vm.StartButtonLabel);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[0].Status);
+
+        // An Active in the journal means the app died mid-phase: it is about to be re-run.
+        Assert.Equal(PhaseStatus.Pending, vm.Phases[1].Status);
+    }
+
+    [Fact]
+    public void StartButtonLabel_FreshTab_SaysStartWorkflow()
+    {
+        using var vm = Create();
+
+        Assert.Equal("Start workflow", vm.StartButtonLabel);
+        Assert.Null(vm.ResumePhase);
+        Assert.False(vm.IsRecovered);
+    }
+
+    [Fact]
+    public void StartWorkflow_OnARecoveredTab_RunsFromTheResumePhase()
+    {
+        var store = new FakeTaskStateStore();
+        var orchestrator = new CapturingOrchestrator();
+        using var vm = Create(orchestrator: orchestrator, stateStore: store);
+
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            state.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Pending, null));
+        }
+
+        vm.LoadForResume(new RecoverableTask(paths, state, WorkflowPhase.ResolveReview));
+        vm.StartWorkflowCommand.Execute(null);
+
+        Assert.NotNull(orchestrator.Request);
+        Assert.Equal(WorkflowPhase.ResolveReview, orchestrator.Request.StartPhase);
+        Assert.Contains("d", store.Descriptions);
+    }
+
+    [Fact]
+    public void NotifyClosedByUser_RecoveredTab_Dismisses()
+    {
+        var store = new FakeTaskStateStore();
+        using var vm = Create(stateStore: store);
+
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        var state = new TaskState { UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            state.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Pending, null));
+        }
+
+        vm.LoadForResume(new RecoverableTask(paths, state, WorkflowPhase.Specification));
+        vm.NotifyClosedByUser();
+
+        Assert.Contains(store.Dismissals, d => d.Dismissed);
+    }
+
+    [Fact]
+    public void NotifyClosedByUser_FreshTab_DoesNothing()
+    {
+        var store = new FakeTaskStateStore();
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+
+        vm.NotifyClosedByUser();
+
+        Assert.Empty(store.Dismissals);
+    }
+
+    [Fact]
+    public void TypingAnUnfinishedTaskName_ReArmsContinue()
+    {
+        var store = new FakeTaskStateStore();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        // The journal's "phase 1 Completed" must be backed by the artefacts, or the shared
+        // demote-never-promote reconciliation correctly pushes the resume point back to phase 1
+        // (SPEC 6.3.2). This test is about the RE-ARM, not about demotion.
+        File.WriteAllText(paths.SpecAbsolute, "spec");
+        File.WriteAllText(paths.PlanAbsolute, "plan");
+
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
+        store.Seed(paths, state);
+
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+
+        Assert.Equal(WorkflowPhase.Review, vm.ResumePhase);
+        Assert.Equal("Continue workflow", vm.StartButtonLabel);
+    }
+
+    [Fact]
+    public void SwitchingToADirectoryWithoutAJournal_ClearsResumeAndRepaintsEveryIndicatorGrey()
+    {
+        var store = new FakeTaskStateStore();
+
+        var other = Path.Combine(_root, "other-workspace");
+        Directory.CreateDirectory(other);
+
+        var alpha = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(alpha.TaskDirectory);
+
+        // Backs the journal's "phase 1 Completed" so the reconciliation leaves it alone; this
+        // test is about the RESET on switching directory, not about demotion.
+        File.WriteAllText(alpha.SpecAbsolute, "spec");
+        File.WriteAllText(alpha.PlanAbsolute, "plan");
+
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
+        store.Seed(alpha, state);
+
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[0].Status);
+        Assert.Equal(WorkflowPhase.Review, vm.ResumePhase);
+
+        // Same task NAME, different working directory - the case that actually reaches a
+        // different folder. (Retyping the name alone renames the folder and carries its journal
+        // along with it, so the resume state legitimately survives that.) The green indicator
+        // belonged to the old directory's alpha and would otherwise claim that this alpha's
+        // phase 1 is finished (SPEC 6.6, R15).
+        vm.WorkingDirectory = other;
+
+        Assert.Null(vm.ResumePhase);
+        Assert.Equal("Start workflow", vm.StartButtonLabel);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void TypingACompletedTaskName_ClearsResumeAndRepaintsEveryIndicatorGrey()
+    {
+        var store = new FakeTaskStateStore();
+        var paths = new TaskPaths(_root, "fertig");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        // A genuinely finished task has every artefact on disk; without them the reconciliation
+        // would rightly demote phase 1 and this would no longer be the "completed task" case.
+        File.WriteAllText(paths.SpecAbsolute, "spec");
+        File.WriteAllText(paths.PlanAbsolute, "plan");
+        File.WriteAllText(paths.ReviewAbsolute, "review");
+        File.WriteAllText(paths.DoneAbsolute, "done");
+
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            state.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        }
+
+        store.Seed(paths, state);
+
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "fertig";
+
+        // The button already reads 'Start workflow' because nothing is resumable. Four green
+        // indicators above it would paint an about-to-start run as already finished.
+        Assert.Null(vm.ResumePhase);
+        Assert.Equal("Start workflow", vm.StartButtonLabel);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void TypingATaskWhoseArtefactVanished_ReconcilesLikeTheStartupScan()
+    {
+        var store = new TaskStateStore();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        store.SaveDescription(paths, "d");
+        File.WriteAllText(paths.SpecAbsolute, "spec");
+        File.WriteAllText(paths.PlanAbsolute, "plan");
+        store.RecordPhase(paths, WorkflowPhase.Specification, PhaseStatus.Completed);
+
+        // The plan is gone, so phase 1 is no longer backed by its artefacts.
+        File.Delete(paths.PlanAbsolute);
+
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+
+        // Without the shared reconciliation this reads Review and resumes phase 2 with no plan
+        // on disk (SPEC 6.3.2, R14).
+        Assert.Equal(WorkflowPhase.Specification, vm.ResumePhase);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void StartWorkflow_OnARecoveredTab_DoesNotRecomputeResumePhase()
+    {
+        var store = new FakeTaskStateStore();
+        var orchestrator = new CapturingOrchestrator();
+        using var vm = Create(orchestrator: orchestrator, stateStore: store);
+
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+
+        // The journal on disk still claims phases 1-3 are complete; the recovered tab was handed
+        // the reconciled view that demoted them. StartWorkflow calls SyncFolder directly, and the
+        // re-arm must not overwrite ResumePhase from that journal (SPEC 6.6).
+        var onDisk = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
+        store.Seed(paths, onDisk);
+
+        var reconciled = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
+        foreach (var definition in PhaseCatalog.All)
+        {
+            reconciled.Phases.Add(new TaskPhaseState(definition.Phase, PhaseStatus.Pending, null));
+        }
+
+        vm.LoadForResume(new RecoverableTask(paths, reconciled, WorkflowPhase.Specification));
+        vm.StartWorkflowCommand.Execute(null);
+
+        Assert.NotNull(orchestrator.Request);
+        Assert.Equal(WorkflowPhase.Specification, orchestrator.Request.StartPhase);
+    }
+
+    private sealed class CapturingOrchestrator : IWorkflowOrchestrator
+    {
+        public WorkflowRunRequest? Request { get; private set; }
+
+        public Task RunAsync(WorkflowRunRequest request, CancellationToken cancellationToken)
+        {
+            Request = request;
+            return Task.Delay(Timeout.Infinite, cancellationToken);
+        }
     }
 }

@@ -1,4 +1,4 @@
-using System.Windows.Threading;
+﻿using System.Windows.Threading;
 using Workflow.Terminal;
 using Workflow.ViewModels;
 
@@ -12,6 +12,7 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
     private readonly ITaskFolderService _folders;
     private readonly IWorkflowOrchestrator _orchestrator;
     private readonly ISettingsService _settings;
+    private readonly ITaskStateStore _stateStore;
     private readonly IDirectoryPickerService _picker;
     private readonly IWebViewEnvironmentProvider _environment;
     private readonly ITerminalSessionFactory _sessions;
@@ -22,6 +23,7 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
     /// <param name="folders">Task-folder service.</param>
     /// <param name="orchestrator">The four-phase state machine.</param>
     /// <param name="settings">Shared settings.</param>
+    /// <param name="stateStore">The per-task workflow journal, shared by every tab.</param>
     /// <param name="picker">Folder-browser dialog.</param>
     /// <param name="environment">Shared WebView2 environment.</param>
     /// <param name="sessions">Pseudo-console session factory.</param>
@@ -35,6 +37,7 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
         ITaskFolderService folders,
         IWorkflowOrchestrator orchestrator,
         ISettingsService settings,
+        ITaskStateStore stateStore,
         IDirectoryPickerService picker,
         IWebViewEnvironmentProvider environment,
         ITerminalSessionFactory sessions,
@@ -46,6 +49,7 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
         _folders = folders;
         _orchestrator = orchestrator;
         _settings = settings;
+        _stateStore = stateStore;
         _picker = picker;
         _environment = environment;
         _sessions = sessions;
@@ -58,6 +62,7 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
         _folders,
         _orchestrator,
         _settings,
+        _stateStore,
         _picker,
         new TerminalViewModel(_environment, _sessions, _dispatcher),
         FolderDebounce,
