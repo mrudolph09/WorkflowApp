@@ -168,3 +168,30 @@ the two 6.2 contract tests) run together: **11 passed, 0 failed**.
   suppression is a local `#pragma` with a justification (D-3).
 - Tests: **260 passed, 1 failed** (pre-existing, F-1). Baseline before this work was 204 passing;
   this feature added 57 tests.
+
+## 2026-09-14 — Final specification-compliance review
+
+An independent reviewer (subagent, no shell access; verified by reading the final state of every
+relevant source file) checked the implementation against all 12 load-bearing requirements of the
+canonical spec.
+
+**Result: no defects at or above the confidence bar. All 12 CONFIRMED-CORRECT**, each with
+file:line evidence:
+
+| # | Requirement | Evidence |
+|---|---|---|
+| 1 | Tolerant read DTO (5.2/5.4, D19) | TaskStateStore.cs:155-168, 173 |
+| 2 | ReplacePhases no-op + no UpdatedUtc stamp (5.4) | TaskStateStore.cs:114-129 |
+| 3 | MRU snapshot, awaiting-side deadline, None token, deferred CTS dispose (6.2, D21/D22) | TaskRecoveryScanner.cs:48, 66, 77, 86-90 |
+| 4 | One shared PhaseReconciliation, both callers persist, ResolveReview never demoted (6.3.x, D17/D18) | PhaseReconciliation.cs:89; TaskRecoveryScanner.cs:188-191; TaskTabViewModel.cs:254-257 |
+| 5 | Re-arm resets both, on both SyncFolder exits, skipped when IsRecovered (6.6, R15) | TaskTabViewModel.cs:244-247, 261-269, 429, 440 |
+| 6 | Enum.IsDefined, Skip, tail cleared before the loop (7.2/7.4, D24) | WorkflowOrchestrator.cs:48-51, 58, 62, 73-89 |
+| 7 | Store before Progress.Report (7.3) | WorkflowOrchestrator.cs:98-99, 149-150 |
+| 8 | Phase 4 FilesExist, stale marker deleted before the watcher, Manual gone (8.1/8.3) | WorkflowOrchestrator.cs:105-108, 111; WorkflowPhase.cs:33-43 |
+| 9 | Quiet gate starts at the paste, OutputCount verify, bounded retry (9.3, D20) | WorkflowOrchestrator.cs:194-224, 226-242 |
+| 10 | Four tunables on the private RuleSetDto, <=0 normalised (9.4, D23) | AutoAnswerService.cs:106-115, 118-146 |
+| 11 | LoadForResume order, Active downgraded to Pending (6.5) | TaskTabViewModel.cs:151-189, 229 |
+| 12 | Dismissal in CloseTab only (6.7) | MainWindowViewModel.cs:114 vs 80-90 |
+
+Nothing in the change set contradicts the specification or silently alters the architecture beyond
+what SPEC section 13's decision log already records.
