@@ -1,4 +1,4 @@
-namespace Workflow.Models;
+﻿namespace Workflow.Models;
 
 /// <summary>The four phase definitions, in pipeline order.</summary>
 public static class PhaseCatalog
@@ -11,7 +11,7 @@ public static class PhaseCatalog
         new PhaseDefinition(
             WorkflowPhase.Review, "Review", "codex --yolo", "review_prompt.md", CompletionRule.FilesExist),
         new PhaseDefinition(
-            WorkflowPhase.ResolveReview, "Review umsetzen", "yo", "resolve_review_prompt.md", CompletionRule.AnyContentChanged),
+            WorkflowPhase.ResolveReview, "Review umsetzen", "yo", "resolve_review_prompt.md", CompletionRule.AllContentChanged),
         new PhaseDefinition(
             WorkflowPhase.Implementation, "Implementierung", "yo", "implementation_prompt.md", CompletionRule.Manual),
     ];

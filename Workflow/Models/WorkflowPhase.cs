@@ -1,4 +1,4 @@
-namespace Workflow.Models;
+﻿namespace Workflow.Models;
 
 /// <summary>One of the four stations of the workflow pipeline.</summary>
 public enum WorkflowPhase
@@ -37,6 +37,9 @@ public enum CompletionRule
 
     /// <summary>At least one watched path differs from its baseline hash.</summary>
     AnyContentChanged,
+
+    /// <summary>Every watched path differs from its baseline hash.</summary>
+    AllContentChanged,
 
     /// <summary>Only the user can end the phase.</summary>
     Manual,

@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using Workflow.Models;
 using Workflow.Services;
 
@@ -210,6 +210,32 @@ public sealed class ArtifactWatcherTests : IDisposable
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(700));
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => watcher.WaitAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task AllContentChanged_OneOfTwoFilesChanged_DoesNotComplete()
+    {
+        await File.WriteAllTextAsync(P("spec.md"), "one");
+        await File.WriteAllTextAsync(P("plan.md"), "two");
+
+        using var watcher = Create(CompletionRule.AllContentChanged, "spec.md", "plan.md");
+        await File.WriteAllTextAsync(P("spec.md"), "one changed");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(700));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => watcher.WaitAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task AllContentChanged_BothFilesChanged_Completes()
+    {
+        await File.WriteAllTextAsync(P("spec.md"), "one");
+        await File.WriteAllTextAsync(P("plan.md"), "two");
+
+        using var watcher = Create(CompletionRule.AllContentChanged, "spec.md", "plan.md");
+        await File.WriteAllTextAsync(P("spec.md"), "one changed");
+        await File.WriteAllTextAsync(P("plan.md"), "two changed");
+
+        Assert.True(await CompletesAsync(watcher));
     }
 
     [Fact]

@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Security.Cryptography;
 using Workflow.Models;
 
@@ -163,6 +163,7 @@ public sealed class ArtifactWatcher : IArtifactWatcher
         {
             CompletionRule.FilesExist => _paths.All(IsPresentAndNonEmpty),
             CompletionRule.AnyContentChanged => _paths.Any(HasChangedSinceBaseline),
+            CompletionRule.AllContentChanged => _paths.All(HasChangedSinceBaseline),
             _ => false,
         };
 

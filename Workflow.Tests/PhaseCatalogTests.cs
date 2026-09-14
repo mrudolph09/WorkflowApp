@@ -1,4 +1,4 @@
-using Workflow.Models;
+﻿using Workflow.Models;
 
 namespace Workflow.Tests;
 
@@ -19,7 +19,7 @@ public class PhaseCatalogTests
     [Theory]
     [InlineData(WorkflowPhase.Specification, "Spezifikation", "yo", "initial_prompt.md", CompletionRule.FilesExist)]
     [InlineData(WorkflowPhase.Review, "Review", "codex --yolo", "review_prompt.md", CompletionRule.FilesExist)]
-    [InlineData(WorkflowPhase.ResolveReview, "Review umsetzen", "yo", "resolve_review_prompt.md", CompletionRule.AnyContentChanged)]
+    [InlineData(WorkflowPhase.ResolveReview, "Review umsetzen", "yo", "resolve_review_prompt.md", CompletionRule.AllContentChanged)]
     [InlineData(WorkflowPhase.Implementation, "Implementierung", "yo", "implementation_prompt.md", CompletionRule.Manual)]
     public void For_ReturnsTheSpecifiedDefinition(
         WorkflowPhase phase, string displayName, string launcher, string promptFile, CompletionRule rule)
