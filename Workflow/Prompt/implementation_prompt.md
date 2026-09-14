@@ -1,4 +1,4 @@
-Implement the approved feature using Superpowers together with planning-with-files.
+﻿Implement the approved feature using Superpowers together with planning-with-files.
 
 Spezifikation:
 {spec_path}
@@ -97,3 +97,14 @@ Completion requires:
 * no unresolved implementation blockers
 * final implementation reviewed against the canonical specification and plan
 * PWF execution state accurately reflecting completion
+
+
+## Signalling completion
+
+When, and only when, every condition under "Completion" above is satisfied, write a short
+completion report to {done_path} as the very last action of this session. The file must not be
+empty: one or two sentences naming what was implemented and the result of `Workflow\verify.ps1`
+is enough.
+
+The application watches for this file. Until it exists, the workflow is considered unfinished
+and will offer to resume this task the next time it starts.

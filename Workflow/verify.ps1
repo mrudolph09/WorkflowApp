@@ -1,4 +1,4 @@
-#Requires -Version 7
+﻿#Requires -Version 7
 <#
 .SYNOPSIS
     Acceptance gate for the Workflow application.
@@ -57,7 +57,7 @@ foreach ($relative in $required) {
 
 Write-Host 'V4  Prompt templates'
 $promptDir = Join-Path $repo 'Workflow\Prompt'
-$known = @('taskbezeichnung', 'taskbeschreibung', 'AppDirectory', 'spec_path', 'plan_path', 'review_path')
+$known = @('taskbezeichnung', 'taskbeschreibung', 'AppDirectory', 'spec_path', 'plan_path', 'review_path', 'done_path')
 
 foreach ($file in Get-ChildItem -Path $promptDir -Filter '*.md') {
     $content = Get-Content -Raw -Path $file.FullName
@@ -76,6 +76,8 @@ Assert-True (-not (Select-String -Path (Join-Path $promptDir 'implementation_pro
     'implementation_prompt.md has no stray {plan_path}_'
 Assert-True (Select-String -Path (Join-Path $promptDir 'review_prompt.md') -Pattern '\{review_path\}' -Quiet) `
     'review_prompt.md uses {review_path}'
+Assert-True (Select-String -Path (Join-Path $promptDir 'implementation_prompt.md') -Pattern '\{done_path\}' -Quiet) `
+    'implementation_prompt.md uses {done_path}'
 
 Write-Host ''
 if ($failures.Count -gt 0) {

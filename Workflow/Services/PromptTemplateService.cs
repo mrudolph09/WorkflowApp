@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using Workflow.Models;
@@ -17,6 +17,7 @@ public static class PromptVariables
         "spec_path",
         "plan_path",
         "review_path",
+        "done_path",
     };
 
     /// <summary>Builds the substitution dictionary for one task.</summary>
@@ -35,6 +36,7 @@ public static class PromptVariables
             ["spec_path"] = paths.SpecRelative,
             ["plan_path"] = paths.PlanRelative,
             ["review_path"] = paths.ReviewRelative,
+            ["done_path"] = paths.DoneRelative,
         };
     }
 }

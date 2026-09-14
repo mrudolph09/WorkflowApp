@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text;
 using Workflow.Models;
 using Workflow.Services;
@@ -202,5 +202,16 @@ public sealed class PromptTemplateServiceTests : IDisposable
         Assert.Equal("beschreibung", variables["taskbeschreibung"]);
         Assert.Equal(@"C:\src\demo", variables["AppDirectory"]);
         Assert.Equal("./my-task/my-task-review.md", variables["review_path"]);
+    }
+
+    [Fact]
+    public void For_MapsDonePathToTheRelativeMarkerPath()
+    {
+        var paths = new TaskPaths(@"C:\work", "demo");
+
+        var variables = PromptVariables.For(paths, "beschreibung");
+
+        Assert.Equal("./demo/demo-done.md", variables["done_path"]);
+        Assert.Contains("done_path", PromptVariables.KnownNames);
     }
 }
