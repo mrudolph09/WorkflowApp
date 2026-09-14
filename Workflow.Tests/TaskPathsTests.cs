@@ -79,4 +79,14 @@ public class TaskPathsTests
 
         Assert.Equal("my-task", paths.TaskName);
     }
+
+    [Fact]
+    public void Constructor_DerivesTheJournalAndDoneMarkerPaths()
+    {
+        var paths = new TaskPaths(@"C:\work", "Feature X");
+
+        Assert.Equal(@"C:\work\Feature X\.workflow-state.json", paths.StateAbsolute);
+        Assert.Equal(@"C:\work\Feature X\Feature X-done.md", paths.DoneAbsolute);
+        Assert.Equal("./Feature X/Feature X-done.md", paths.DoneRelative);
+    }
 }

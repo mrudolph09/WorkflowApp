@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 
 namespace Workflow.Models;
 
@@ -23,10 +23,13 @@ public sealed class TaskPaths
         SpecAbsolute = Path.Combine(TaskDirectory, $"{TaskName}_spec.md");
         PlanAbsolute = Path.Combine(TaskDirectory, $"{TaskName}_plan.md");
         ReviewAbsolute = Path.Combine(TaskDirectory, $"{TaskName}-review.md");
+        DoneAbsolute = Path.Combine(TaskDirectory, $"{TaskName}-done.md");
+        StateAbsolute = Path.Combine(TaskDirectory, ".workflow-state.json");
 
         SpecRelative = $"./{TaskName}/{TaskName}_spec.md";
         PlanRelative = $"./{TaskName}/{TaskName}_plan.md";
         ReviewRelative = $"./{TaskName}/{TaskName}-review.md";
+        DoneRelative = $"./{TaskName}/{TaskName}-done.md";
     }
 
     /// <summary>Directory the terminal changes into; also the value of the {AppDirectory} token.</summary>
@@ -55,4 +58,21 @@ public sealed class TaskPaths
 
     /// <summary>Value substituted for the {review_path} token.</summary>
     public string ReviewRelative { get; }
+
+    /// <summary>Absolute path of the phase-4 completion marker written by the CLI.</summary>
+    /// <remarks>
+    /// Hyphen, not underscore - it matches <see cref="ReviewAbsolute"/>. The spec and plan
+    /// artefacts use underscores; that inconsistency is pre-existing and the token values are
+    /// already baked into specs on disk, so it is preserved rather than "fixed".
+    /// </remarks>
+    public string DoneAbsolute { get; }
+
+    /// <summary>Value substituted for the {done_path} token.</summary>
+    public string DoneRelative { get; }
+
+    /// <summary>
+    /// Absolute path of the workflow journal. This is the app's own bookkeeping file, not an
+    /// artefact any CLI writes, and it is deliberately NOT one of the watched paths.
+    /// </summary>
+    public string StateAbsolute { get; }
 }
