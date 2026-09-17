@@ -1059,16 +1059,23 @@ into line with them.
 
 | # | Current text | Required change | Why |
 |---|--------------|-----------------|-----|
-| P1 | `subtask_path = {task_path}/subtasks` (absolute, derived from `task_path`) | State that `{subtask_path}` is **relative to `{workflow_path}`** and equals `{tasktitel}/subtasks`. Keep `task_path = {workflow_path}/{tasktitel}` as prose only. | `run_subtask.md` composes `{workflow_path}\{subtask_path}\…`; an absolute `{subtask_path}` double-prefixes (section 5.3). |
+| P0 | `task_path = {workflow_path}/{tasktitel}` and `{subtask_path}/{subtask_title}` — i.e. the file uses `{task_path}` and `{subtask_title}` in **brace** syntax | Every name the *application* does not substitute must use **angle brackets**: `<task_path>`, `<subtask_title>`. Only `{workflow_path}`, `{tasktitel}`, `{subtask_path}`, `{spec_path}` and `{plan_path}` may keep braces in this file. | Two separate defects. (a) `{task_path}` is in no token set, so `PromptTemplateService.Render` throws `PromptTemplateException` and — once 14.3 lands — `ValidateAll` disables `Start workflow` on every tab at startup. (b) `{subtask_title}` in this file is a name **Claude invents per subtask**; substituting one value for it would destroy the instruction. Angle brackets are invisible to the token regex (F6), so the two kinds of name stop competing for one syntax. |
+| P1 | `subtask_path = {task_path}/subtasks` (absolute, derived from `task_path`) | State that `{subtask_path}` is **relative to `{workflow_path}`** and equals `{tasktitel}/subtasks`. Keep `<task_path> = {workflow_path}/{tasktitel}` as prose only. | `run_subtask.md` composes `{workflow_path}\{subtask_path}\…`; an absolute `{subtask_path}` double-prefixes (section 5.3). |
 | P2 | `erzeugst du die flagdatei {workflow_path}/results.json` | `{workflow_path}/{tasktitel}/result.json` | Repository root is shared by all tasks (10.4); singular name (10.5). |
 | P3 | `results.json` / `result.json` used interchangeably | `result.json` everywhere | 10.5 |
 | P4 | Flag file content unspecified; `task_template` ships it empty | The flag must be **non-empty** and must contain the ordered index of section 6.1 (`version`, `task`, `subtasks`) | A zero-byte file never satisfies `FilesExist` (10.3); the ordered list is the binding execution order (6.1). |
-| P5 | `status.json` example present, but writing it is not stated as mandatory | State that **every** subtask folder must contain a `status.json`, initially `{"subtask": "<title>", "status": "pending"}` | The ledger needs a file to read before a subtask runs; without it a not-yet-started subtask is indistinguishable from a missing folder. |
+| P5 | `status.json` example present, but writing it is not stated as mandatory | State that **every** subtask folder must contain a `status.json`, initially with `"status": "pending"` and the subtask's own title. Write the example over several lines so no `{name}` pattern is formed (F6). | The ledger needs a file to read before a subtask runs; without it a not-yet-started subtask is indistinguishable from a missing folder. |
 | P6 | `.tmp` + rename described for the flag | Keep, and state it applies to `status.json` too | Uniform rule (10.2). |
 | P7 | — | Add: subtask folder names must be plain names without `\`, `/`, `:` or `..` | `SubtaskPaths.IsValidTitle` rejects anything else (5.2). |
 
 `{tasktitel}` is supplied by the application, so the file needs no change for that token.
-The embedded JSON example needs no escaping (F6).
+The embedded JSON example needs no escaping (F6), because every `{` in it is followed by a newline
+or a quote rather than by an identifier.
+
+**Sequencing consequence:** because of P0, `ValidateAll` (section 14.3) would reject the *shipped*
+`create_subtasks.md` and disable `Start workflow` on every tab. The prompt corrections of 14.1 and
+14.2 must therefore be applied **before** the stricter validation of 14.3 is switched on. The
+implementation plan orders the tasks accordingly.
 
 ### 14.2 `Workflow/Prompt/run_subtask.md`
 
@@ -1325,3 +1332,5 @@ Prerequisite: the section 14 prompt changes and T1 have been applied.
 | D18 | The app reads only `result.json`, `status.json` and `subtask.md`. | Every other file would become an undocumented completion rule. 10.7. |
 | D19 | Prompt and `task_template` corrections are proposals carried by the plan, not changes made now. | Explicit instruction for this session. Sections 14 and 15 are the binding target texts. |
 | D20 | Subtask titles are validated as single safe path segments. | The titles come from AI-written JSON and are used to compose paths that the app deletes files from. 5.2. |
+| D21 | In prompt templates, `{name}` is reserved for values the **application** substitutes; names the CLI invents for itself use `<name>`. | `create_subtasks.md` uses `{task_path}` (which no token set defines) and `{subtask_title}` (a name Claude picks per subtask). One syntax for two meanings makes the first a startup error and the second an instruction the renderer would destroy. 14.1/P0. |
+| D22 | The prompt corrections (14.1, 14.2) are sequenced **before** the stricter `ValidateAll` (14.3). | Switching validation on first would disable `Start workflow` on every tab until the prompts are fixed. |
