@@ -9,9 +9,16 @@ namespace Workflow.Models;
 /// recovery can share it without agreeing on a refresh protocol.
 /// </summary>
 /// <remarks>
-/// This part of the ledger covers the task-level ordered index. The index is the sole source of
-/// execution order: there is no alphabetical fallback and no directory listing anywhere in this
-/// code path (requirement 6.1).
+/// <para>
+/// The index is the sole source of execution order and of the set of entries: there is no
+/// alphabetical fallback and no directory listing anywhere in this file (requirement 6.1). Every
+/// path it touches is composed by <see cref="SubtaskPaths"/> from a title the index listed.
+/// </para>
+/// <para>
+/// Nothing here is cached and nothing here is persisted. Each call re-reads the current contents,
+/// which is what lets the loop, the indicator and recovery derive progress from the tracking files
+/// alone, without a stored current-subtask cursor (requirement 4.5).
+/// </para>
 /// </remarks>
 public static class SubtaskLedger
 {
@@ -20,6 +27,18 @@ public static class SubtaskLedger
 
     /// <summary>Reason carried by an entry whose title is blank, whitespace-only or not a JSON string.</summary>
     private const string BlankTitleReason = "Der Index enthält einen leeren Subtask-Namen.";
+
+    /// <summary>The only status value that completes a subtask. Compared case-insensitively.</summary>
+    private const string CompleteValue = "complete";
+
+    /// <summary>The only status value that fails a subtask on its own. Compared case-insensitively.</summary>
+    private const string FailedValue = "failed";
+
+    /// <summary>Reason used when a subtask reports <c>failed</c> without a <c>failreason</c>.</summary>
+    private const string UnexplainedFailureReason = "Der Subtask meldet einen Fehlschlag ohne Begründung.";
+
+    /// <summary>Reason used when a subtask's status payload is unreadable or malformed.</summary>
+    private const string UnusableStatusReason = "Die Statusdatei des Subtasks ist unlesbar oder fehlerhaft.";
 
     // Same permissiveness as the journal's read path: trailing commas and comments are the two
     // things a hand-edited tracking file most often acquires, and neither changes the meaning.
@@ -30,7 +49,110 @@ public static class SubtaskLedger
     };
 
     /// <summary>
-    /// Reads the task-level ordered index and normalises it into one entry per unique title.
+    /// Reads everything the tracking files say about one task's subtasks: the states in index order
+    /// plus the counts derived from them.
+    /// </summary>
+    /// <param name="paths">The tracking paths of the task whose evidence is read.</param>
+    /// <returns>
+    /// The snapshot, or <see langword="null"/> when the ordered index itself is unusable. A null
+    /// result is not "nothing is done"; it is "the evidence could not be read", and requirement 4.6
+    /// forbids completing or demoting a task from it.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
+    /// <remarks>
+    /// <para>
+    /// Each entry is derived from the resolved table in the design's <em>Tracking Files</em> section,
+    /// evaluated in this order:
+    /// </para>
+    /// <list type="number">
+    /// <item><description>
+    /// an unsafe or blank title is already <see cref="SubtaskStatus.Failed"/> when the index is
+    /// parsed and is never taken to the filesystem (requirement 2.10);
+    /// </description></item>
+    /// <item><description>
+    /// a status payload that reads <em>and</em> parses decides the outcome on <c>complete</c> and
+    /// <c>failed</c> alone, compared case-insensitively;
+    /// </description></item>
+    /// <item><description>
+    /// a payload that cannot be read or does not parse is <see cref="SubtaskStatus.Failed"/>.
+    /// Settling the race against a session that is still publishing is the caller's job, at 200 ms
+    /// up to five times (requirement 2.11, design issue 10); the ledger reports what is on disk now;
+    /// </description></item>
+    /// <item><description>
+    /// every other parsed value - including <c>pending</c> and anything unrecognised - and an absent
+    /// payload leave the entry unfinished (design issue 1), and an unfinished entry then needs a
+    /// usable description: a missing, empty or unreadable <c>subtask.md</c> fails that entry and only
+    /// that entry (requirement 2.10, design issue 5).
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// A completion status therefore outranks both a description deleted after the fact and a flag
+    /// that was never published, which is exactly what requirement 4.4 asks of recovery. The
+    /// per-subtask completion flag is not evidence here at all: both table rows that mention it are
+    /// Pending, so the flag remains what it is for the orchestrator - the trigger to start settling,
+    /// never an outcome by itself.
+    /// </para>
+    /// </remarks>
+    public static SubtaskSnapshot? TryRead(SubtaskPaths paths)
+    {
+        var index = TryReadIndex(paths);
+        if (index is null)
+        {
+            return null;
+        }
+
+        var states = new List<SubtaskState>(index.Count);
+        foreach (var entry in index)
+        {
+            // An entry the index itself failed carries a title that must never compose a path, so it
+            // is passed through untouched - reason and all.
+            states.Add(entry.Status == SubtaskStatus.Failed ? entry : Derive(paths, entry.Title));
+        }
+
+        return new SubtaskSnapshot(states);
+    }
+
+    /// <summary>Reports whether an existing decomposition may be reused instead of running a new one.</summary>
+    /// <param name="paths">The tracking paths of the task.</param>
+    /// <returns>True when the ordered index is readable.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
+    /// <remarks>
+    /// The readable ordered index is the <em>only</em> condition (requirement 2.3, design issue 5).
+    /// Descriptions are deliberately not required, not even one per entry: an agent that tidies up a
+    /// finished subtask's <c>subtask.md</c> would otherwise destroy a curated index and force a whole
+    /// rebuild. A folder without a usable description fails its own entry in <see cref="TryRead"/>
+    /// instead, and the run continues with the others.
+    /// </remarks>
+    public static bool IsDecomposed(SubtaskPaths paths) => TryReadIndex(paths) is not null;
+
+    /// <summary>Reports whether every subtask of the task is complete.</summary>
+    /// <param name="paths">The tracking paths of the task.</param>
+    /// <returns>True when the index is readable and every one of its entries is complete.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
+    /// <remarks>
+    /// The condition is <c>Completed == Total</c> on a freshly read snapshot (design issue 6a), never
+    /// "no failures": an all-pending task has zero failures and is plainly not done. An unusable
+    /// index answers false rather than true, so unreadable final evidence can never complete a task
+    /// (requirement 4.6, design issue 9). <c>Total &gt; 0</c> is stated rather than assumed; the index
+    /// reader never yields an empty usable result, and completion must not hinge on that staying true.
+    /// </remarks>
+    public static bool AllComplete(SubtaskPaths paths)
+    {
+        var snapshot = TryRead(paths);
+
+        return snapshot is not null && snapshot.Total > 0 && snapshot.Completed == snapshot.Total;
+    }
+
+    /// <summary>
+    /// Reads the task-level ordered index and normalises it into one entry per unique title. This is
+    /// a <em>deliberate fourth member</em> beyond the three the design's <em>Paths and Ledger</em>
+    /// section names, retained rather than hidden because the index step answers a question the other
+    /// three cannot: "is there an order at all", separately from "what does the evidence say".
+    /// <see cref="IsDecomposed"/> reduces that to a boolean and <see cref="TryRead"/> folds it into a
+    /// snapshot, so a caller that needs the raw ordered titles - and a test that needs to pin
+    /// requirements 2.12 and 6.1 without staging a subtask folder per entry - would otherwise have to
+    /// re-parse <c>result.json</c> itself, which is exactly the duplication this class exists to
+    /// prevent. It reads the index only and never touches a subtask folder.
     /// </summary>
     /// <param name="paths">The tracking paths of the task whose index is read.</param>
     /// <returns>
@@ -190,5 +312,165 @@ public static class SubtaskLedger
             : $"Unsicherer Subtask-Name: '{title}'.";
 
         return new SubtaskState(title, SubtaskStatus.Failed, reason);
+    }
+
+    /// <summary>Derives one safely titled entry's state from its status payload and description.</summary>
+    /// <param name="paths">The tracking paths of the task.</param>
+    /// <param name="title">A title that already satisfies <see cref="SubtaskPaths.IsValidTitle"/>.</param>
+    /// <returns>The state the evidence on disk establishes for that entry.</returns>
+    private static SubtaskState Derive(SubtaskPaths paths, string title)
+    {
+        var (evidence, reason) = ReadStatus(paths.SubtaskStatusFile(title));
+
+        switch (evidence)
+        {
+            case StatusEvidence.Complete:
+                // The precedence rule lives here: nothing below this line can undo a completion, so a
+                // description deleted afterwards or a flag never published cannot demote it (4.4).
+                return new SubtaskState(title, SubtaskStatus.Complete);
+
+            case StatusEvidence.Failed:
+                return new SubtaskState(
+                    title,
+                    SubtaskStatus.Failed,
+                    string.IsNullOrWhiteSpace(reason) ? UnexplainedFailureReason : reason);
+
+            case StatusEvidence.Unusable:
+                return new SubtaskState(title, SubtaskStatus.Failed, UnusableStatusReason);
+
+            default:
+                // Absent or undecided: the entry is unfinished, and an unfinished entry is only
+                // attemptable if it still has something to attempt.
+                return HasDescription(paths, title)
+                    ? new SubtaskState(title, SubtaskStatus.Pending)
+                    : new SubtaskState(title, SubtaskStatus.Failed, $"Keine Beschreibung für '{title}'.");
+        }
+    }
+
+    /// <summary>Reads one subtask's status payload.</summary>
+    /// <param name="path">Absolute path of that subtask's <c>status.json</c>.</param>
+    /// <returns>What the payload establishes, and the <c>failreason</c> it carried, if any.</returns>
+    private static (StatusEvidence Evidence, string? Reason) ReadStatus(string path)
+    {
+        string content;
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return (StatusEvidence.Absent, null);
+            }
+
+            content = File.ReadAllText(path);
+        }
+        catch (IOException)
+        {
+            // Being locked by the publishing session is the common case; the caller settles it.
+            return (StatusEvidence.Unusable, null);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return (StatusEvidence.Unusable, null);
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(content, DocumentOptions);
+            return Interpret(document.RootElement);
+        }
+        catch (JsonException)
+        {
+            return (StatusEvidence.Unusable, null);
+        }
+    }
+
+    /// <summary>Applies the closed status vocabulary to a parsed payload.</summary>
+    /// <param name="root">The parsed payload's root element.</param>
+    /// <returns>What the payload establishes, and the <c>failreason</c> it carried, if any.</returns>
+    /// <remarks>
+    /// Only <c>status</c> and the optional <c>failreason</c> are read, case-insensitively, and every
+    /// other property is ignored. A root that is not an object is not a status payload and counts as
+    /// malformed. A <c>status</c> that is absent, JSON null or not a string simply is not one of the
+    /// two decisive values, which by design issue 1 means "not done yet" rather than "broken".
+    /// </remarks>
+    private static (StatusEvidence Evidence, string? Reason) Interpret(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return (StatusEvidence.Unusable, null);
+        }
+
+        string? status = null;
+        string? reason = null;
+        foreach (var property in root.EnumerateObject())
+        {
+            if (property.Value.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            if (string.Equals(property.Name, "status", StringComparison.OrdinalIgnoreCase))
+            {
+                status = property.Value.GetString();
+            }
+            else if (string.Equals(property.Name, "failreason", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = property.Value.GetString();
+            }
+        }
+
+        if (string.Equals(status, CompleteValue, StringComparison.OrdinalIgnoreCase))
+        {
+            return (StatusEvidence.Complete, null);
+        }
+
+        return string.Equals(status, FailedValue, StringComparison.OrdinalIgnoreCase)
+            ? (StatusEvidence.Failed, reason)
+            : (StatusEvidence.Undecided, null);
+    }
+
+    /// <summary>Reports whether one subtask still has a usable description to attempt.</summary>
+    /// <param name="paths">The tracking paths of the task.</param>
+    /// <param name="title">A title that already satisfies <see cref="SubtaskPaths.IsValidTitle"/>.</param>
+    /// <returns>True when <c>subtask.md</c> exists and carries more than whitespace.</returns>
+    /// <remarks>
+    /// A whitespace-only file counts as empty: requirement 2.10 asks for a <em>usable</em>
+    /// description, and a blank one would be rendered into a subtask prompt that says nothing. An
+    /// unreadable file is treated the same way - it fails that entry, not the index.
+    /// </remarks>
+    private static bool HasDescription(SubtaskPaths paths, string title)
+    {
+        var path = paths.SubtaskMarkdown(title);
+
+        try
+        {
+            return File.Exists(path) && !string.IsNullOrWhiteSpace(File.ReadAllText(path));
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>What one subtask's status payload establishes, before the description is consulted.</summary>
+    private enum StatusEvidence
+    {
+        /// <summary>No <c>status.json</c> exists yet. Unfinished, never a failure.</summary>
+        Absent,
+
+        /// <summary>The payload could not be read or did not parse as a status object.</summary>
+        Unusable,
+
+        /// <summary>The payload parsed but carries neither decisive value. Unfinished.</summary>
+        Undecided,
+
+        /// <summary>The payload carries <c>complete</c>.</summary>
+        Complete,
+
+        /// <summary>The payload carries <c>failed</c>.</summary>
+        Failed,
     }
 }

@@ -2,7 +2,7 @@
 
 ## 1. Foundation: tracking path, status and ledger contracts
 
-- [ ] 1. Establish the disk contract that every other component reads
+- [x] 1. Establish the disk contract that every other component reads
 - [x] 1.1 Compose tracking paths and validate subtask titles
   - Build the path set for a tracking directory plus a task name: task folder, task-level index, subtasks folder, template folder, and per-title description, status and flag locations.
   - Expose every substituted path as an absolute path, including the task folder, so no consumer and no prompt composes a root with a relative fragment.
@@ -30,7 +30,7 @@
   - _Requirements: 2.3, 2.10, 2.12, 6.1_
   - _Boundary: SubtaskLedger_
 
-- [ ] 1.4 Derive subtask state from tracking evidence
+- [x] 1.4 Derive subtask state from tracking evidence
   - Apply the resolved derivation: unsafe title fails; parsed status `complete` completes; parsed status `failed` fails; any other parsed value including `pending` and unrecognized values is pending; unreadable or malformed status fails; absent status is pending whether or not the flag exists; missing or empty description fails.
   - Let a completion status take precedence over a missing description or missing flag.
   - Report a decomposition as reusable when the ordered index is readable, without requiring a description for every entry.
@@ -312,3 +312,6 @@
 - 1.3: **RULING — the ledger de-duplicates by title string, never by resolved path.** `ST-003-x..` and `ST-003-x` are different titles that Windows resolves to the same folder, but 2.12 and design `### Paths and Ledger` both define de-duplication over titles ("the same title", ordinal-ignore-case, keep first). Collapsing them would drop an entry the index listed and make `Total` disagree with the index; marking one `Failed` would invent a failure category 2.10 does not list (it names blank, unsafe and missing-description only). Containment holds: `..` is rejected by `IsValidTitle`, and `...`/`....` collapse *inward* to the subtasks directory. **Task 1.4 inherits this contract unchanged and must not dedup by resolved path either.** The real exposure is task 4.3's stale-flag deletion, where deleting entry A's flag can clear entry B's — decide it there, and if it proves unacceptable the fix is a spec amendment to 2.10/2.12, not a quiet change in the ledger.
 - 1.3: `TryReadIndex` is a fourth public member beyond the three `### Paths and Ledger` names, needed because there is no `InternalsVisibleTo` and 1.3's observable would otherwise be unobservable. **Directive for 1.4**: either make it a private helper behind `TryRead`/`IsDecomposed`/`AllComplete`, or consciously retain it with its `<summary>` stating it is a deliberate addition. It must not drift into the final public surface unremarked.
 - 1.3: a JSON `null`, number or object element in `subtasks` maps to the empty title, so `["", null, 42]` collapses under de-duplication into ONE `Failed` entry with `Total == 1`. No subtask is lost and 2.12 is literally satisfied, but requirement 3.3's `{K} fehlgeschlagen` under-reports a multi-defect index. Relevant if 4.4 or 6.1 ever surface the failure count as a diagnostic.
+- 1.4: settling retries are **the caller's**, not the ledger's. `### Paths and Ledger`, `## Error Handling` E7 and resolved decision 10 all assign the 200 ms x5 retry to the application, and requirement 2.11 says "the application shall re-read". The ledger reports a locked or half-written `status.json` as Failed immediately. **Task 4.4 owns the retry loop** — do not add one to `SubtaskLedger`.
+- 1.4: `TryReadIndex` stays public as a deliberate fourth member, justified in its `<summary>`. Folding it away would have forced rewriting committed 1.3 assertions, which requirement 7.2 forbids: those tests assert `Pending` for entries with no folder staged, which `TryRead` derives as `Failed`. Revisit only once orchestration lands and only if no production caller needs the raw ordered titles.
+- Regression gate, general: do not compare "baseline + new tests == new total" — VSTest counts executed Theory rows, not test methods, so the arithmetic misleads. Compare `total - focused filter of the touched component` instead; it must be identical before and after. Non-ledger cases have stayed at exactly 331 through tasks 1.3 and 1.4.
