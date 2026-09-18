@@ -1,0 +1,303 @@
+# Implementation Plan
+
+## 1. Foundation: tracking path, status and ledger contracts
+
+- [ ] 1. Establish the disk contract that every other component reads
+- [x] 1.1 Compose tracking paths and validate subtask titles
+  - Build the path set for a tracking directory plus a task name: task folder, task-level index, subtasks folder, template folder, and per-title description, status and flag locations.
+  - Expose every substituted path as an absolute path, including the task folder, so no consumer and no prompt composes a root with a relative fragment.
+  - Validate titles before any filesystem access: reject blank and whitespace-only titles, invalid filename characters, directory separators and colon, and the exact names `.` and `..`; accept titles that merely contain `..` inside a longer name.
+  - Trim titles before validation.
+  - Observable: given a tracking root and a task name, the component returns absolute paths for all six locations, and a title containing a separator is rejected without the filesystem being touched.
+  - _Requirements: 2.5, 2.10, 6.1, 6.6_
+  - _Boundary: SubtaskPaths_
+
+- [ ] 1.2 Define the status, state, snapshot and progress data contracts
+  - Model a per-subtask state carrying title, one of pending/complete/failed, and an optional failure reason.
+  - Model an ordered snapshot carrying the states plus total, completed and failed counts.
+  - Model the progress payload carrying stage, completed, total, failed, the current title, and the ordered state list that delivers failure reasons to the UI.
+  - Expose the state list as a read-only collection, honouring the project convention against public mutable list types.
+  - Observable: a snapshot built from a known set of states reports counts that match the states, and the progress payload round-trips the reasons.
+  - _Requirements: 2.6, 3.7_
+  - _Boundary: SubtaskStatus_
+
+- [ ] 1.3 Read and normalize the ordered index
+  - Parse the task-level index file: optional version absent or at most 1, optional informational task name, and a required non-empty ordered array of titles.
+  - Trim entries, then de-duplicate case-insensitively keeping the first occurrence, so the reported total counts unique titles.
+  - Keep blank and unsafe entries in the result as failed entries rather than rejecting the whole index; never fall back to directory sorting or alphabetical order.
+  - Treat an unreadable or schema-invalid index as an unusable index distinct from an index containing bad entries.
+  - Observable: an index listing the same title twice yields one entry, an index with one unsafe title yields all entries with that one marked failed, and a malformed index is reported as unusable.
+  - _Requirements: 2.3, 2.10, 2.12, 6.1_
+  - _Boundary: SubtaskLedger_
+
+- [ ] 1.4 Derive subtask state from tracking evidence
+  - Apply the resolved derivation: unsafe title fails; parsed status `complete` completes; parsed status `failed` fails; any other parsed value including `pending` and unrecognized values is pending; unreadable or malformed status fails; absent status is pending whether or not the flag exists; missing or empty description fails.
+  - Let a completion status take precedence over a missing description or missing flag.
+  - Report a decomposition as reusable when the ordered index is readable, without requiring a description for every entry.
+  - Keep the component static, filesystem-only and uncached, with no persisted cursor.
+  - Observable: a freshly decomposed tracking folder whose entries all carry `pending` reports zero failures and zero completions, and a folder whose description was deleted after completion still reports that entry complete.
+  - _Requirements: 2.3, 2.6, 2.10, 4.4, 4.5, 6.1_
+  - _Boundary: SubtaskLedger_
+
+## 2. Configuration, settings and journal persistence
+
+- [ ] 2. Capture, validate and persist the subtask configuration
+- [ ] 2.1 (P) Validate the tracking directory with German messages
+  - Report a blank selection, a missing directory, and a directory without the `task_template` marker as three distinct explanatory German messages.
+  - Never require a `.git` folder.
+  - Expose the result as a validity flag plus message so callers can both gate the start action and raise an error at phase entry.
+  - Observable: each of the three invalid cases returns its own German message, and a directory containing `task_template` validates.
+  - _Requirements: 1.3_
+  - _Boundary: WorkflowDirectoryValidation_
+
+- [ ] 2.2 (P) Persist the tracking directory as a separate recent-directory history
+  - Add the last-choice value and a recent-directory collection for tracking directories, kept separate from the existing working-directory history.
+  - Share one promotion helper with the existing history: normalize, de-duplicate case-insensitively, promote to front, cap the list.
+  - Load settings files written before these fields existed without error, using the existing defaults.
+  - Observable: selecting the same directory twice leaves one entry at the front of the tracking history, the working-directory history is unaffected, and an older settings file loads with empty tracking history.
+  - _Requirements: 1.4, 1.7_
+  - _Boundary: AppSettings, SettingsService_
+
+- [ ] 2.3 Capture the configuration as an immutable snapshot
+  - Represent the configuration as an immutable record of the enabled flag plus the tracking directory, captured exactly once when phase 4 is entered so the pair can never be observed from two different moments.
+  - Raise a dedicated user-fixable error when the configuration is enabled but its directory fails validation, carrying the German message; never downgrade an enabled-but-invalid configuration to a normal run.
+  - Extend the orchestrator run request with the captured configuration and a progress sink, both defaulted so existing construction sites keep compiling; a null configuration means disabled.
+  - Observable: entering phase 4 with subtask mode enabled and a directory lacking the marker raises the error with the German message instead of starting a normal implementation session.
+  - _Depends: 2.1_
+  - _Requirements: 1.6, 1.8_
+  - _Boundary: SubtaskConfiguration_
+
+- [ ] 2.4 Persist subtask settings and manual completion in the task journal
+  - Add the enabled flag, the tracking directory and a manual-completion marker to the task journal record and its serialized form, all defaulted so the record version is unchanged.
+  - Save the settings when a task starts, when the user edits them for an existing task folder, and when the configuration is captured at phase entry, preserving the existing dismissal flag and the store's non-throwing contract.
+  - Load journals written before these fields existed as subtask mode disabled.
+  - Observable: a task saved with subtask mode enabled reloads with its directory intact, an older journal loads as disabled, and saving subtask settings does not clear dismissal.
+  - _Requirements: 1.5, 1.7, 5.4_
+  - _Boundary: TaskState, TaskStateStore_
+
+## 3. Prompt and template contract
+
+- [ ] 3. Make the application and agent sessions agree on the file protocol
+- [ ] 3.1 Layer the substitution builders and add the new tokens
+  - Add the absolute tracking-root, task-folder and subtasks-folder tokens, the task-title alias that does not remove the existing task-name token, and the per-subtask title and body tokens.
+  - Layer the builders so the execution set extends the decomposition set, which extends the existing base set, rather than duplicating token construction.
+  - Leave the existing base tokens and their values untouched so the four existing phase prompts render exactly as before.
+  - Observable: rendering the decomposition and execution prompts resolves every one of their placeholders, and the existing phase prompts still render unchanged.
+  - _Depends: 1.1_
+  - _Requirements: 6.4, 6.6_
+  - _Boundary: PromptVariables_
+
+- [ ] 3.2 Correct the decomposition prompt
+  - Replace the brace names the application does not substitute with agent-chosen angle-bracket names, so rendering no longer fails on the task-path token and no longer destroys the per-subtask title by substituting one value everywhere.
+  - Use the absolute substituted paths directly instead of deriving a task path inside the prompt.
+  - Move the completion flag from the tracking root to the task folder, and state that this file carries the ordered subtask array in execution order with non-empty content.
+  - Require an initial per-subtask status example of `pending`, and require atomic temporary-file-then-rename publication for both the status file and the flag.
+  - Require safe subtask titles and explain what makes a title unsafe.
+  - Observable: the corrected file renders without an unknown-placeholder error, and its instructions name the task folder as the index location.
+  - _Depends: 3.1_
+  - _Requirements: 6.2, 6.4, 6.6, 6.7_
+  - _Boundary: create_subtasks prompt_
+
+- [ ] 3.3 Correct the subtask execution prompt
+  - Use the absolute substituted paths so the status and flag locations no longer need composing from a root.
+  - Move task-wide findings to a global findings file in the task folder, beside the per-subtask findings files, leaving the subtasks folder holding only subtask folders.
+  - State the publication order explicitly: the status payload first, then the non-empty flag, each published by atomic temporary-file-then-rename.
+  - Remove the instruction to write ordered titles into the per-subtask flag, whose contents the application does not interpret.
+  - Observable: the corrected file renders without an unknown-placeholder error, and names the task folder for global findings.
+  - _Depends: 3.1_
+  - _Requirements: 6.2, 6.4, 6.6, 6.8_
+  - _Boundary: run_subtask prompt_
+
+- [ ] 3.4 Validate every shipped prompt against its own token set
+  - Build a catalog mapping each shipped prompt file to the tokens that file may use: the existing phase files to the base set, the decomposition file and the execution file to their respective supersets.
+  - Validate each file against its own set rather than against the union of all known names, and report any shipped prompt file the catalog does not recognize.
+  - Surface failures through the existing start gate.
+  - Observable: startup validation covers all eight shipped prompt files, a token valid in the execution prompt but used in a phase prompt is reported, and an unrecognized new prompt file is reported rather than silently skipped.
+  - _Depends: 3.1, 3.2, 3.3_
+  - _Requirements: 6.3, 6.4_
+  - _Boundary: PromptTemplateCatalog, PromptTemplateService_
+
+- [ ] 3.5 (P) Publish the required tracking-repository template files
+  - Add the missing per-subtask status example with a `pending` status.
+  - Replace the empty per-subtask flag example and add the missing task-level index example, both with non-empty content, because the application treats an empty file as no flag at all.
+  - Leave the existing verification file in place and add no repository README; both are out of scope.
+  - Observable: the template folder contains a non-empty status example and non-empty index and flag examples, and a fresh copy of the template satisfies the application's non-empty-file rule.
+  - _Requirements: 6.5_
+  - _Boundary: External tracking template_
+
+## 4. Orchestration: sessions, decomposition and the ordered loop
+
+- [ ] 4. Run subtasks sequentially in fresh sessions
+- [ ] 4.1 Extract the shared session primitive without changing existing behavior
+  - Factor the existing phase-run body into one reusable session operation taking the terminal, manual signal, product working directory, launcher, prompt file, substitutions, completion rule, watch locations and cancellation, and reporting whether the manual signal won.
+  - Preserve the current order exactly: create the watcher and baseline, clear the screen, start a fresh terminal, wait for readiness, send the explicit directory change, settle and auto-answer, render, paste and submit, then race the watcher against manual completion.
+  - Keep the existing auto-answer behavior rather than substituting any replacement logic, and dispose session and watch resources through the existing lifecycle.
+  - Observable: the existing orchestrator tests pass unchanged against the refactored code, with no assertion edits.
+  - _Requirements: 2.1, 7.2_
+  - _Boundary: WorkflowOrchestrator_
+
+- [ ] 4.2 Branch phase 4 into decomposition
+  - Keep the existing implementation path untouched when subtask mode is disabled, including its done-marker completion and stale-marker deletion.
+  - When enabled, capture and validate the configuration, persist it, report the decomposing stage, and reuse an existing readable index rather than decomposing again.
+  - When decomposing, delete only the stale task-level flag and run one decomposition session against the existing spec and plan with the task-specific tracking destination.
+  - Surface an unusable index or an invalid directory as the user-fixable error, leaving implementation recoverable.
+  - Observable: a task with a readable index starts no decomposition session, a task without one starts exactly one, and a task whose tracking directory has lost its marker shows the German error while remaining recoverable.
+  - _Depends: 2.3, 3.4, 4.1_
+  - _Requirements: 1.6, 1.8, 2.2, 2.3, 2.9_
+  - _Boundary: WorkflowOrchestrator_
+
+- [ ] 4.3 Execute eligible subtasks in index order, one attempt per run
+  - Re-read the ledger each iteration and keep a case-insensitive attempted-title set scoped to the single run.
+  - Choose the first entry that is not complete and not yet attempted this run, so an entry left failed or pending by an earlier run is retried exactly once per run, and mark it attempted before starting work.
+  - Skip entries with unsafe titles or missing descriptions as failures without accessing anything outside the tracking repository, delete that entry's stale flag, then run one fresh session in the product working directory supplying the full description and resolved paths.
+  - Never retry an entry already attempted within the same run, and never impose an execution timeout while a session is alive.
+  - Observable: given an index of three entries with the middle one already complete, exactly two sessions run in index order; a run over an index whose only entry already failed starts one session, and a second pass within that same run starts none.
+  - _Depends: 4.2_
+  - _Requirements: 2.4, 2.5, 2.7, 2.8, 2.10_
+  - _Boundary: WorkflowOrchestrator_
+
+- [ ] 4.4 Settle the status payload and publish progress
+  - After a session publishes its flag, re-read the status until both the read and the parse succeed, retrying at 200 millisecond intervals up to five times, then treat the entry as failed.
+  - Publish refreshed progress after each subtask, carrying stage, counts, current title and the ordered states that deliver failure reasons.
+  - Keep this bounded settling distinct from session waiting, which has no timeout.
+  - Observable: a status file that is unparseable on first read but valid on the third attempt yields the parsed state rather than a failure, and progress published after each subtask reports the failure reason text from the status payload.
+  - _Depends: 4.3_
+  - _Requirements: 2.6, 2.11, 3.2, 3.7_
+  - _Boundary: WorkflowOrchestrator_
+
+- [ ] 4.5 Decide automatic completion from fresh evidence only
+  - Require a freshly read, non-null final snapshot in which the total is greater than zero and every entry is complete before recording implementation as completed; never fall back to an earlier in-memory snapshot.
+  - Leave implementation active and recoverable when the final read fails or any entry is not complete, so the task is offered again.
+  - Observable: a run whose entries all completed records completion, and a run whose final index read fails leaves the phase active even though the last known snapshot was all-complete.
+  - _Depends: 4.4_
+  - _Requirements: 3.5, 3.6_
+  - _Boundary: WorkflowOrchestrator_
+
+## 5. Recovery from authoritative disk state
+
+- [ ] 5. Restore interrupted subtask work
+- [ ] 5.1 Reconcile completion from ledger evidence
+  - Pass the task record into artifact reconciliation so it can tell a subtask task from a normal one.
+  - For a subtask task, honour a recorded manual completion without consulting the ledger; otherwise keep completion when the ledger shows every entry complete.
+  - Never fall back to the normal done-marker for a subtask task, and keep the recorded phase state rather than demoting it when the stored path is blank or malformed or the index cannot be read.
+  - Leave normal-mode reconciliation, the recoverable-task record and the recovery scanner unchanged.
+  - Observable: a completed subtask task with no done-marker survives a restart without demotion, a subtask task with a blank stored path is not demoted, and a normal task with no done-marker is still demoted as before.
+  - _Depends: 1.4, 2.4_
+  - _Requirements: 4.3, 4.4, 4.6, 5.4_
+  - _Boundary: PhaseReconciliation_
+
+- [ ] 5.2 Restore the tab's configuration and progress
+  - Restore the stored mode and tracking directory when resuming a task, suppressing the normal working-folder synchronization that would otherwise overwrite them.
+  - Seed the subtask indicator from the ledger so counts and failure reasons reflect disk immediately, deriving progress without any persisted cursor.
+  - Continue an interrupted task by skipping completed entries and attempting the rest in index order.
+  - Ordering caveat: this task seeds the subtask indicator, so 6.1 must be built first even though it carries a later number; 6.1 is parallel-capable and may be pulled ahead of this task.
+  - Observable: relaunching after an interrupted run shows the restored directory and the disk-derived counts before any session starts, and continuing runs only the entries that are not complete.
+  - _Depends: 5.1, 6.1_
+  - _Requirements: 4.1, 4.2, 4.5_
+  - _Boundary: TaskTabViewModel_
+
+## 6. Presentation: configuration, progress and task completion
+
+- [ ] 6. Surface configuration and progress in the task tab
+- [ ] 6.1 (P) Present subtask progress and failure reasons
+  - Show a second indicator labelled for subtasks whenever subtask mode is selected.
+  - Show the decomposition message while decomposing and the completed-of-total count while running, updating after each subtask, and add the failed count in the error colour when failures exist.
+  - Colour the indicator grey before phase 4, yellow while running, and green only when the total is greater than zero and every entry is complete.
+  - Offer each failed entry's title and reason in the tooltip, from the states carried in the progress payload.
+  - Reuse the existing status-to-brush and visibility converters; add none.
+  - Observable: a decomposed but unstarted task shows zero of N with no failures and a non-green indicator, and a run with one failure shows the failed count and its reason text in the tooltip.
+  - _Depends: 1.2_
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.7_
+  - _Boundary: SubtaskIndicatorViewModel, SubtaskIndicatorView_
+
+- [ ] 6.2 (P) Offer the directory picker with a caller-supplied title
+  - Add an optional dialog-title argument to the directory picker, keeping the existing working-directory caption as the default so current callers are unchanged.
+  - Update the interface implementers and test doubles even though the argument is optional.
+  - Observable: the existing caller still shows the working-directory caption, and the subtask row can request its own caption.
+  - _Requirements: 1.2_
+  - _Boundary: DirectoryPickerService_
+
+- [ ] 6.3 Bind the subtask configuration controls
+  - Add the subtask checkbox beside the implementation phase with the specified German tooltip, and show the tracking-directory row with its recent-directory selector and folder picker only while subtask mode is selected.
+  - Show the validation message and prevent starting a workflow while subtask mode is enabled and the directory is invalid.
+  - Preserve the existing never-clear collection reconciliation so a two-way selection is not reset to null.
+  - Place the subtask indicator in the tab beside the existing phase indicator and bind its visibility to subtask mode, so this view owns the indicator's placement while 6.1 owns its content.
+  - Lock every subtask input while phase 4 is active, including the folder-picker button, and allow changes during phases 1 to 3.
+  - Observable: clearing the marker from the selected directory shows the German message and disables the start action, the subtask indicator appears only while subtask mode is selected, and every subtask control is disabled once phase 4 begins.
+  - _Depends: 2.1, 2.2, 6.1, 6.2_
+  - _Requirements: 1.1, 1.2, 1.3, 1.6, 3.1_
+  - _Boundary: TaskTabViewModel, TaskTabView_
+
+- [ ] 6.4 Wire live progress from the run into the indicator
+  - Have the tab create the progress sink it passes into the run request and apply each published payload to the indicator that 6.3 placed.
+  - Marshal updates onto the UI thread through the existing dispatch mechanism so counts and reasons update while the run continues.
+  - Reset the indicator when a run starts and when subtask mode is switched off.
+  - Observable: during a run the displayed count advances after each subtask without user interaction, and a failure's reason becomes visible in the tooltip while the run is still going.
+  - _Depends: 4.4, 6.1, 6.3_
+  - _Requirements: 3.2, 3.7_
+  - _Boundary: TaskTabViewModel_
+
+- [ ] 6.5 Remove the phase completion action
+  - Remove the phase-completion command, its can-execute logic, its generated notification, the phase button and the phase indicator's active flag, keeping the active-phase tracking used for task completion and editing state.
+  - Let phases 1 to 3 advance only on their artifact conditions, leaving the terminal interactive when no artifact arrives.
+  - Observable: no phase indicator exposes a completion button, and a phase with no arriving artifact leaves its terminal interactive instead of offering manual advancement.
+  - _Requirements: 5.1, 5.2_
+  - _Boundary: PhaseIndicatorViewModel, PhaseIndicatorView_
+
+- [ ] 6.6 Complete and close the task explicitly
+  - Make task completion signal the run, await its end and only then request the tab close, keeping the existing dismissal behavior on close.
+  - Record the completion as an explicit manual override in the journal so recovery can distinguish it from automatic all-complete completion.
+  - Keep the action enabled only while implementation is running.
+  - Observable: invoking task completion during a subtask run closes the tab only after the running session has ended, and the journal afterwards shows the manual-override marker.
+  - _Depends: 2.4, 4.5, 6.5_
+  - _Requirements: 5.3, 5.4_
+  - _Boundary: TaskTabViewModel_
+
+## 7. Validation and regression gates
+
+- [ ] 7. Prove the extension preserves the existing workflow
+- [ ] 7.1 (P) Cover the path, index and ledger contracts
+  - Write these tests from the resolved contracts rather than reusing the source plan's examples, whose fixtures concatenate unescaped JSON for backslash titles and whose expectations predate the resolved decisions; build path fixtures so backslashes survive as valid JSON.
+  - Cover every row of the state derivation table, including unrecognized status values landing as pending and a flag without a status landing as pending.
+  - Cover index parsing: de-duplication keeping the first occurrence, blank and unsafe entries failing individually without invalidating the index, the exact dot-names being rejected while a title merely containing two dots is accepted, and a malformed index being reported unusable.
+  - Cover reuse reporting as available when descriptions are missing, and completion surviving a deleted description.
+  - Observable: the listed cases pass against the implemented behavior and the derivation table has a test per row.
+  - _Depends: 1.4_
+  - _Requirements: 7.2_
+  - _Boundary: Workflow.Tests, SubtaskPaths, SubtaskLedger_
+
+- [ ] 7.2 (P) Cover configuration, persistence and reconciliation
+  - Cover the three German validation messages, history promotion, case-insensitive de-duplication and capping, and that the working-directory history is unaffected.
+  - Cover journal and settings records written before the new fields load with safe defaults, dismissal is preserved, and an enabled-but-invalid configuration raises the error rather than falling back to a normal run.
+  - Cover reconciliation: no done-marker demotion for a completed subtask task, no demotion on a blank or unreadable stored path, manual completion surviving a restart, and normal-mode demotion still occurring.
+  - Observable: the listed cases pass against the implemented behavior.
+  - _Depends: 2.4, 5.1_
+  - _Requirements: 7.2_
+  - _Boundary: Workflow.Tests, WorkflowDirectoryValidation, SettingsService, TaskStateStore, PhaseReconciliation_
+
+- [ ] 7.3 Cover orchestration and presentation
+  - Cover one fresh session per eligible entry in declared order, the rendered description reaching the session, stale flag deletion, one attempt per run, and a second run retrying an entry the previous run failed.
+  - Cover settling across the retry interval with a status that only parses on a later attempt, and completion requiring a fresh non-null final snapshot so a lost final index leaves the phase active.
+  - Cover progress reaching the indicator, including failure reasons in the tooltip and restored counts after resume, awaiting asynchronous progress rather than inspecting it synchronously.
+  - Cover the views and resources still loading with the phase command removed, and the tab closing only after the run has ended.
+  - Observable: the listed cases pass against the implemented behavior, and the pre-existing orchestrator assertions are unchanged apart from those naming the removed phase-completion command.
+  - _Depends: 4.5, 5.2, 6.6_
+  - _Requirements: 7.2_
+  - _Boundary: Workflow.Tests, WorkflowOrchestrator, TaskTabViewModel, SubtaskIndicatorViewModel_
+
+- [ ] 7.4 Extend the acceptance script with subtask checks
+  - Add checks for the corrected prompts, the per-file token validation and the tracking contract to the existing verification script, preserving its current checks.
+  - Observable: the script exits successfully on the implemented branch and fails when a prompt file reintroduces an unsupported placeholder.
+  - _Depends: 3.4, 7.3_
+  - _Requirements: 7.3_
+  - _Boundary: verify.ps1_
+
+- [ ] 7.5 Run the full automated gate
+  - Build and test the solution, then run the verification script, keeping pre-existing assertions unchanged except those referencing the removed phase-completion command.
+  - Observable: the build reports no warnings or errors, all tests pass, and the verification script exits zero.
+  - _Depends: 7.4_
+  - _Requirements: 7.1, 7.2, 7.3_
+
+## Deferred
+
+- Requirement 7.3 also calls for the source manual walkthrough. Its steps contradicted one another before the design validation and are only now consistent; the walkthrough is user-executed rather than a coding task, so it is tracked outside this plan and should be run once task 7.5 passes.

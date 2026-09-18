@@ -1,0 +1,58 @@
+{
+  "feature_name": "workflow-extension",
+  "created_at": "2026-09-17T19:03:53+02:00",
+  "updated_at": "2026-09-18T00:00:00+02:00",
+  "language": "en",
+  "phase": "implementation",
+  "approvals": {
+    "requirements": {
+      "generated": true,
+      "approved": true
+    },
+    "design": {
+      "generated": true,
+      "approved": true
+    },
+    "tasks": {
+      "generated": true,
+      "approved": true
+    }
+  },
+  "ready_for_implementation": true,
+  "import": {
+    "spec_source": "docs/superpowers/specs/2026-09-17-subtask-execution-design.md",
+    "plan_source": "docs/superpowers/plans/2026-09-17-subtask-execution-plan.md",
+    "source_spec_status": "Approved for planning",
+    "review_status": "design-validated-2026-09-18; all 12 issues resolved",
+    "note": "Existing artifacts imported together at explicit user request. Source approval is provenance, not approval of this cc-sdd import. No tasks generated."
+  },
+  "validation": {
+    "design": {
+      "validated_at": "2026-09-18",
+      "decision": "NO-GO on first pass; all issues subsequently resolved",
+      "resolved_issues": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12
+      ],
+      "open_issues": [],
+      "note": "Two interactive passes. Resolutions recorded in design.md under \"Resolved Decisions\" and reflected in requirements.md criteria 1.6, 1.8, 2.3, 2.7, 2.10, 2.11, 2.12, 3.3, 3.4, 3.7, 4.2, 4.6, 5.3, 5.4, 6.3, 6.5, 6.6, 6.7, 6.8. Requirements and design approved by the user in the same session before task generation."
+    },
+    "tasks": {
+      "generated_at": "2026-09-18",
+      "review_gate": "passed",
+      "sanity_review": "PASS after one repair pass (7 findings) and one re-review; 2 optional notes also applied",
+      "note": "31 sub-tasks across 7 major tasks. All 48 requirement IDs covered.",
+      "approved_by": "user instruction: \"fuehre kiro-impl workflow-extension aus\" (2026-09-18)"
+    }
+  }
+}
