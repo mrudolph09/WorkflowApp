@@ -42,7 +42,7 @@
 ## 2. Configuration, settings and journal persistence
 
 - [ ] 2. Capture, validate and persist the subtask configuration
-- [ ] 2.1 (P) Validate the tracking directory with German messages
+- [x] 2.1 (P) Validate the tracking directory with German messages
   - Report a blank selection, a missing directory, and a directory without the `task_template` marker as three distinct explanatory German messages.
   - Never require a `.git` folder.
   - Expose the result as a validity flag plus message so callers can both gate the start action and raise an error at phase entry.
@@ -315,3 +315,5 @@
 - 1.4: settling retries are **the caller's**, not the ledger's. `### Paths and Ledger`, `## Error Handling` E7 and resolved decision 10 all assign the 200 ms x5 retry to the application, and requirement 2.11 says "the application shall re-read". The ledger reports a locked or half-written `status.json` as Failed immediately. **Task 4.4 owns the retry loop** — do not add one to `SubtaskLedger`.
 - 1.4: `TryReadIndex` stays public as a deliberate fourth member, justified in its `<summary>`. Folding it away would have forced rewriting committed 1.3 assertions, which requirement 7.2 forbids: those tests assert `Pending` for entries with no folder staged, which `TryRead` derives as `Failed`. Revisit only once orchestration lands and only if no production caller needs the raw ordered titles.
 - Regression gate, general: do not compare "baseline + new tests == new total" — VSTest counts executed Theory rows, not test methods, so the arithmetic misleads. Compare `total - focused filter of the touched component` instead; it must be identical before and after. Non-ledger cases have stayed at exactly 331 through tasks 1.3 and 1.4.
+- 2.1: the preserved source spec `docs/superpowers/specs/2026-09-17-subtask-execution-design.md` §8.4 carries a **literal German message table**. `requirements.md` demotes that document to provenance, so it does not bind — but consult it before inventing user-facing text, and record any deliberate divergence. The noun for the selected folder is `Workflow-Verzeichnis` (requirement 1.2's label); the thing it must *be* is the `Workflows-Repository`. A coined `Workflows-Verzeichnis` slipped into the marker message and was corrected before commit.
+- Reviewer directive, general: mechanical gates cannot see whether a user-facing string is *right*. For any task producing UI text, check whether design.md fixes the wording, compare terminology against the existing views and requirements, and judge whether the message tells the user what to do. A test asserting the exact string cements a wrong term rather than catching it.
