@@ -5,10 +5,27 @@ using Workflow.Models;
 
 namespace Workflow.Services;
 
-/// <summary>The complete set of tokens a prompt template may use.</summary>
+/// <summary>
+/// The tokens a prompt template may use, in three layers: the base set the four phase prompts
+/// share, the decomposition set that extends it with the tracking-repository paths, and the
+/// execution set that extends that with the per-subtask title and body.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Each layer is built from the one below it, both for the name sets and for the dictionaries, so
+/// a token is constructed in exactly one place and the lower layers can never drift.
+/// </para>
+/// <para>
+/// Requirement 6.6: every path token this type adds is absolute, taken verbatim from
+/// <see cref="SubtaskPaths"/>. No prompt composes a root with a relative fragment, and no prompt
+/// re-derives a path the application already supplies. The base tokens keep their existing
+/// working-directory-relative artefact paths unchanged - the four existing phase prompts must
+/// render exactly as before.
+/// </para>
+/// </remarks>
 public static class PromptVariables
 {
-    /// <summary>Token names, without braces.</summary>
+    /// <summary>Token names of the base set, without braces; used by the four phase prompts.</summary>
     public static IReadOnlyCollection<string> KnownNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "taskbezeichnung",
@@ -20,10 +37,35 @@ public static class PromptVariables
         "done_path",
     };
 
-    /// <summary>Builds the substitution dictionary for one task.</summary>
+    /// <summary>
+    /// Token names the decomposition prompt may use: <see cref="KnownNames"/> plus the tracking
+    /// root, the task folder, the subtasks folder and the task-title alias.
+    /// </summary>
+    public static IReadOnlyCollection<string> SubtaskCreationNames { get; } =
+        new HashSet<string>(KnownNames, StringComparer.Ordinal)
+        {
+            "workflow_path",
+            "tasktitel",
+            "task_path",
+            "subtask_path",
+        };
+
+    /// <summary>
+    /// Token names the execution prompt may use: <see cref="SubtaskCreationNames"/> plus the title
+    /// and the full description text of the subtask currently being run.
+    /// </summary>
+    public static IReadOnlyCollection<string> SubtaskRunNames { get; } =
+        new HashSet<string>(SubtaskCreationNames, StringComparer.Ordinal)
+        {
+            "subtask_title",
+            "subtask",
+        };
+
+    /// <summary>Builds the base substitution dictionary for one task.</summary>
     /// <param name="paths">The task's path set.</param>
     /// <param name="taskDescription">The plain-text task description.</param>
-    /// <returns>A dictionary covering every known token.</returns>
+    /// <returns>A dictionary covering every name in <see cref="KnownNames"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> is null.</exception>
     public static Dictionary<string, string> For(TaskPaths paths, string taskDescription)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -38,6 +80,60 @@ public static class PromptVariables
             ["review_path"] = paths.ReviewRelative,
             ["done_path"] = paths.DoneRelative,
         };
+    }
+
+    /// <summary>Extends <see cref="For"/> with the tracking-repository tokens of the decomposition prompt.</summary>
+    /// <param name="paths">The task's working-directory path set.</param>
+    /// <param name="taskDescription">The plain-text task description.</param>
+    /// <param name="trackingPaths">The task's tracking-repository path set, supplying absolute paths.</param>
+    /// <returns>A dictionary covering every name in <see cref="SubtaskCreationNames"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> or <paramref name="trackingPaths"/> is null.</exception>
+    /// <remarks>
+    /// <c>tasktitel</c> is taken from the already-built <c>taskbezeichnung</c> entry rather than
+    /// recomputed, so the alias can never disagree with the token it aliases, and
+    /// <c>taskbezeichnung</c> itself stays in place.
+    /// </remarks>
+    public static Dictionary<string, string> ForSubtaskCreation(
+        TaskPaths paths,
+        string taskDescription,
+        SubtaskPaths trackingPaths)
+    {
+        ArgumentNullException.ThrowIfNull(trackingPaths);
+
+        var variables = For(paths, taskDescription);
+
+        variables["workflow_path"] = trackingPaths.WorkflowDirectory;
+        variables["tasktitel"] = variables["taskbezeichnung"];
+        variables["task_path"] = trackingPaths.TaskDirectory;
+        variables["subtask_path"] = trackingPaths.SubtaskPathToken;
+
+        return variables;
+    }
+
+    /// <summary>Extends <see cref="ForSubtaskCreation"/> with the tokens of one subtask execution.</summary>
+    /// <param name="paths">The task's working-directory path set.</param>
+    /// <param name="taskDescription">The plain-text task description.</param>
+    /// <param name="trackingPaths">The task's tracking-repository path set, supplying absolute paths.</param>
+    /// <param name="subtaskTitle">Title of the subtask being run; a single, safe path segment.</param>
+    /// <param name="subtaskBody">Full text of that subtask's <c>subtask.md</c> description.</param>
+    /// <returns>A dictionary covering every name in <see cref="SubtaskRunNames"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> or <paramref name="trackingPaths"/> is null.</exception>
+    /// <exception cref="ArgumentException"><paramref name="subtaskTitle"/> is null, empty or whitespace.</exception>
+    public static Dictionary<string, string> ForSubtaskRun(
+        TaskPaths paths,
+        string taskDescription,
+        SubtaskPaths trackingPaths,
+        string subtaskTitle,
+        string subtaskBody)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(subtaskTitle);
+
+        var variables = ForSubtaskCreation(paths, taskDescription, trackingPaths);
+
+        variables["subtask_title"] = subtaskTitle;
+        variables["subtask"] = subtaskBody ?? string.Empty;
+
+        return variables;
     }
 }
 
