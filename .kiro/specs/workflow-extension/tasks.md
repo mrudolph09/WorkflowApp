@@ -12,7 +12,7 @@
   - _Requirements: 2.5, 2.10, 6.1, 6.6_
   - _Boundary: SubtaskPaths_
 
-- [ ] 1.2 Define the status, state, snapshot and progress data contracts
+- [x] 1.2 Define the status, state, snapshot and progress data contracts
   - Model a per-subtask state carrying title, one of pending/complete/failed, and an optional failure reason.
   - Model an ordered snapshot carrying the states plus total, completed and failed counts.
   - Model the progress payload carrying stage, completed, total, failed, the current title, and the ordered state list that delivers failure reasons to the UI.
@@ -301,3 +301,11 @@
 ## Deferred
 
 - Requirement 7.3 also calls for the source manual walkthrough. Its steps contradicted one another before the design validation and are only now consistent; the walkthrough is user-executed rather than a coding task, so it is tracked outside this plan and should be run once task 7.5 passes.
+
+## Implementation Notes
+
+- 1.1: `SubtaskPaths.SubtaskPathToken` is the **absolute** subtasks directory, per the resolved decision for issue 11 in design.md and requirement 6.6. `docs/superpowers/plans/2026-09-17-subtask-execution-plan.md` specifies it relative and is **superseded** — do not treat it as the contract. Tasks 3.2 and 3.3 must therefore not prefix `{subtask_path}` with `{workflow_path}`.
+- 1.1: `IsValidTitle` accepts `...` and `trailing..` because requirement 2.10 rejects only the exact dot-names `.` and `..`. Windows path resolution collapses both (`...` resolves to the subtasks directory itself, `trailing..` to `trailing`), so two distinct index titles can resolve to one on-disk location. This stays inside the tracking repository, so it is spec-compliant — but task 1.3 (de-duplication, 2.12) and task 4.3 (stale flag deletion) should account for it.
+- Baseline for the whole run: `ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput` and `ConPtySessionTests.Start_EmitsTheLauncherFrameBeforeAnyInput` fail in a headless session because the pseudo-console yields no bytes. They are pre-existing and environmental — never count them as regressions.
+- 1.2: test fixtures in this spec must be asymmetric in every dimension the component evaluates. A 2/2/1 fixture let a mutant swapping the `Completed` and `Failed` counters pass all 13 tests; the reviewer proved it by mutation rather than inspection. Where a component derives N counters, give the fixture N pairwise distinct numbers, and pin any ignored state structurally (`Total == Completed + Failed + pending`). Verify a fix by re-running the mutation and showing the suite now fails.
+- 1.2: `SubtaskSnapshot` and `SubtaskProgress` are records whose generated equality compares `States` by reference, so two snapshots read from identical files never compare equal. Do not diff snapshots or progress payloads to suppress redundant UI updates — compare counts or elements. Documented in the type's `<remarks>`.
