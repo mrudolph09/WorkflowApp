@@ -13,13 +13,27 @@ namespace Workflow.Services;
 /// run's earlier indicators are painted by the tab from the journal, not by the orchestrator.
 /// A defaulted positional parameter, so existing construction sites are unaffected.
 /// </param>
+/// <param name="Subtasks">
+/// The subtask configuration, captured as one immutable snapshot when phase 4 is entered
+/// (requirement 1.6). Null - the default - means subtask mode is disabled, so existing construction
+/// sites keep describing a normal implementation run without being edited. The request carries the
+/// snapshot and never <see cref="ISubtaskConfiguration"/>: the orchestrator has nothing it could
+/// re-read, which is what stops the enabled flag and the directory being observed from two different
+/// moments.
+/// </param>
+/// <param name="SubtaskProgress">
+/// Receives every subtask progress report. Null - the default - when nothing is listening, which is
+/// the case for a normal implementation run.
+/// </param>
 public sealed record WorkflowRunRequest(
     TaskPaths Paths,
     string TaskDescription,
     ITerminalController Terminal,
     ManualPhaseSignal ManualSignal,
     IProgress<PhaseProgress> Progress,
-    WorkflowPhase StartPhase = WorkflowPhase.Specification);
+    WorkflowPhase StartPhase = WorkflowPhase.Specification,
+    SubtaskConfiguration? Subtasks = null,
+    IProgress<SubtaskProgress>? SubtaskProgress = null);
 
 /// <summary>Drives a task through the four phases.</summary>
 public interface IWorkflowOrchestrator
