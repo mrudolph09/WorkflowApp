@@ -141,4 +141,161 @@ public sealed class SettingsServiceTests : IDisposable
 
         Assert.True(File.Exists(nested));
     }
+
+    [Fact]
+    public void AddRecentWorkflowDirectory_PutsTheNewestFirstAndSetsLastWorkflowDirectory()
+    {
+        var service = new SettingsService(_path);
+
+        service.AddRecentWorkflowDirectory(@"C:\wf\zulu");
+        service.AddRecentWorkflowDirectory(@"C:\wf\mike");
+
+        Assert.Equal([@"C:\wf\mike", @"C:\wf\zulu"], service.Settings.RecentWorkflowDirectories);
+        Assert.Equal(@"C:\wf\mike", service.Settings.LastWorkflowDirectory);
+    }
+
+    [Fact]
+    public void AddRecentWorkflowDirectory_DeduplicatesCaseInsensitivelyAndPromotes()
+    {
+        var service = new SettingsService(_path);
+        service.AddRecentDirectory(@"C:\work\keep");
+
+        service.AddRecentWorkflowDirectory(@"C:\wf\zulu");
+        service.AddRecentWorkflowDirectory(@"C:\wf\mike");
+        service.AddRecentWorkflowDirectory(@"C:\wf\alpha");
+        service.AddRecentWorkflowDirectory(@"c:\WF\MIKE");
+
+        // Neither insertion order, nor alphabetical, nor reverse-alphabetical.
+        Assert.Equal(
+            [@"c:\WF\MIKE", @"C:\wf\alpha", @"C:\wf\zulu"],
+            service.Settings.RecentWorkflowDirectories);
+        Assert.Equal(@"c:\WF\MIKE", service.Settings.LastWorkflowDirectory);
+        Assert.Equal([@"C:\work\keep"], service.Settings.RecentDirectories);
+        Assert.Equal(@"C:\work\keep", service.Settings.LastDirectory);
+    }
+
+    [Fact]
+    public void AddRecentWorkflowDirectory_StripsATrailingSeparator()
+    {
+        var service = new SettingsService(_path);
+
+        service.AddRecentWorkflowDirectory(@"C:\wf\alpha\");
+
+        Assert.Equal(@"C:\wf\alpha", service.Settings.RecentWorkflowDirectories[0]);
+        Assert.Equal(@"C:\wf\alpha", service.Settings.LastWorkflowDirectory);
+    }
+
+    [Fact]
+    public void AddRecentWorkflowDirectory_CapsTheListAtFifteenEntries()
+    {
+        var service = new SettingsService(_path);
+
+        for (var i = 0; i < 20; i++)
+        {
+            service.AddRecentWorkflowDirectory($@"C:\wf\dir{i}");
+        }
+
+        Assert.Equal(15, service.Settings.RecentWorkflowDirectories.Count);
+        Assert.Equal(@"C:\wf\dir19", service.Settings.RecentWorkflowDirectories[0]);
+        Assert.Equal(@"C:\wf\dir5", service.Settings.RecentWorkflowDirectories[^1]);
+        Assert.Empty(service.Settings.RecentDirectories);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void AddRecentWorkflowDirectory_IgnoresEmptyInput(string? value)
+    {
+        var service = new SettingsService(_path);
+        service.AddRecentWorkflowDirectory(@"C:\wf\alpha");
+
+        service.AddRecentWorkflowDirectory(value!);
+
+        Assert.Equal([@"C:\wf\alpha"], service.Settings.RecentWorkflowDirectories);
+        Assert.Equal(@"C:\wf\alpha", service.Settings.LastWorkflowDirectory);
+    }
+
+    [Fact]
+    public void AddRecentDirectory_LeavesTheWorkflowHistoryUntouched()
+    {
+        var service = new SettingsService(_path);
+        service.AddRecentWorkflowDirectory(@"C:\wf\alpha");
+
+        service.AddRecentDirectory(@"C:\work\one");
+        service.AddRecentDirectory(@"C:\work\two");
+
+        Assert.Equal([@"C:\wf\alpha"], service.Settings.RecentWorkflowDirectories);
+        Assert.Equal(@"C:\wf\alpha", service.Settings.LastWorkflowDirectory);
+        Assert.Equal([@"C:\work\two", @"C:\work\one"], service.Settings.RecentDirectories);
+        Assert.Equal(@"C:\work\two", service.Settings.LastDirectory);
+    }
+
+    [Fact]
+    public void Save_RoundTripsBothHistoriesSeparately()
+    {
+        var first = new SettingsService(_path);
+        first.AddRecentDirectory(@"C:\work\one");
+        first.AddRecentDirectory(@"C:\work\two");
+        first.AddRecentWorkflowDirectory(@"C:\wf\zulu");
+        first.AddRecentWorkflowDirectory(@"C:\wf\alpha");
+        first.Save();
+
+        var second = new SettingsService(_path);
+
+        Assert.Equal([@"C:\work\two", @"C:\work\one"], second.Settings.RecentDirectories);
+        Assert.Equal(@"C:\work\two", second.Settings.LastDirectory);
+        Assert.Equal([@"C:\wf\alpha", @"C:\wf\zulu"], second.Settings.RecentWorkflowDirectories);
+        Assert.Equal(@"C:\wf\alpha", second.Settings.LastWorkflowDirectory);
+    }
+
+    [Fact]
+    public void LegacyFileWithoutWorkflowFields_LoadsExistingFieldsAndEmptyWorkflowHistory()
+    {
+        File.WriteAllText(
+            _path,
+            """
+            {
+              "RecentDirectories": [
+                "C:\\work\\two",
+                "C:\\work\\one"
+              ],
+              "LastDirectory": "C:\\work\\two"
+            }
+            """);
+
+        var service = new SettingsService(_path);
+
+        Assert.Equal([@"C:\work\two", @"C:\work\one"], service.Settings.RecentDirectories);
+        Assert.Equal(@"C:\work\two", service.Settings.LastDirectory);
+        Assert.Empty(service.Settings.RecentWorkflowDirectories);
+        Assert.Null(service.Settings.LastWorkflowDirectory);
+    }
+
+    [Fact]
+    public void LegacyFile_UpgradesInPlaceWithoutLosingTheWorkingDirectoryHistory()
+    {
+        File.WriteAllText(
+            _path,
+            """
+            {
+              "RecentDirectories": [
+                "C:\\work\\two",
+                "C:\\work\\one"
+              ],
+              "LastDirectory": "C:\\work\\two"
+            }
+            """);
+
+        var first = new SettingsService(_path);
+        first.AddRecentWorkflowDirectory(@"C:\wf\alpha");
+        first.Save();
+
+        var second = new SettingsService(_path);
+
+        Assert.Equal([@"C:\work\two", @"C:\work\one"], second.Settings.RecentDirectories);
+        Assert.Equal(@"C:\work\two", second.Settings.LastDirectory);
+        Assert.Equal([@"C:\wf\alpha"], second.Settings.RecentWorkflowDirectories);
+        Assert.Equal(@"C:\wf\alpha", second.Settings.LastWorkflowDirectory);
+    }
 }

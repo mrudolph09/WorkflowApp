@@ -12,6 +12,10 @@ public interface ISettingsService
     /// <param name="directory">Absolute directory path. Empty values are ignored.</param>
     public void AddRecentDirectory(string directory);
 
+    /// <summary>Adds or promotes a tracking directory in its own MRU list and records it as the last used one.</summary>
+    /// <param name="directory">Absolute directory path. Empty values are ignored.</param>
+    public void AddRecentWorkflowDirectory(string directory);
+
     /// <summary>Writes the settings to disk atomically.</summary>
     public void Save();
 }

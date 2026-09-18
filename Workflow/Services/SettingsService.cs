@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.Json;
 using Workflow.Models;
@@ -40,27 +41,19 @@ public sealed class SettingsService : ISettingsService
             return;
         }
 
-        // Root-aware (see WorkingDirectoryPath): persisting "C:" instead of "C:\" would make the
-        // restored MRU entry drive-relative on the next launch.
-        var normalised = WorkingDirectoryPath.Normalise(directory);
+        Settings.LastDirectory = Promote(Settings.RecentDirectories, directory, MaxRecentDirectories);
+    }
 
-        // Collection<T> has no RemoveAll/RemoveRange (see AppSettings); remove by index instead.
-        for (var i = Settings.RecentDirectories.Count - 1; i >= 0; i--)
+    /// <inheritdoc />
+    public void AddRecentWorkflowDirectory(string directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory))
         {
-            if (string.Equals(Settings.RecentDirectories[i], normalised, StringComparison.OrdinalIgnoreCase))
-            {
-                Settings.RecentDirectories.RemoveAt(i);
-            }
+            return;
         }
 
-        Settings.RecentDirectories.Insert(0, normalised);
-
-        while (Settings.RecentDirectories.Count > MaxRecentDirectories)
-        {
-            Settings.RecentDirectories.RemoveAt(Settings.RecentDirectories.Count - 1);
-        }
-
-        Settings.LastDirectory = normalised;
+        Settings.LastWorkflowDirectory =
+            Promote(Settings.RecentWorkflowDirectories, directory, MaxRecentDirectories);
     }
 
     /// <inheritdoc />
@@ -97,6 +90,43 @@ public sealed class SettingsService : ISettingsService
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Normalises <paramref name="directory" />, removes case-insensitive duplicates, puts it at
+    /// the front of <paramref name="directories" /> and caps the list.
+    /// </summary>
+    /// <param name="directories">The MRU list to mutate.</param>
+    /// <param name="directory">Non-empty raw directory path.</param>
+    /// <param name="maximum">Maximum number of entries kept.</param>
+    /// <returns>The normalised path that was promoted.</returns>
+    /// <remarks>
+    /// Shared by both MRU lists so the working-directory and tracking-directory histories can never
+    /// drift apart in normalisation, de-duplication or capping behaviour.
+    /// </remarks>
+    private static string Promote(Collection<string> directories, string directory, int maximum)
+    {
+        // Root-aware (see WorkingDirectoryPath): persisting "C:" instead of "C:\" would make the
+        // restored MRU entry drive-relative on the next launch.
+        var normalised = WorkingDirectoryPath.Normalise(directory);
+
+        // Collection<T> has no RemoveAll/RemoveRange (see AppSettings); remove by index instead.
+        for (var i = directories.Count - 1; i >= 0; i--)
+        {
+            if (string.Equals(directories[i], normalised, StringComparison.OrdinalIgnoreCase))
+            {
+                directories.RemoveAt(i);
+            }
+        }
+
+        directories.Insert(0, normalised);
+
+        while (directories.Count > maximum)
+        {
+            directories.RemoveAt(directories.Count - 1);
+        }
+
+        return normalised;
     }
 
     private static AppSettings Load(string path)

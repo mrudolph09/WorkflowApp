@@ -50,7 +50,7 @@
   - _Requirements: 1.3_
   - _Boundary: WorkflowDirectoryValidation_
 
-- [ ] 2.2 (P) Persist the tracking directory as a separate recent-directory history
+- [x] 2.2 (P) Persist the tracking directory as a separate recent-directory history
   - Add the last-choice value and a recent-directory collection for tracking directories, kept separate from the existing working-directory history.
   - Share one promotion helper with the existing history: normalize, de-duplicate case-insensitively, promote to front, cap the list.
   - Load settings files written before these fields existed without error, using the existing defaults.
@@ -317,3 +317,5 @@
 - Regression gate, general: do not compare "baseline + new tests == new total" — VSTest counts executed Theory rows, not test methods, so the arithmetic misleads. Compare `total - focused filter of the touched component` instead; it must be identical before and after. Non-ledger cases have stayed at exactly 331 through tasks 1.3 and 1.4.
 - 2.1: the preserved source spec `docs/superpowers/specs/2026-09-17-subtask-execution-design.md` §8.4 carries a **literal German message table**. `requirements.md` demotes that document to provenance, so it does not bind — but consult it before inventing user-facing text, and record any deliberate divergence. The noun for the selected folder is `Workflow-Verzeichnis` (requirement 1.2's label); the thing it must *be* is the `Workflows-Repository`. A coined `Workflows-Verzeichnis` slipped into the marker message and was corrected before commit.
 - Reviewer directive, general: mechanical gates cannot see whether a user-facing string is *right*. For any task producing UI text, check whether design.md fixes the wording, compare terminology against the existing views and requirements, and judge whether the message tells the user what to do. A test asserting the exact string cements a wrong term rather than catching it.
+- 2.2: `SettingsService.Load` turns a `JsonException` or `IOException` into a fresh `AppSettings`, so a **malformed test fixture is indistinguishable from a successful load of an empty file**. A back-compat test that only asserts "the new list is empty" would pass without ever entering the load path. Assert a pre-existing field's *value* as well — the fallback cannot produce one. This applies to every later task that fixtures a settings or journal file.
+- 2.2: `AppSettings.RecentWorkflowDirectories` is set to `null` by an explicit `"RecentWorkflowDirectories": null` in the JSON, because System.Text.Json assigns literal null over the property initializer. Pre-existing behaviour, identical for `RecentDirectories`, so not a regression — but a consumer that dereferences it without a guard would NRE. Relevant to task 6.3 when it binds the collection.
