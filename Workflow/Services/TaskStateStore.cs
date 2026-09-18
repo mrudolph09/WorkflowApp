@@ -61,6 +61,13 @@ public sealed class TaskStateStore : ITaskStateStore
                 CreatedUtc = dto.CreatedUtc,
                 UpdatedUtc = dto.UpdatedUtc,
                 Dismissed = dto.Dismissed,
+
+                // Absent in every journal written before these fields existed. System.Text.Json
+                // leaves a missing property at the DTO's default, which is exactly the documented
+                // false/null/false, so an old record loads as a normal task (requirement 1.7).
+                SubtasksEnabled = dto.SubtasksEnabled,
+                WorkflowDirectory = dto.WorkflowDirectory,
+                ImplementationCompletedManually = dto.ImplementationCompletedManually,
                 Phases = Normalise(dto.Phases?.Select(ToPhaseState)),
             };
         }
@@ -140,6 +147,35 @@ public sealed class TaskStateStore : ITaskStateStore
         }
 
         state.Dismissed = dismissed;
+        Save(paths, state);
+    }
+
+    /// <inheritdoc />
+    public void SaveSubtaskSettings(TaskPaths paths, bool enabled, string? workflowDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        // Read-modify-write over the whole record: every other field, Dismissed included, is
+        // carried across untouched because it was just loaded from the file being rewritten.
+        var state = TryLoad(paths) ?? CreateEmpty();
+        state.SubtasksEnabled = enabled;
+        state.WorkflowDirectory = workflowDirectory;
+        Save(paths, state);
+    }
+
+    /// <inheritdoc />
+    public void SetImplementationCompletedManually(TaskPaths paths, bool completedManually)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        var state = TryLoad(paths);
+        if (state is null)
+        {
+            // Mirrors SetDismissed: there is no run to override.
+            return;
+        }
+
+        state.ImplementationCompletedManually = completedManually;
         Save(paths, state);
     }
 
@@ -259,6 +295,12 @@ public sealed class TaskStateStore : ITaskStateStore
         public DateTimeOffset UpdatedUtc { get; set; }
 
         public bool Dismissed { get; set; }
+
+        public bool SubtasksEnabled { get; set; }
+
+        public string? WorkflowDirectory { get; set; }
+
+        public bool ImplementationCompletedManually { get; set; }
 
         public List<TaskPhaseStateDto?>? Phases { get; set; }
     }

@@ -41,7 +41,7 @@
 
 ## 2. Configuration, settings and journal persistence
 
-- [ ] 2. Capture, validate and persist the subtask configuration
+- [x] 2. Capture, validate and persist the subtask configuration
 - [x] 2.1 (P) Validate the tracking directory with German messages
   - Report a blank selection, a missing directory, and a directory without the `task_template` marker as three distinct explanatory German messages.
   - Never require a `.git` folder.
@@ -67,7 +67,7 @@
   - _Requirements: 1.6, 1.8_
   - _Boundary: SubtaskConfiguration_
 
-- [ ] 2.4 Persist subtask settings and manual completion in the task journal
+- [x] 2.4 Persist subtask settings and manual completion in the task journal
   - Add the enabled flag, the tracking directory and a manual-completion marker to the task journal record and its serialized form, all defaulted so the record version is unchanged.
   - Save the settings when a task starts, when the user edits them for an existing task folder, and when the configuration is captured at phase entry, preserving the existing dismissal flag and the store's non-throwing contract.
   - Load journals written before these fields existed as subtask mode disabled.
@@ -322,3 +322,6 @@
 - 2.3: **RULING for task 4.2 — call `SubtaskConfiguration.CaptureValidated(source)`, not `Capture()` followed by a separate validation.** design.md names only `Capture()`, but `### Session and Loop` specifies the branch as "captures its configuration once, validates it, saves it", and `CaptureValidated` is exactly that sequence behind one entry point. The mechanical argument decides it: validating a *second read* instead of the captured value is caught by exactly one test, and that test only exists because capture and validate live behind one function. Splitting them at 4.2's call site makes the re-read defect reachable again where no test from 2.3 guards it.
 - 2.3: once-only capture is compile-enforced **downstream** of the capture point — `WorkflowRunRequest.Subtasks` is typed `SubtaskConfiguration?`, so the orchestrator is never handed a live `ISubtaskConfiguration` it could re-read (a mutation swapping the type fails with CS1503, not with a failing test). **Above** the capture point it is convention: nothing stops a caller invoking `Capture` twice. design.md's `Revalidation Triggers` lists "configuration capture", so 4.2's call site must be re-checked against requirement 1.6 when it lands — no test in 2.3 can cover it.
 - 2.3: `EnsureUsable`'s `?? UnknownReasonMessage` fallback is **compiler-mandated**, not optional defensive coding: removing it fails the build with CS8604, because `WorkflowDirectoryValidation.ErrorMessage` is `string?` while the exception parameter is non-nullable. Do not "clean it up".
+- 2.4: **RULING for task 6.6 — call `ITaskStateStore.SetImplementationCompletedManually(paths, true)`.** The design fixes the journal *field* `ImplementationCompletedManually` but names no store method, so this one is an invention. It belongs here rather than in 6.6: 6.6 is boundary-locked to `TaskTabViewModel`, a view model cannot write the journal, and 2.4 is the only task positioned to own a store method. Its semantics mirror `SetDismissed` — load, return silently when there is no journal, mutate one field, save — so it corrects an existing journal and never invents one.
+- 2.4: the tracking directory is stored **verbatim**, never trimmed or blank-nulled. Design issue 9 requires reconciliation (task 5.1) to *recognise* a blank, malformed or unreadable stored path and surface it; normalising in the store would erase that distinction.
+- Store-wide, pre-existing, not a defect of any task in this plan: `SaveDescription`, `RecordPhase`, `SaveSubtaskSettings` and `SetImplementationCompletedManually` all use `TryLoad(paths) ?? CreateEmpty()`. `TryLoad` returns null both for an absent journal *and* for one that exists but is corrupt or carries a future version, so a write against a corrupt journal overwrites it with an empty record and discards the prior `Dismissed` and phase list. A dismissal inside an unparseable file is unrecoverable anyway, and fixing this would be out-of-boundary drift for a feature task — but if journal robustness is ever taken up, this is the place.

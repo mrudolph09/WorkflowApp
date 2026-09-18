@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using Workflow.Models;
 using Workflow.Services;
 
@@ -225,6 +225,235 @@ public sealed class TaskStateStoreTests : IDisposable
             [.. PhaseCatalog.All.Select(d => new TaskPhaseState(d.Phase, PhaseStatus.Pending, null))]);
 
         Assert.False(File.Exists(_paths.StateAbsolute));
+    }
+
+    [Fact]
+    public void SaveDescription_LeavesSubtaskModeDisabledByDefault()
+    {
+        _store.SaveDescription(_paths, "d");
+
+        var state = _store.TryLoad(_paths);
+
+        // The three subtask fields are additive with safe defaults (design, Configuration and
+        // Persistence). A journal that never mentioned them must never read as enabled.
+        Assert.NotNull(state);
+        Assert.False(state.SubtasksEnabled);
+        Assert.Null(state.WorkflowDirectory);
+        Assert.False(state.ImplementationCompletedManually);
+        Assert.Equal(TaskState.CurrentVersion, state.Version);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_RoundTripsTheModeAndTheDirectory()
+    {
+        _store.SaveDescription(_paths, "eine Beschreibung");
+
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        var state = _store.TryLoad(_paths);
+
+        Assert.NotNull(state);
+        Assert.True(state.SubtasksEnabled);
+        Assert.Equal(@"C:\Workflows\Ablage", state.WorkflowDirectory);
+
+        // Additive only: the description and the untouched manual marker survive (1.5).
+        Assert.Equal("eine Beschreibung", state.TaskDescription);
+        Assert.False(state.ImplementationCompletedManually);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_LeavesTheRecordVersionAtOne()
+    {
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        // "all three are additive with safe defaults, so version stays 1 and old records load
+        // unchanged" - design, Configuration and Persistence.
+        Assert.Equal(1, TaskState.CurrentVersion);
+        Assert.Equal(1, _store.TryLoad(_paths)!.Version);
+        Assert.Contains("\"version\": 1", File.ReadAllText(_paths.StateAbsolute), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_WritesTheDocumentedCamelCaseNames()
+    {
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        var json = File.ReadAllText(_paths.StateAbsolute);
+
+        Assert.Contains("\"subtasksEnabled\": true", json, StringComparison.Ordinal);
+        Assert.Contains("\"workflowDirectory\": \"C:\\\\Workflows\\\\Ablage\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"implementationCompletedManually\": false", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_NoJournalYet_CreatesOne()
+    {
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        var state = _store.TryLoad(_paths);
+
+        Assert.NotNull(state);
+        Assert.True(state.SubtasksEnabled);
+        Assert.Equal(@"C:\Workflows\Ablage", state.WorkflowDirectory);
+        Assert.Equal(4, state.Phases.Count);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_TaskDirectoryMissing_DoesNotThrow()
+    {
+        Directory.Delete(_paths.TaskDirectory, recursive: true);
+
+        // The store's contract is "no method ever throws" (ITaskStateStore). Save recreates the
+        // directory, exactly as SaveDescription does.
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        Assert.True(_store.TryLoad(_paths)!.SubtasksEnabled);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_KeepsTheDismissedFlag()
+    {
+        _store.SaveDescription(_paths, "d");
+        _store.SetDismissed(_paths, dismissed: true);
+        Assert.True(_store.TryLoad(_paths)!.Dismissed);
+
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        var state = _store.TryLoad(_paths);
+
+        // Unlike SaveDescription, persisting subtask settings is not "the user started this task",
+        // so it must not clear the dismissal (task 2.4, design: "preserves Dismissed").
+        Assert.NotNull(state);
+        Assert.True(state.Dismissed);
+        Assert.True(state.SubtasksEnabled);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_PersistsACallerSuppliedNullDirectory()
+    {
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        _store.SaveSubtaskSettings(_paths, enabled: false, workflowDirectory: null);
+
+        var state = _store.TryLoad(_paths);
+
+        Assert.NotNull(state);
+        Assert.False(state.SubtasksEnabled);
+        Assert.Null(state.WorkflowDirectory);
+    }
+
+    [Fact]
+    public void SaveSubtaskSettings_KeepsTheRecordedPhases()
+    {
+        _store.SaveDescription(_paths, "d");
+        _store.RecordPhase(_paths, WorkflowPhase.Review, PhaseStatus.Completed);
+
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+
+        var state = _store.TryLoad(_paths);
+
+        Assert.NotNull(state);
+        Assert.Equal(PhaseStatus.Completed, state.Phases[1].Status);
+        Assert.Equal(PhaseStatus.Pending, state.Phases[0].Status);
+    }
+
+    [Fact]
+    public void SetImplementationCompletedManually_RoundTripsAndKeepsEverythingElse()
+    {
+        _store.SaveDescription(_paths, "eine Beschreibung");
+        _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
+        _store.SetDismissed(_paths, dismissed: true);
+
+        _store.SetImplementationCompletedManually(_paths, completedManually: true);
+
+        var state = _store.TryLoad(_paths);
+
+        // The explicit manual override recovery reads instead of the ledger (5.4, design issue 6b).
+        Assert.NotNull(state);
+        Assert.True(state.ImplementationCompletedManually);
+        Assert.True(state.SubtasksEnabled);
+        Assert.Equal(@"C:\Workflows\Ablage", state.WorkflowDirectory);
+        Assert.True(state.Dismissed);
+        Assert.Equal("eine Beschreibung", state.TaskDescription);
+    }
+
+    [Fact]
+    public void SetImplementationCompletedManually_False_ClearsTheMarker()
+    {
+        _store.SaveDescription(_paths, "d");
+        _store.SetImplementationCompletedManually(_paths, completedManually: true);
+
+        _store.SetImplementationCompletedManually(_paths, completedManually: false);
+
+        Assert.False(_store.TryLoad(_paths)!.ImplementationCompletedManually);
+    }
+
+    [Fact]
+    public void SetImplementationCompletedManually_NoJournal_IsANoOp()
+    {
+        _store.SetImplementationCompletedManually(_paths, completedManually: true);
+
+        Assert.False(File.Exists(_paths.StateAbsolute));
+    }
+
+    [Fact]
+    public void TryLoad_JournalCarryingSubtaskFields_ReadsAllThree()
+    {
+        File.WriteAllText(_paths.StateAbsolute, """
+        {
+          "version": 1,
+          "taskDescription": "mit Subtasks",
+          "dismissed": false,
+          "subtasksEnabled": true,
+          "workflowDirectory": "C:\\Workflows\\Ablage",
+          "implementationCompletedManually": true,
+          "phases": [ { "phase": "Implementation", "status": "Completed", "completedUtc": null } ]
+        }
+        """);
+
+        var state = _store.TryLoad(_paths);
+
+        Assert.NotNull(state);
+        Assert.True(state.SubtasksEnabled);
+        Assert.Equal(@"C:\Workflows\Ablage", state.WorkflowDirectory);
+        Assert.True(state.ImplementationCompletedManually);
+        Assert.Equal("mit Subtasks", state.TaskDescription);
+    }
+
+    [Fact]
+    public void TryLoad_JournalWrittenBeforeTheSubtaskFieldsExisted_LoadsAsDisabled()
+    {
+        // Exactly the shape this build wrote before task 2.4: no subtask properties at all.
+        File.WriteAllText(_paths.StateAbsolute, """
+        {
+          "version": 1,
+          "taskDescription": "alte Aufgabe",
+          "createdUtc": "2026-09-14T08:00:00+00:00",
+          "updatedUtc": "2026-09-14T09:30:00+00:00",
+          "dismissed": true,
+          "phases": [
+            { "phase": "Specification", "status": "Completed", "completedUtc": "2026-09-14T09:00:00Z" },
+            { "phase": "Review",        "status": "Active",    "completedUtc": null }
+          ]
+        }
+        """);
+
+        var state = _store.TryLoad(_paths);
+
+        Assert.NotNull(state);
+
+        // A malformed fixture would be rescued by the JsonException catch and would be
+        // indistinguishable from "loaded but disabled". These four assertions can only hold if the
+        // fixture really went through the deserializer, so the defaults below mean something.
+        Assert.Equal("alte Aufgabe", state.TaskDescription);
+        Assert.True(state.Dismissed);
+        Assert.Equal(PhaseStatus.Completed, state.Phases[0].Status);
+        Assert.Equal(PhaseStatus.Active, state.Phases[1].Status);
+
+        // E15-E16 / requirement 1.7: old tasks are subtask mode disabled.
+        Assert.False(state.SubtasksEnabled);
+        Assert.Null(state.WorkflowDirectory);
+        Assert.False(state.ImplementationCompletedManually);
     }
 
     [Fact]

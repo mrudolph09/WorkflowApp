@@ -17,6 +17,10 @@ public sealed class FakeTaskStateStore : ITaskStateStore
 
     public Collection<(string Directory, IReadOnlyList<TaskPhaseState> Phases)> Replacements { get; } = [];
 
+    public Collection<(string Directory, bool Enabled, string? WorkflowDirectory)> SubtaskSettings { get; } = [];
+
+    public Collection<(string Directory, bool CompletedManually)> ManualCompletions { get; } = [];
+
     // Every method guards its argument. AnalysisMode=All applies to this project too, so CA1062
     // is an error wherever a public method dereferences a parameter it did not null-check.
     public TaskState? TryLoad(TaskPaths paths)
@@ -78,6 +82,30 @@ public sealed class FakeTaskStateStore : ITaskStateStore
         if (state is not null)
         {
             state.Dismissed = dismissed;
+        }
+    }
+
+    public void SaveSubtaskSettings(TaskPaths paths, bool enabled, string? workflowDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        SubtaskSettings.Add((paths.TaskDirectory, enabled, workflowDirectory));
+        var state = TryLoad(paths) ?? NewState();
+        state.SubtasksEnabled = enabled;
+        state.WorkflowDirectory = workflowDirectory;
+        _states[paths.TaskDirectory] = state;
+    }
+
+    public void SetImplementationCompletedManually(TaskPaths paths, bool completedManually)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        ManualCompletions.Add((paths.TaskDirectory, completedManually));
+        var state = TryLoad(paths);
+        if (state is not null)
+        {
+            // Mirrors the real store: no journal, nothing to override.
+            state.ImplementationCompletedManually = completedManually;
         }
     }
 

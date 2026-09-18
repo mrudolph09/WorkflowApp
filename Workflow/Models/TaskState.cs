@@ -43,6 +43,32 @@ public sealed class TaskState
     /// <summary>True when the user closed the recovered tab instead of continuing it.</summary>
     public bool Dismissed { get; set; }
 
+    /// <summary>True when this task runs its implementation phase in subtask mode.</summary>
+    /// <remarks>
+    /// Additive with a safe default: a journal written before this field existed reads as false,
+    /// so an old task is a normal task rather than a subtask task with no tracking directory.
+    /// </remarks>
+    public bool SubtasksEnabled { get; set; }
+
+    /// <summary>
+    /// The tracking directory chosen for subtask mode, or null while subtask mode is off.
+    /// </summary>
+    /// <remarks>
+    /// Stored verbatim. Recognising a blank or malformed path is the reconciliation's business,
+    /// which needs to tell "the user never chose one" from "the choice is unusable".
+    /// </remarks>
+    public string? WorkflowDirectory { get; set; }
+
+    /// <summary>
+    /// True when the user ended the implementation phase through <c>Task abschliessen</c>.
+    /// </summary>
+    /// <remarks>
+    /// An explicit override. Recovery honours it without consulting the subtask ledger, which is
+    /// how "the user stopped here deliberately" stays distinguishable from "every subtask
+    /// reported complete".
+    /// </remarks>
+    public bool ImplementationCompletedManually { get; set; }
+
     /// <summary>The four phases, always in <see cref="PhaseCatalog"/> order.</summary>
     public Collection<TaskPhaseState> Phases { get; set; } = [];
 }
