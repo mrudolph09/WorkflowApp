@@ -52,16 +52,42 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         }
     }
 
-    private WorkflowOrchestrator CreateOrchestrator() => new(
+    private WorkflowOrchestrator CreateOrchestrator(
+        Func<TimeSpan, CancellationToken, Task>? settleDelay = null) => new(
         new PromptTemplateService(_promptDir),
         new AutoAnswerService(_rulesPath, overridePath: null),
         new ArtifactWatcherFactory(),
         _state,
         TimeSpan.FromMilliseconds(20),
-        TimeSpan.FromMilliseconds(40));
+        TimeSpan.FromMilliseconds(40),
+        settleDelay);
+
+    /// <summary>
+    /// An <see cref="IProgress{T}"/> that records on the thread that reports, in report order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Deliberately not <see cref="Progress{T}"/>. That one captures the ambient synchronisation
+    /// context and <em>posts</em> each report, so the orchestrator's report and the test's own
+    /// resumption after <c>await run</c> become two independently dispatched work items. They can
+    /// then be delivered out of order, and a report can still be in flight when the run it belongs
+    /// to has already been awaited - which no test here has ever meant to assert about, and which
+    /// several of them lose a coin toss over.
+    /// </para>
+    /// <para>
+    /// Recording inline removes the dispatch instead of waiting it out, so "the run has ended"
+    /// implies "everything it reported has been recorded". The production path is unaffected: the
+    /// app supplies its own <see cref="Progress{T}"/>, whose marshalling to the UI thread is its
+    /// business and is what <see cref="IProgress{T}"/> exists to abstract over.
+    /// </para>
+    /// </remarks>
+    private sealed class InlineProgress<T>(Action<T> record) : IProgress<T>
+    {
+        public void Report(T value) => record(value);
+    }
 
     private WorkflowRunRequest CreateRequest(FakeTerminalController terminal, ManualPhaseSignal signal) =>
-        new(_paths, "Beschreibung", terminal, signal, new Progress<PhaseProgress>(p =>
+        new(_paths, "Beschreibung", terminal, signal, new InlineProgress<PhaseProgress>(p =>
         {
             lock (_progress)
             {
@@ -666,14 +692,17 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         {
             StartPhase = WorkflowPhase.Implementation,
             Subtasks = new SubtaskConfiguration(true, trackingDirectory),
-            SubtaskProgress = new Progress<SubtaskProgress>(report =>
-            {
-                lock (_subtaskProgress)
-                {
-                    _subtaskProgress.Add(report);
-                }
-            }),
+            SubtaskProgress = new InlineProgress<SubtaskProgress>(RecordSubtaskReport),
         };
+
+    /// <summary>Records one published report, on the thread that published it.</summary>
+    private void RecordSubtaskReport(SubtaskProgress report)
+    {
+        lock (_subtaskProgress)
+        {
+            _subtaskProgress.Add(report);
+        }
+    }
 
     private SubtaskProgress[] SubtaskReports()
     {
@@ -1279,9 +1308,398 @@ public sealed class WorkflowOrchestratorTests : IDisposable
             _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Completed);
     }
 
+    // --- Phase 4, status settling and published progress (task 4.4) -----------------------
+
+    /// <summary>The ledger's reason for a status payload that never became readable.</summary>
+    private const string UnusableStatusFragment = "unlesbar oder fehlerhaft";
+
+    /// <summary>
+    /// Stands in for the wait between two settling reads. It records every interval the
+    /// orchestrator asks for - so the contract's 200 ms is asserted rather than merely slept - and
+    /// lets a test change the tracking files between two reads, which makes the retry sequence
+    /// deterministic instead of a race against the wall clock.
+    /// </summary>
+    private sealed class SettleDelayRecorder(Action<int>? onDelay = null)
+    {
+        private readonly List<TimeSpan> _requested = [];
+
+        /// <summary>Every interval the orchestrator asked to wait, in order.</summary>
+        public TimeSpan[] Requested
+        {
+            get
+            {
+                lock (_requested)
+                {
+                    return [.. _requested];
+                }
+            }
+        }
+
+        /// <summary>The delegate handed to the orchestrator in place of <see cref="Task.Delay(TimeSpan)"/>.</summary>
+        public Task DelayAsync(TimeSpan interval, CancellationToken cancellationToken)
+        {
+            int ordinal;
+            lock (_requested)
+            {
+                _requested.Add(interval);
+                ordinal = _requested.Count;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            onDelay?.Invoke(ordinal);
+
+            return Task.CompletedTask;
+        }
+    }
+
+    /// <summary>Writes a status payload and then the completion flag, as a session publishes them.</summary>
+    private static void PublishRawStatusAndFlag(SubtaskPaths tracking, string title, string statusJson)
+    {
+        WriteStatus(tracking, title, statusJson);
+        File.WriteAllText(tracking.SubtaskResultFile(title), $$"""{"subtask":"{{title}}"}""");
+    }
+
+    /// <summary>
+    /// The fixture's rule set with a short auto-answer settle ceiling, for the tests below.
+    /// </summary>
+    /// <remarks>
+    /// Identical to the shared fixture in every dimension these tests touch - same rule, same quiet
+    /// periods, same paste and submit timings - so nothing they assert is affected. Only the
+    /// ceiling is short. A <see cref="FakeTerminalController"/> that never renders leaves the
+    /// auto-answer loop with nothing to settle on, so the shipped 2000 ms is spent, per session, in
+    /// a 50 ms poll that none of these tests examines. Across their nine sessions that is twenty
+    /// seconds of the class's wall clock and some four hundred pool continuations, which is load
+    /// every other test in the assembly then has to share a machine with. Settling the *status
+    /// payload* - what these tests do pin - is driven by the injected waiter, not by this file.
+    /// </remarks>
+    private const string ShortAutoAnswerCeilingRules = """
+    {
+      "version": 2, "quietPeriodMs": 10, "settleTimeoutMs": 60, "maxAnswersPerPhase": 3,
+      "pasteQuietPeriodMs": 10, "pasteSettleTimeoutMs": 300, "submitVerifyMs": 30, "maxSubmitAttempts": 2,
+      "rules": [ { "id": "bypass", "pattern": "(?is)bypass", "send": "\\e[B\\r", "description": "" } ]
+    }
+    """;
+
+    /// <summary>The orchestrator the settling and progress tests below run against.</summary>
+    private WorkflowOrchestrator CreateSettlingOrchestrator(
+        Func<TimeSpan, CancellationToken, Task>? settleDelay = null) =>
+        CreateOrchestratorWithRules(ShortAutoAnswerCeilingRules, settleDelay);
+
+    [Fact]
+    public async Task PhaseFour_SubtaskSettling_TakesTheParsedStateWhenTheThirdReadSucceeds()
+    {
+        // Requirement 2.11 and design decision (issue 10), verbatim observable: a status file that
+        // is unparseable on the first read but valid on the third attempt yields the PARSED state
+        // rather than a failure. An orchestrator that read the payload once would publish Failed
+        // here, which is the mutation this test exists to catch.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+
+        // The SECOND wait lands the finished payload: read 1 and read 2 see the half-written file,
+        // read 3 - the third attempt - sees valid JSON. Driving it from the wait rather than from a
+        // timer is what makes "the third attempt" an exact statement.
+        var delays = new SettleDelayRecorder(ordinal =>
+        {
+            if (ordinal == 2)
+            {
+                WriteStatus(tracking, "ST-001-alpha", """{"status":"complete"}""");
+            }
+        });
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator(delays.DelayAsync).RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        // The agent's temp-file rename has not landed: the flag is already there, the payload is a
+        // truncated fragment.
+        PublishRawStatusAndFlag(tracking, "ST-001-alpha", """{"status":"comp""");
+
+        await run;
+
+        // Decomposing (reuse), then one report before the session and one after it.
+        var reports = SubtaskReports();
+        Assert.Equal(3, reports.Length);
+
+        var settled = reports[^1];
+        Assert.Equal(SubtaskStage.Running, settled.Stage);
+        Assert.Equal("ST-001-alpha", settled.CurrentTitle);
+        Assert.Equal(SubtaskStatus.Complete, Assert.Single(settled.States).Status);
+        Assert.Equal(1, settled.Completed);
+        Assert.Equal(0, settled.Failed);
+
+        // Exactly two waits: settling stopped the moment the parse succeeded, and never ran on to
+        // the ceiling.
+        Assert.Equal(2, delays.Requested.Length);
+        Assert.All(delays.Requested, interval => Assert.Equal(TimeSpan.FromMilliseconds(200), interval));
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskSettling_RetriesFiveTimesAndThenLetsTheLedgerFailTheEntry()
+    {
+        // Requirement 2.11 and E7: the bound is five retries after the first read, at 200 ms. The
+        // payload never becomes readable, so the entry is left as the ledger finds it - Failed,
+        // carrying the ledger's own reason - and the run ends instead of waiting for ever. The
+        // exact wait count is what pins the ceiling: four retries or six both fail here.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+
+        var delays = new SettleDelayRecorder();
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator(delays.DelayAsync).RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        PublishRawStatusAndFlag(tracking, "ST-001-alpha", "{ dies ist kein JSON");
+
+        await run;
+
+        Assert.Equal(5, delays.Requested.Length);
+        Assert.All(delays.Requested, interval => Assert.Equal(TimeSpan.FromMilliseconds(200), interval));
+
+        var reports = SubtaskReports();
+        var settled = reports[^1];
+
+        Assert.Equal("ST-001-alpha", settled.CurrentTitle);
+        Assert.Equal(1, settled.Failed);
+        Assert.Equal(0, settled.Completed);
+
+        var state = Assert.Single(settled.States);
+        Assert.Equal(SubtaskStatus.Failed, state.Status);
+        Assert.Contains(UnusableStatusFragment, state.FailReason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskSettling_StopsOnAParsedPendingPayloadInsteadOfWaitingForAStateChange()
+    {
+        // Design decision (issue 10): settling ends on a successful PARSE, not on "the state is no
+        // longer Pending". A payload that parses and says pending is a settled outcome, so not one
+        // single wait may be spent on it - an implementation that waited for a state change would
+        // burn the whole ceiling here. Requirement 3.3 then holds: pending counts as pending, and
+        // the published failure count stays 0.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+
+        var delays = new SettleDelayRecorder();
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator(delays.DelayAsync).RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        PublishRawStatusAndFlag(tracking, "ST-001-alpha", """{"status":"pending"}""");
+
+        await run;
+
+        Assert.Empty(delays.Requested);
+
+        var reports = SubtaskReports();
+        var settled = reports[^1];
+
+        Assert.Equal("ST-001-alpha", settled.CurrentTitle);
+        Assert.Equal(SubtaskStatus.Pending, Assert.Single(settled.States).Status);
+        Assert.Equal(0, settled.Failed);
+        Assert.Equal(0, settled.Completed);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskProgress_CarriesTheFailureReasonTextFromTheStatusPayload()
+    {
+        // Requirement 3.7 and design issue 7: the ordered states are the channel that delivers the
+        // failure reasons, so the reason the agent wrote must arrive verbatim in the progress
+        // published after that subtask. A payload that carried counts only passes every count
+        // assertion and fails exactly here.
+        const string Reason = "Kompilierung im Modul XY fehlgeschlagen";
+
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+        PublishRawStatusAndFlag(
+            tracking, "ST-001-alpha", $$"""{"status":"failed","failreason":"{{Reason}}"}""");
+
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+        PublishRawStatusAndFlag(tracking, "ST-002-beta", """{"status":"complete"}""");
+
+        await run;
+
+        // Decomposing, then two reports per entry.
+        var reports = SubtaskReports();
+
+        // The refreshed report for the FIRST subtask, not the run's last one: 3.2 asks for a
+        // publication after each subtask, so the reason must already be there before the second
+        // session starts.
+        var afterFirst = reports.LastOrDefault(r => r.CurrentTitle == "ST-001-alpha");
+        Assert.NotNull(afterFirst);
+        Assert.Equal(1, afterFirst.Failed);
+
+        var failed = Assert.Single(afterFirst.States, state => state.Status == SubtaskStatus.Failed);
+        Assert.Equal("ST-001-alpha", failed.Title);
+        Assert.Equal(Reason, failed.FailReason);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskProgress_PublishesStageCountsTitleAndOrderedStatesAfterEachSubtask()
+    {
+        // Requirements 2.6, 3.2 and 3.7 together. Every dimension the payload carries is given a
+        // distinct value, so no swap survives: nine entries split 4 complete / 3 failed /
+        // 2 pending, and 4 + 3 + 2 == 9 is pinned as well, which is what makes a mutant that
+        // exchanges the Completed and Failed counters - or Completed and Total - fail here.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        string[] titles =
+        [
+            "ST-01-ok", "ST-02-ok", "ST-03-ok", "ST-04-ok",
+            "ST-05-kaputt", "ST-06-kaputt", "ST-07-kaputt",
+            "ST-08-offen", "ST-09-offen",
+        ];
+
+        WriteIndex(tracking, titles);
+
+        // Four already complete: not eligible, so they cost no session.
+        foreach (var title in titles[..4])
+        {
+            StageSubtask(tracking, title, "complete");
+        }
+
+        // Three with a folder but no description: eligible, skipped as failures, still no session.
+        foreach (var title in titles[4..7])
+        {
+            Directory.CreateDirectory(tracking.SubtaskDirectory(title));
+        }
+
+        // Two untouched entries with descriptions: exactly these two get sessions.
+        WriteDescription(tracking, "ST-08-offen", "Beschreibung ACHT-ONLY");
+        WriteDescription(tracking, "ST-09-offen", "Beschreibung NEUN-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+        Assert.Contains("AUSFUEHRUNG <ST-08-offen>", terminal.Pasted[0], StringComparison.Ordinal);
+
+        // Still pending afterwards, so the counts below stay 4 / 3 / 2 and remain distinct.
+        PublishRawStatusAndFlag(tracking, "ST-08-offen", """{"status":"pending"}""");
+
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+        PublishRawStatusAndFlag(tracking, "ST-09-offen", """{"status":"complete"}""");
+
+        await run;
+
+        var reports = SubtaskReports();
+        var afterEighth = reports.LastOrDefault(r => r.CurrentTitle == "ST-08-offen");
+        Assert.NotNull(afterEighth);
+
+        Assert.Equal(SubtaskStage.Running, afterEighth.Stage);
+        Assert.Equal(4, afterEighth.Completed);
+        Assert.Equal(9, afterEighth.Total);
+        Assert.Equal(3, afterEighth.Failed);
+
+        // The states arrive complete and in index order, which is what lets the indicator render a
+        // per-entry tooltip at all.
+        Assert.Equal(titles, afterEighth.States.Select(state => state.Title));
+        Assert.Equal(2, afterEighth.States.Count(state => state.Status == SubtaskStatus.Pending));
+        Assert.Equal(afterEighth.Total, afterEighth.Completed + afterEighth.Failed
+            + afterEighth.States.Count(state => state.Status == SubtaskStatus.Pending));
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskProgress_ReplacesTheDecomposingStageBeforeTheFirstSession()
+    {
+        // A reusing run reports Decomposing once before the reuse decision (task 4.2). Publishing
+        // only after a subtask would leave that transient stage on the indicator for the whole of
+        // the first session, which can take an hour, so the first live report must already be out
+        // by the time the first prompt is pasted (requirement 3.2).
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        StageSubtask(tracking, "ST-003-gamma", "complete");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        var early = SubtaskReports();
+        Assert.Equal(2, early.Length);
+        Assert.Equal(SubtaskStage.Decomposing, early[0].Stage);
+
+        // Live counts, and the entry that is running right now - not the one that just finished.
+        Assert.Equal(SubtaskStage.Running, early[1].Stage);
+        Assert.Equal("ST-001-alpha", early[1].CurrentTitle);
+        Assert.Equal(1, early[1].Completed);
+        Assert.Equal(3, early[1].Total);
+        Assert.Equal(0, early[1].Failed);
+
+        PublishRawStatusAndFlag(tracking, "ST-001-alpha", """{"status":"complete"}""");
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+        PublishRawStatusAndFlag(tracking, "ST-002-beta", """{"status":"complete"}""");
+
+        await run;
+    }
+
     // The fixture's single rules file is shared by every test in the class; this one needs its
     // own timings, so it gets its own file.
-    private WorkflowOrchestrator CreateOrchestratorWithRules(string json)
+    private WorkflowOrchestrator CreateOrchestratorWithRules(
+        string json,
+        Func<TimeSpan, CancellationToken, Task>? settleDelay = null)
     {
         var path = Path.Combine(_root, "rules-" + Guid.NewGuid().ToString("N") + ".json");
         File.WriteAllText(path, json);
@@ -1292,7 +1710,8 @@ public sealed class WorkflowOrchestratorTests : IDisposable
             new ArtifactWatcherFactory(),
             _state,
             TimeSpan.FromMilliseconds(20),
-            TimeSpan.FromMilliseconds(40));
+            TimeSpan.FromMilliseconds(40),
+            settleDelay);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

@@ -1,5 +1,6 @@
 ﻿using System.Diagnostics;
 using System.IO;
+using System.Text.Json;
 using Workflow.Models;
 using Workflow.Terminal;
 
@@ -40,6 +41,36 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     /// </remarks>
     private const string SubtaskRunLauncher = "yo";
 
+    /// <summary>Pause between two attempts to read an attempted subtask's status payload.</summary>
+    /// <remarks>
+    /// Requirement 2.11 and design decision (issue 10): the settling interval is 200 ms. It is a
+    /// constant rather than a parameter because the figure is part of the contract, not a tuning
+    /// knob; only the <em>waiting</em> is injectable, and tests assert that this exact value is the
+    /// one handed to the waiter.
+    /// </remarks>
+    private static readonly TimeSpan StatusSettleInterval = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>
+    /// How often an unusable status payload is re-read before the entry is left as the ledger finds
+    /// it. Five retries follow the first read, so a payload is read at most six times and the whole
+    /// settling is bounded by five intervals (requirement 2.11, E7).
+    /// </summary>
+    /// <remarks>
+    /// This bound exists only for the payload. It is emphatically <em>not</em> a session timeout:
+    /// waiting for the session itself is unbounded (requirement 2.8, E8), and this countdown starts
+    /// only after that wait has already ended with a published flag.
+    /// </remarks>
+    private const int StatusSettleRetries = 5;
+
+    // Identical to the ledger's own reader options on purpose: "the parse succeeded" must mean the
+    // same thing here as it does there, or settling would either give up on a payload the ledger
+    // accepts or stop on one it rejects.
+    private static readonly JsonDocumentOptions StatusDocumentOptions = new()
+    {
+        AllowTrailingCommas = true,
+        CommentHandling = JsonCommentHandling.Skip,
+    };
+
     private readonly IPromptTemplateService _prompts;
     /// <summary>Pause between the individual key presses of one auto-answer.</summary>
     private static readonly TimeSpan KeyPressGap = TimeSpan.FromMilliseconds(60);
@@ -49,6 +80,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     private readonly ITaskStateStore _state;
     private readonly TimeSpan _debounce;
     private readonly TimeSpan _pollInterval;
+    private readonly Func<TimeSpan, CancellationToken, Task> _settleDelay;
 
     /// <summary>Creates the orchestrator.</summary>
     /// <param name="prompts">Prompt renderer.</param>
@@ -57,13 +89,21 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     /// <param name="state">The per-task workflow journal.</param>
     /// <param name="debounce">Debounce applied to file-system notifications.</param>
     /// <param name="pollInterval">Fallback poll interval for dropped file-system events.</param>
+    /// <param name="settleDelay">
+    /// How the bounded status settling waits between two reads. Defaults to
+    /// <see cref="Task.Delay(TimeSpan, CancellationToken)"/>. Only the <em>waiting</em> is
+    /// substitutable; the interval itself stays <see cref="StatusSettleInterval"/> and is passed to
+    /// this delegate, so a test can drive the retries deterministically and still observe that the
+    /// contract's 200 ms is what was asked for.
+    /// </param>
     public WorkflowOrchestrator(
         IPromptTemplateService prompts,
         IAutoAnswerService autoAnswer,
         IArtifactWatcherFactory watchers,
         ITaskStateStore state,
         TimeSpan debounce,
-        TimeSpan pollInterval)
+        TimeSpan pollInterval,
+        Func<TimeSpan, CancellationToken, Task>? settleDelay = null)
     {
         _prompts = prompts;
         _autoAnswer = autoAnswer;
@@ -71,6 +111,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         _state = state;
         _debounce = debounce;
         _pollInterval = pollInterval;
+        _settleDelay = settleDelay ?? Task.Delay;
     }
 
     /// <inheritdoc />
@@ -314,6 +355,14 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             // still costs this entry its one attempt for this run.
             attempted.Add(entry.Title);
 
+            // Published BEFORE the session, from the snapshot this iteration already read. Two
+            // things depend on the position. It is what replaces the transient
+            // SubtaskStage.Decomposing of a reusing run with live counts straight away, instead of
+            // leaving the indicator claiming decomposition for the whole of the first session; and
+            // it is the only report in which CurrentTitle names a subtask that is actually about to
+            // run (requirement 3.2).
+            PublishProgress(request, snapshot, entry.Title);
+
             var description = TryReadAttemptableDescription(tracking, entry.Title);
             if (description is null)
             {
@@ -330,6 +379,21 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             DeleteStaleFlag(tracking.SubtaskResultFile(entry.Title));
 
             await RunSubtaskSessionAsync(request, tracking, entry.Title, description, cancellationToken);
+
+            // The flag is on disk, but the payload beside it may still be mid-rename. Settle it
+            // before anything reads it, or the very next line would publish a failure for a subtask
+            // that in fact succeeded (requirement 2.11).
+            await SettleSubtaskStatusAsync(tracking, entry.Title, cancellationToken);
+
+            // Requirement 3.2: refreshed after each subtask. Re-read rather than adjusted in
+            // memory - the session is what changed the files, and the ledger is the only thing that
+            // interprets them. A read that fails here publishes nothing; the next iteration's read
+            // decides what that means, which keeps this from being a second place that ends runs.
+            var settled = SubtaskLedger.TryRead(tracking);
+            if (settled is not null)
+            {
+                PublishProgress(request, settled, entry.Title);
+            }
 
             if (ManualCompletionRequested(request.ManualSignal))
             {
@@ -376,6 +440,138 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             tracking.SubtaskDirectory(title),
             [tracking.SubtaskResultFile(title)],
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Waits, boundedly, until one attempted subtask's status payload can be read and parsed.
+    /// </summary>
+    /// <param name="tracking">The task's tracking paths.</param>
+    /// <param name="title">The entry whose session has just published its completion flag.</param>
+    /// <param name="cancellationToken">Cancels the wait between two reads.</param>
+    /// <remarks>
+    /// <para>
+    /// Requirement 2.11 and design decision (issue 10). The agent publishes <c>status.json</c> and
+    /// then its completion flag, both by temporary-file rename, so the moment the flag is observed
+    /// the payload beside it may still be a half-written or momentarily locked file. This method
+    /// retries that single read at <see cref="StatusSettleInterval"/>, at most
+    /// <see cref="StatusSettleRetries"/> times.
+    /// </para>
+    /// <para>
+    /// The predicate is a successful <em>parse</em>, deliberately not "the state is no longer
+    /// Pending". The latter would return on the first read of a payload that legitimately still says
+    /// <c>pending</c> - design issue 1 makes that a valid, settled outcome - and would go on waiting
+    /// for a state change that a finished-but-unsuccessful session is never going to make.
+    /// </para>
+    /// <para>
+    /// An <em>absent</em> payload settles immediately rather than burning the retries: E7 and design
+    /// issue 1 say a missing status after a flag is Pending, not Failed, so there is nothing for a
+    /// retry to change - the file was written before the flag if it was written at all.
+    /// </para>
+    /// <para>
+    /// Nothing is written and nothing is returned. Exhausted retries leave the payload exactly as it
+    /// is on disk, and <see cref="SubtaskLedger"/> - the only thing that interprets tracking files -
+    /// derives <see cref="SubtaskStatus.Failed"/> from an unreadable or malformed one. Keeping the
+    /// verdict there is what stops this method from becoming a second, disagreeing interpreter.
+    /// </para>
+    /// </remarks>
+    private async Task SettleSubtaskStatusAsync(
+        SubtaskPaths tracking,
+        string title,
+        CancellationToken cancellationToken)
+    {
+        var path = tracking.SubtaskStatusFile(title);
+
+        for (var retry = 0; ; retry++)
+        {
+            if (StatusPayloadIsSettled(path))
+            {
+                return;
+            }
+
+            if (retry >= StatusSettleRetries)
+            {
+                // Exhausted. The entry stays whatever the files say it is, which for a payload that
+                // is still unusable is Failed, carrying the ledger's reason.
+                return;
+            }
+
+            await _settleDelay(StatusSettleInterval, cancellationToken);
+        }
+    }
+
+    /// <summary>Reports whether one status payload has stopped being a moving target.</summary>
+    /// <param name="path">Absolute path of that subtask's <c>status.json</c>.</param>
+    /// <returns>
+    /// True when the file is absent, or when it could be read and parsed as JSON; false while it is
+    /// locked, unreadable or not yet valid JSON.
+    /// </returns>
+    /// <remarks>
+    /// The <em>meaning</em> of the parsed document is not inspected at all. Which value settles a
+    /// subtask is the ledger's decision, and duplicating the closed status vocabulary here would
+    /// create a second place that could disagree with it about what <c>complete</c> means.
+    /// </remarks>
+    private static bool StatusPayloadIsSettled(string path)
+    {
+        string content;
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return true;
+            }
+
+            content = File.ReadAllText(path);
+        }
+        catch (IOException)
+        {
+            // The publishing session still holds it. This is the case the retries exist for.
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        try
+        {
+            // Parsed purely to establish that it parses; the document itself is of no interest here.
+            JsonDocument.Parse(content, StatusDocumentOptions).Dispose();
+
+            return true;
+        }
+        catch (JsonException)
+        {
+            // Half-written: the rename has not landed yet, or the file is genuinely malformed. One
+            // more read at the settling interval tells the two apart.
+            return false;
+        }
+    }
+
+    /// <summary>Publishes one refreshed progress report for the running loop.</summary>
+    /// <param name="request">The run parameters; its progress channel may be absent.</param>
+    /// <param name="snapshot">A freshly read snapshot, which supplies the counts and the states.</param>
+    /// <param name="currentTitle">The entry this report is about.</param>
+    /// <remarks>
+    /// The counts are taken from the snapshot rather than recomputed, so the <c>{N} von {M}</c> the
+    /// indicator shows and the states its tooltip renders can never come from two different reads
+    /// (requirements 3.2 and 3.7). <see cref="SubtaskSnapshot.States"/> is passed straight through:
+    /// it is already an ordered read-only list, and it is the channel design issue 7 chose for the
+    /// failure reasons, so a failed entry's <c>failreason</c> reaches the tooltip without a second
+    /// lookup.
+    /// </remarks>
+    private static void PublishProgress(
+        WorkflowRunRequest request,
+        SubtaskSnapshot snapshot,
+        string? currentTitle)
+    {
+        request.SubtaskProgress?.Report(
+            new SubtaskProgress(
+                SubtaskStage.Running,
+                snapshot.Completed,
+                snapshot.Total,
+                snapshot.Failed,
+                currentTitle,
+                snapshot.States));
     }
 
     /// <summary>
