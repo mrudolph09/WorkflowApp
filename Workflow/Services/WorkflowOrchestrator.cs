@@ -11,6 +11,9 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     private const int SnapshotLines = 60;
 
     private readonly IPromptTemplateService _prompts;
+    /// <summary>Pause between the individual key presses of one auto-answer.</summary>
+    private static readonly TimeSpan KeyPressGap = TimeSpan.FromMilliseconds(60);
+
     private readonly IAutoAnswerService _autoAnswer;
     private readonly IArtifactWatcherFactory _watchers;
     private readonly ITaskStateStore _state;
@@ -101,53 +104,111 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
 
         // A marker left by a previous run of this task would satisfy the phase-4 watcher in
         // milliseconds. Deleting it before the baseline is taken removes the failure mode
-        // instead of handling it (SPEC section 8.3).
+        // instead of handling it (SPEC section 8.3). It stays in the phase method rather than
+        // moving into RunSessionAsync because it is phase-specific; the baseline is the very
+        // first statement of that method, so "before the baseline" still holds.
         if (definition.Phase == WorkflowPhase.Implementation)
         {
             DeleteStaleDoneMarker(request.Paths.DoneAbsolute);
         }
 
-        // The baseline for AnyContentChanged must be captured before the CLI can touch anything.
-        using var watcher = _watchers.Create(
+        await RunSessionAsync(
+            request.Terminal,
+            request.ManualSignal,
+            request.Paths.WorkingDirectory,
+            definition.Launcher,
+            definition.PromptFile,
+            PromptVariables.For(request.Paths, request.TaskDescription),
             definition.Completion,
             request.Paths.TaskDirectory,
             WatchedPaths(request.Paths, definition),
+            cancellationToken);
+
+        _state.RecordPhase(request.Paths, definition.Phase, PhaseStatus.Completed);
+        request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Completed));
+    }
+
+    /// <summary>
+    /// Runs one agent session end to end: artefact baseline, a fresh terminal at the product
+    /// working directory, the launcher, auto-answer, the rendered prompt, and then the race
+    /// between the artefact condition and the user's manual completion. This is the single body
+    /// every phase run shares. The caller keeps the journal transitions, the progress reports,
+    /// the manual-signal reset and any phase-specific preparation.
+    /// </summary>
+    /// <param name="terminal">The terminal this session drives.</param>
+    /// <param name="manualSignal">The user's escape hatch out of this session.</param>
+    /// <param name="workingDirectory">The product working directory the session runs in.</param>
+    /// <param name="launcher">Command typed into the shell to start the CLI.</param>
+    /// <param name="promptFile">File name inside the Prompt directory.</param>
+    /// <param name="substitutions">Substitution dictionary for that prompt file.</param>
+    /// <param name="completion">Completion rule the watcher applies.</param>
+    /// <param name="watchDirectory">
+    /// Root the watcher observes. It is a parameter rather than something derived inside, because
+    /// a session that is not a phase run watches a different root than the task directory;
+    /// deriving it here would hard-code the phase case into the shared primitive.
+    /// </param>
+    /// <param name="watchedPaths">Artefact paths the completion rule applies to.</param>
+    /// <param name="cancellationToken">Cancels the session.</param>
+    /// <returns>
+    /// True when the manual signal ended the session, false when the artefact watcher did. This
+    /// is information the previous inline code discarded; it changes nothing about the wait.
+    /// </returns>
+    private async Task<bool> RunSessionAsync(
+        ITerminalController terminal,
+        ManualPhaseSignal manualSignal,
+        string workingDirectory,
+        string launcher,
+        string promptFile,
+        IReadOnlyDictionary<string, string> substitutions,
+        CompletionRule completion,
+        string watchDirectory,
+        IReadOnlyList<string> watchedPaths,
+        CancellationToken cancellationToken)
+    {
+        // The baseline for AnyContentChanged must be captured before the CLI can touch anything.
+        using var watcher = _watchers.Create(
+            completion,
+            watchDirectory,
+            watchedPaths,
             _debounce,
             _pollInterval);
 
-        request.Terminal.ClearScreen();
-        request.Terminal.StartSession(
+        terminal.ClearScreen();
+        terminal.StartSession(
             ShellLocator.FindShellExecutable(),
             ShellLocator.ShellArguments,
-            request.Paths.WorkingDirectory);
+            workingDirectory);
 
         // The page must be listening before anything is written to it, or `clear`, the first
         // PTY bytes and the first snapshot are all dropped - and the launcher's startup screen
         // is exactly what the auto-answer rules need to match (spec section 6.4).
-        await request.Terminal.WaitUntilReadyAsync(cancellationToken);
+        await terminal.WaitUntilReadyAsync(cancellationToken);
 
         // Always quoted: working directories contain spaces and umlauts.
-        request.Terminal.Send($"cd \"{request.Paths.WorkingDirectory}\"\r");
-        request.Terminal.Send($"{definition.Launcher}\r");
+        terminal.Send($"cd \"{workingDirectory}\"\r");
+        terminal.Send($"{launcher}\r");
 
-        await SettleAndAnswerAsync(request.Terminal, cancellationToken);
-
-        var variables = PromptVariables.For(request.Paths, request.TaskDescription);
+        await SettleAndAnswerAsync(terminal, cancellationToken);
 
         await SendPromptAsync(
-            request.Terminal,
-            _prompts.Render(definition.PromptFile, variables),
+            terminal,
+            _prompts.Render(promptFile, substitutions),
             cancellationToken);
 
         // Every phase now has an artefact condition; the manual signal is the escape hatch for
-        // all four, not a completion rule of its own. The doubled await unwraps Task<Task> so a
-        // watcher failure surfaces as ArtifactWatchException instead of being silently dropped.
-        await await Task.WhenAny(
-            watcher.WaitAsync(cancellationToken),
-            request.ManualSignal.WaitAsync(cancellationToken));
+        // all four, not a completion rule of its own.
+        var watched = watcher.WaitAsync(cancellationToken);
+        var manual = manualSignal.WaitAsync(cancellationToken);
 
-        _state.RecordPhase(request.Paths, definition.Phase, PhaseStatus.Completed);
-        request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Completed));
+        var winner = await Task.WhenAny(watched, manual);
+
+        // This second await is the outer half of the original `await await Task.WhenAny(...)` and
+        // must stay: it unwraps the winning task so a watcher failure surfaces as
+        // ArtifactWatchException instead of being silently dropped. It is awaited BEFORE the
+        // winner is reported, so a faulted winner throws and this method returns nothing at all.
+        await winner;
+
+        return ReferenceEquals(winner, manual);
     }
 
     // Keyed on the phase, not the completion rule: phases 1 and 3 share the FilesExist/
@@ -223,26 +284,44 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
         }
 
+        // Whether the paste is visibly sitting in the input box as a collapsed chip. When it is,
+        // the only reliable proof of submission is that chip disappearing - a single carriage
+        // return after a bracketed paste is taken as a newline, not submit, in the
+        // pwsh -> yo -> Claude chain, and it still produces render output, so an output-count tick
+        // is a false positive. We therefore press Enter until the chip is gone (spec section 9.3).
+        var settled = await terminal.SnapshotAsync(SnapshotLines, cancellationToken);
+        var pastePending = _autoAnswer.IsPastePending(settled);
+
         for (var attempt = 0; attempt < configuration.MaxSubmitAttempts; attempt++)
         {
-            // The carriage return is only ever written once the screen is quiet, so by
-            // construction nothing else is producing output: any new chunk means the launcher
-            // acted on it. That makes OutputCount a cheaper and sharper signal than diffing two
-            // snapshots, which would have to tell spinner frames from real progress.
             var before = terminal.OutputCount;
 
             terminal.Send("\r");
-
             await Task.Delay(TimeSpan.FromMilliseconds(configuration.SubmitVerifyMs), cancellationToken);
 
-            if (terminal.OutputCount != before)
+            var screen = await terminal.SnapshotAsync(SnapshotLines, cancellationToken);
+
+            if (pastePending)
             {
+                // Screen-based verification: the prompt is submitted once the collapsed-paste chip
+                // is no longer on screen. Claude Code holds a ~7 s grace after a large bracketed
+                // paste during which Enter is absorbed rather than submitting, so several carriage
+                // returns may be needed - the loop stops the moment the chip clears.
+                if (!_autoAnswer.IsPastePending(screen))
+                {
+                    return;
+                }
+            }
+            else if (terminal.OutputCount != before)
+            {
+                // No collapsed chip (a short prompt, or no pattern configured): fall back to the
+                // original output-based check.
                 return;
             }
         }
 
-        // Both attempts produced nothing. The prompt is sitting in the input box and the terminal
-        // is live: the user can press Enter, exactly as before this fix. Better than blocking.
+        // Every attempt failed. The prompt is in the input box and the terminal is live: the user
+        // can press Enter, exactly as before this fix. Better than blocking.
     }
 
     private async Task SettleAndAnswerAsync(ITerminalController terminal, CancellationToken cancellationToken)
@@ -287,15 +366,34 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
 
             var rule = _autoAnswer.Match(screen, fired);
 
-            // Settled with nothing left to answer: send the prompt NOW. Waiting out
-            // SettleTimeoutMs here would add a minute to every phase of every task - this is the
-            // normal exit from the loop, not the exceptional one (spec section 7.3, D13).
             if (rule is null || fired.Count >= configuration.MaxAnswersPerPhase)
             {
-                return;
+                // Nothing left to answer. But a quiet screen is NOT proof the launcher is ready:
+                // right after `yo` is typed there is a quiet window while Node/Claude cold-starts
+                // during which the screen still shows the shell prompt. Pasting the prompt then
+                // sends it into the shell (or into Claude before its input is listening) and it is
+                // lost, so the Enter that follows has nothing to submit. Only proceed once the
+                // launcher's own input is on screen (spec section 7.3).
+                if (_autoAnswer.IsLauncherReady(screen))
+                {
+                    return;
+                }
+
+                // Not ready yet: keep waiting for the ready marker (or the next dialog) rather
+                // than returning. The overall ceiling still bounds this.
+                await Task.Delay(TimeSpan.FromMilliseconds(150), cancellationToken);
+                continue;
             }
 
-            terminal.Send(rule.Send);
+            // One write per key press. Ink parses each stdin chunk as a single keypress, so
+            // "<Down><Enter>" written at once is an unknown key that the dialog ignores - and the
+            // prompt's own Enter then confirms the preselected "No, exit".
+            foreach (var key in KeySequence.Split(rule.Send))
+            {
+                terminal.Send(key);
+                await Task.Delay(KeyPressGap, cancellationToken);
+            }
+
             fired.Add(rule.Id);
 
             await Task.Delay(quietPeriod, cancellationToken);
