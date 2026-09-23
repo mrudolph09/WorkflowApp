@@ -10,6 +10,21 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
 {
     private const int SnapshotLines = 60;
 
+    /// <summary>Prompt file that turns the existing spec and plan into the ordered subtask index.</summary>
+    /// <remarks>
+    /// Named here rather than taken from <see cref="PhaseCatalog"/>: decomposition is not a phase,
+    /// and <see cref="PromptTemplateCatalog"/> keys the same literal for its token set.
+    /// </remarks>
+    private const string DecompositionPromptFile = "create_subtasks.md";
+
+    /// <summary>Command typed into the shell to start the CLI for a decomposition session.</summary>
+    /// <remarks>
+    /// The design fixes <c>yo</c> for the decomposition and subtask sessions. It coincides with
+    /// phase 4's launcher but is not derived from it: a phase definition describes a phase, and
+    /// changing the implementation phase's launcher must not silently re-aim decomposition.
+    /// </remarks>
+    private const string DecompositionLauncher = "yo";
+
     private readonly IPromptTemplateService _prompts;
     /// <summary>Pause between the individual key presses of one auto-answer.</summary>
     private static readonly TimeSpan KeyPressGap = TimeSpan.FromMilliseconds(60);
@@ -102,6 +117,22 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Active));
         request.ManualSignal.Reset();
 
+        // Phase 4 splits here and nowhere else. Everything above is shared, so a disabled or
+        // absent configuration reaches exactly the code it reached before (requirement 2.1):
+        // SubtaskConfiguration.IsEnabled is the single place that decides what "enabled" means,
+        // and a null snapshot - the default of WorkflowRunRequest.Subtasks - is disabled.
+        if (definition.Phase == WorkflowPhase.Implementation
+            && SubtaskConfiguration.IsEnabled(request.Subtasks))
+        {
+            await RunSubtaskImplementationAsync(request, cancellationToken);
+
+            // Deliberately no RecordPhase(Completed): a subtask run completes Implementation only
+            // on a freshly read, all-complete final snapshot, or on the user's manual override.
+            // Returning here leaves the journal at Active, which is what keeps the task
+            // recoverable (design "Session and Loop", issues 6a/6b/9 resolved).
+            return;
+        }
+
         // A marker left by a previous run of this task would satisfy the phase-4 watcher in
         // milliseconds. Deleting it before the baseline is taken removes the failure mode
         // instead of handling it (SPEC section 8.3). It stays in the phase method rather than
@@ -109,7 +140,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         // first statement of that method, so "before the baseline" still holds.
         if (definition.Phase == WorkflowPhase.Implementation)
         {
-            DeleteStaleDoneMarker(request.Paths.DoneAbsolute);
+            DeleteStaleFlag(request.Paths.DoneAbsolute);
         }
 
         await RunSessionAsync(
@@ -126,6 +157,109 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
 
         _state.RecordPhase(request.Paths, definition.Phase, PhaseStatus.Completed);
         request.Progress.Report(new PhaseProgress(definition.Phase, PhaseStatus.Completed));
+    }
+
+    /// <summary>
+    /// Phase 4 with subtask mode enabled, up to and including decomposition: re-validate the
+    /// captured configuration, persist it, report the decomposing stage, reuse a readable ordered
+    /// index or run exactly one decomposition session, and end with an index that can be executed.
+    /// </summary>
+    /// <param name="request">The run parameters; <see cref="WorkflowRunRequest.Subtasks"/> is enabled.</param>
+    /// <param name="cancellationToken">Cancels the decomposition session.</param>
+    /// <exception cref="SubtaskConfigurationException">
+    /// The tracking directory is no longer usable, or no ordered index could be established. Both
+    /// are user-fixable: the caller presents the German message and Implementation stays
+    /// <see cref="PhaseStatus.Active"/>, so the task is offered again (requirements 1.8 and 2.9).
+    /// </exception>
+    private async Task RunSubtaskImplementationAsync(
+        WorkflowRunRequest request,
+        CancellationToken cancellationToken)
+    {
+        // Not a re-capture. The snapshot was taken once, above this boundary, and arrives as an
+        // immutable record precisely so that nothing here can observe the enabled flag at one
+        // moment and the directory at another (requirement 1.6); SubtaskConfiguration.Capture and
+        // CaptureValidated take an ISubtaskConfiguration this method is never given. What phase-4
+        // entry owes the run is the second validation - the marker can disappear between the start
+        // gate and this moment - and EnsureUsable is that step, the same call CaptureValidated
+        // makes after capturing (requirement 1.8).
+        var configuration = request.Subtasks!;
+        configuration.EnsureUsable();
+
+        // Non-null and usable by the line above, so the path set can be composed.
+        var tracking = new SubtaskPaths(configuration.WorkflowDirectory!, request.Paths.TaskName);
+
+        // Requirement 1.5: the configuration this run actually used is recorded with the task. The
+        // normalised spelling is stored rather than the raw selection so the journal, the German
+        // validation message and every composed path name the directory one way.
+        _state.SaveSubtaskSettings(request.Paths, configuration.Enabled, tracking.WorkflowDirectory);
+
+        request.SubtaskProgress?.Report(
+            new SubtaskProgress(SubtaskStage.Decomposing, 0, 0, 0, null, []));
+
+        // The reuse decision comes FIRST and the deletion only inside the branch it enables. A
+        // readable ordered index is reused exactly as it stands (requirement 2.3), so deleting the
+        // task-level result.json ahead of this test would destroy the very evidence recovery
+        // depends on and re-decompose a task that is already half executed. What is deleted is
+        // therefore only a *stale* flag: a file that exists, is non-empty enough to satisfy the
+        // watcher's FilesExist rule on its first poll, and yet yields no order at all.
+        if (!SubtaskLedger.IsDecomposed(tracking))
+        {
+            // The watcher would create this itself; doing it here states that composing the
+            // tracking task folder is the application's job and lets the delete below run against
+            // an existing directory.
+            Directory.CreateDirectory(tracking.TaskDirectory);
+            DeleteStaleFlag(tracking.ResultAbsolute);
+
+            await RunDecompositionSessionAsync(request, tracking, cancellationToken);
+        }
+
+        // Requirement 2.9. Re-read from disk rather than trusting the session's outcome: the
+        // manual-signal winner of RunSessionAsync is unspecified when both tasks complete at once,
+        // so it is never evidence about the artefact. An index that is still unusable here is the
+        // user-fixable error, not an empty run.
+        if (!SubtaskLedger.IsDecomposed(tracking))
+        {
+            throw new SubtaskConfigurationException(
+                $"Der Subtask-Index '{tracking.ResultAbsolute}' konnte nicht gelesen werden. "
+                + "Erwartet wird ein JSON-Objekt mit einer nicht leeren Liste \"subtasks\" "
+                + "in Ausführungsreihenfolge.");
+        }
+    }
+
+    /// <summary>Runs the one decomposition session that turns the existing spec and plan into an index.</summary>
+    /// <param name="request">The run parameters.</param>
+    /// <param name="tracking">The task's tracking paths, supplying the absolute prompt tokens.</param>
+    /// <param name="cancellationToken">Cancels the session.</param>
+    /// <remarks>
+    /// The session runs in the <em>product</em> working directory, like every other session: the
+    /// prompt's own <c>cd</c> goes there because the sources it reads are working-directory
+    /// relative, and the tracking repository is reached only through the absolute tokens
+    /// <see cref="PromptVariables.ForSubtaskCreation"/> substitutes. Its completion evidence is the
+    /// task-level <c>result.json</c>, which is both the ordered index and the decomposition flag,
+    /// so the watcher is aimed at the tracking task folder rather than at
+    /// <see cref="TaskPaths.TaskDirectory"/> - the reason the watch root is a parameter of the
+    /// shared session primitive at all.
+    /// </remarks>
+    private async Task RunDecompositionSessionAsync(
+        WorkflowRunRequest request,
+        SubtaskPaths tracking,
+        CancellationToken cancellationToken)
+    {
+        // The returned manualWon is deliberately discarded: Task.WhenAny's winner is unspecified
+        // when both tasks are already complete, so it can neither prove nor disprove that the
+        // index arrived. The caller re-reads the index from disk instead. Manual completion during
+        // a subtask run is recorded by the manual-override path, not here.
+        _ = await RunSessionAsync(
+            request.Terminal,
+            request.ManualSignal,
+            request.Paths.WorkingDirectory,
+            DecompositionLauncher,
+            DecompositionPromptFile,
+            PromptVariables.ForSubtaskCreation(request.Paths, request.TaskDescription, tracking),
+            CompletionRule.FilesExist,
+            tracking.TaskDirectory,
+            [tracking.ResultAbsolute],
+            cancellationToken);
     }
 
     /// <summary>
@@ -152,6 +286,12 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     /// <returns>
     /// True when the manual signal ended the session, false when the artefact watcher did. This
     /// is information the previous inline code discarded; it changes nothing about the wait.
+    /// <para>
+    /// <em>Not a tie-breaker.</em> <see cref="Task.WhenAny(Task, Task)"/> leaves its winner
+    /// unspecified when both tasks are already complete, so a false value is no evidence that the
+    /// artefact condition failed to hold, and a true value is no evidence that it did not. A caller
+    /// that needs to know what the session produced must re-read the artefact state from disk.
+    /// </para>
     /// </returns>
     private async Task<bool> RunSessionAsync(
         ITerminalController terminal,
@@ -223,7 +363,18 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             _ => [],
         };
 
-    private static void DeleteStaleDoneMarker(string path)
+    /// <summary>Removes a completion flag left behind by an earlier run, if one is there.</summary>
+    /// <param name="path">
+    /// The flag to delete: the task's done marker on the normal path, or the task-level
+    /// <c>result.json</c> before a decomposition session. Never a per-subtask flag - that deletion
+    /// belongs to the execution loop, which owns which entry it is attempting.
+    /// </param>
+    /// <remarks>
+    /// A missing file is not an error, so the absent case needs no probe. Failing to delete is not
+    /// an error either: the session then completes as soon as it starts, and the user still has a
+    /// live terminal and the manual completion action.
+    /// </remarks>
+    private static void DeleteStaleFlag(string path)
     {
         try
         {

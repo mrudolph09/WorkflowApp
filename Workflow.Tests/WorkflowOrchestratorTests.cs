@@ -34,7 +34,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         {
           "version": 2, "quietPeriodMs": 10, "settleTimeoutMs": 2000, "maxAnswersPerPhase": 3,
           "pasteQuietPeriodMs": 10, "pasteSettleTimeoutMs": 300, "submitVerifyMs": 30, "maxSubmitAttempts": 2,
-          "rules": [ { "id": "bypass", "pattern": "(?is)bypass", "send": "2\\r", "description": "" } ]
+          "rules": [ { "id": "bypass", "pattern": "(?is)bypass", "send": "\\e[B\\r", "description": "" } ]
         }
         """);
 
@@ -118,7 +118,10 @@ public sealed class WorkflowOrchestratorTests : IDisposable
 
         await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
 
-        Assert.Equal("2\r", terminal.Sent[2]);
+        // The answer arrives as discrete key presses, the way a TUI's keypress parser expects
+        // them: a single write of "<Down><Enter>" is parsed by Ink as one unknown key and ignored.
+        Assert.Equal("\u001b[B", terminal.Sent[2]);
+        Assert.Equal("\r", terminal.Sent[3]);
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
@@ -148,7 +151,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         terminal.EmitOutput();
 
         await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
-        Assert.Contains("2\r", terminal.Sent);
+        Assert.Contains("\u001b[B", terminal.Sent);
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
@@ -203,7 +206,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
         started.Stop();
 
-        Assert.DoesNotContain(terminal.Sent, s => s == "2\r");
+        Assert.DoesNotContain(terminal.Sent, s => s == "\u001b[B");
         Assert.True(
             started.Elapsed < TimeSpan.FromSeconds(2),
             $"The prompt took {started.Elapsed} - the loop waited out settleTimeoutMs instead of exiting on the first quiet snapshot.");
@@ -255,7 +258,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
 
         await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
 
-        Assert.Single(terminal.Sent, s => s == "2\r");
+        Assert.Single(terminal.Sent, s => s == "\u001b[B");
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
@@ -546,6 +549,368 @@ public sealed class WorkflowOrchestratorTests : IDisposable
 
         await cts.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task SettleLoop_DoesNotPasteUntilTheLauncherReadyMarkerAppears()
+    {
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        terminal.EmitOutputOnNextCarriageReturn = true;
+        terminal.CurrentSnapshot = "PS C:\\ws> yo";   // launcher typed, but Claude not up yet
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var json = """
+        {
+          "version": 2, "quietPeriodMs": 20, "settleTimeoutMs": 20000, "maxAnswersPerPhase": 5,
+          "pasteQuietPeriodMs": 20, "pasteSettleTimeoutMs": 2000, "submitVerifyMs": 20, "maxSubmitAttempts": 2,
+          "readyPattern": "(?is)shift\\+tab to cycle",
+          "rules": []
+        }
+        """;
+
+        var run = CreateOrchestratorWithRules(json).RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        await Task.Delay(200, cts.Token);
+        terminal.EmitOutput();  // Gate A opens; the screen is quiet but shows only the shell prompt
+
+        // The prompt must NOT be pasted into a shell while Claude Code is still cold-starting.
+        await Task.Delay(600, cts.Token);
+        Assert.Empty(terminal.Pasted);
+
+        // Once Claude Code's footer appears, the prompt is pasted.
+        terminal.CurrentSnapshot = "\u23f5\u23f5 bypass permissions on (shift+tab to cycle)";
+        terminal.EmitOutput();
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    [Fact]
+    public async Task SendPrompt_PressesEnterUntilTheCollapsedPasteChipDisappears()
+    {
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        // Ready AND a pasted-but-unsubmitted prompt sitting in the input box.
+        terminal.CurrentSnapshot = "esc to interrupt\n[Pasted text #1 +40 lines] paste again to expand";
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+
+        var json = """
+        {
+          "version": 2, "quietPeriodMs": 20, "settleTimeoutMs": 20000, "maxAnswersPerPhase": 5,
+          "pasteQuietPeriodMs": 20, "pasteSettleTimeoutMs": 2000, "submitVerifyMs": 40, "maxSubmitAttempts": 10,
+          "readyPattern": "(?is)esc to interrupt",
+          "pastePendingPattern": "(?is)paste again to expand",
+          "rules": []
+        }
+        """;
+
+        var run = CreateOrchestratorWithRules(json).RunAsync(CreateRequest(terminal, signal), cts.Token);
+
+        await Task.Delay(150, cts.Token);
+        terminal.EmitOutput();  // Gate A opens; screen already shows the ready marker
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+
+        // The prompt is pasted but not yet submitted: one carriage return does not clear the chip.
+        // After a few Enters the launcher accepts the submit, so we clear the chip.
+        await WaitUntil(() => terminal.Sent.Count(t => t == "\r") >= 3, cts.Token);
+        terminal.CurrentSnapshot = "esc to interrupt";  // chip gone -> submitted
+
+        // The submit loop stops once the chip is gone: the carriage-return count settles.
+        await Task.Delay(300, cts.Token);
+        var settled = terminal.Sent.Count(t => t == "\r");
+        await Task.Delay(300, cts.Token);
+        Assert.Equal(settled, terminal.Sent.Count(t => t == "\r"));
+        Assert.True(settled >= 3, $"Expected several submit attempts, saw {settled}.");
+        Assert.True(settled < 10, "The submit loop should have stopped well before the ceiling.");
+
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+    }
+
+    // --- Phase 4, subtask mode (task 4.2) -------------------------------------------------
+
+    /// <summary>The decomposition prompt file name; the catalog keys it by this literal too.</summary>
+    private const string DecompositionPromptFile = "create_subtasks.md";
+
+    private readonly List<SubtaskProgress> _subtaskProgress = [];
+
+    /// <summary>Stages a tracking repository, with or without the marker that identifies one.</summary>
+    private string CreateTrackingRepository(bool withTemplateMarker)
+    {
+        var directory = Path.Combine(_root, "workflows");
+        Directory.CreateDirectory(directory);
+
+        if (withTemplateMarker)
+        {
+            Directory.CreateDirectory(Path.Combine(directory, SubtaskPaths.TemplateFolderName));
+        }
+
+        return directory;
+    }
+
+    // Every token the decomposition set supplies is present, so a variable builder that dropped one
+    // would throw PromptTemplateException instead of quietly rendering a shorter prompt.
+    private void WriteDecompositionPrompt() => File.WriteAllText(
+        Path.Combine(_promptDir, DecompositionPromptFile),
+        "ZERLEGUNG {tasktitel} | {workflow_path} | {task_path} | {subtask_path} | {spec_path} | {plan_path}");
+
+    private WorkflowRunRequest CreateSubtaskRequest(
+        FakeTerminalController terminal,
+        ManualPhaseSignal signal,
+        string trackingDirectory) =>
+        CreateRequest(terminal, signal) with
+        {
+            StartPhase = WorkflowPhase.Implementation,
+            Subtasks = new SubtaskConfiguration(true, trackingDirectory),
+            SubtaskProgress = new Progress<SubtaskProgress>(report =>
+            {
+                lock (_subtaskProgress)
+                {
+                    _subtaskProgress.Add(report);
+                }
+            }),
+        };
+
+    private SubtaskProgress[] SubtaskReports()
+    {
+        lock (_subtaskProgress)
+        {
+            return [.. _subtaskProgress];
+        }
+    }
+
+    private static void WriteIndex(SubtaskPaths tracking, params string[] titles)
+    {
+        Directory.CreateDirectory(tracking.TaskDirectory);
+
+        var listed = string.Join(",", titles.Select(title => $"\"{title}\""));
+        File.WriteAllText(tracking.ResultAbsolute, $$"""{"version":1,"task":"demo","subtasks":[{{listed}}]}""");
+    }
+
+    private static void StageSubtask(SubtaskPaths tracking, string title, string? status)
+    {
+        Directory.CreateDirectory(tracking.SubtaskDirectory(title));
+        File.WriteAllText(tracking.SubtaskMarkdown(title), $"# {title} - vollstaendige Beschreibung.");
+
+        if (status is not null)
+        {
+            File.WriteAllText(tracking.SubtaskStatusFile(title), $$"""{"status":"{{status}}"}""");
+        }
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskModeDisabled_KeepsTheDoneMarkerImplementationPath()
+    {
+        // Requirement 2.1: an explicitly disabled snapshot must be indistinguishable from the null
+        // default - same prompt, same stale-marker deletion, same done-marker completion.
+        await File.WriteAllTextAsync(_paths.DoneAbsolute, "left over from a previous run");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var request = CreateRequest(terminal, signal) with
+        {
+            StartPhase = WorkflowPhase.Implementation,
+            Subtasks = SubtaskConfiguration.Disabled,
+        };
+
+        var run = CreateOrchestrator().RunAsync(request, cts.Token);
+
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+
+        Assert.False(File.Exists(_paths.DoneAbsolute));
+        Assert.Contains("PROMPT Implementation", terminal.Pasted[0], StringComparison.Ordinal);
+
+        WriteArtifacts(_paths.DoneAbsolute);
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+        Assert.Contains(
+            _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Completed);
+        Assert.Empty(_state.SubtaskSettings);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskModeWithAReadableIndex_StartsNoDecompositionSession()
+    {
+        // Requirement 2.3: a readable ordered index is reused as it stands. The fixture is
+        // deliberately asymmetric - complete, failed and pending entries - so a branch that reuses
+        // only a uniformly pending index cannot pass.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        StageSubtask(tracking, "ST-001-alpha", "complete");
+        StageSubtask(tracking, "ST-002-beta", "failed");
+        StageSubtask(tracking, "ST-003-gamma", status: null);
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        await CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        // A counter, not a boolean: a branch that decomposed twice must not be able to pass either.
+        Assert.Empty(terminal.StartedSessions);
+        Assert.Empty(terminal.Pasted);
+
+        // The reusable index is retained. This is also what fails if the stale-flag deletion is
+        // moved ahead of the reuse check.
+        Assert.True(File.Exists(tracking.ResultAbsolute), "The reusable index was deleted.");
+
+        await WaitUntil(() => SubtaskReports().Any(r => r.Stage == SubtaskStage.Decomposing), cts.Token);
+
+        Assert.Contains(
+            _state.SubtaskSettings,
+            s => s.Enabled && string.Equals(s.WorkflowDirectory, tracking.WorkflowDirectory, StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Completed);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskModeWithoutAnIndex_StartsExactlyOneDecompositionSession()
+    {
+        // Requirement 2.2: a fresh decomposition session against the existing spec and plan, aimed
+        // at the task-specific tracking destination.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+
+        // The session runs in the PRODUCT working directory - subtasks change product code - and
+        // reaches the tracking repository only through the absolute tokens in the prompt text.
+        Assert.Equal(_paths.WorkingDirectory, terminal.StartedSessions[0]);
+        Assert.Equal($"cd \"{_paths.WorkingDirectory}\"\r", terminal.Sent[0]);
+        Assert.Equal("yo\r", terminal.Sent[1]);
+        Assert.Contains("ZERLEGUNG", terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains(tracking.WorkflowDirectory, terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains(tracking.TaskDirectory, terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains(tracking.SubtaskPathToken, terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains(_paths.SpecRelative, terminal.Pasted[0], StringComparison.Ordinal);
+
+        // The completion flag is the task-level index in the tracking repository, never the
+        // working directory's done marker.
+        Assert.False(File.Exists(_paths.DoneAbsolute));
+        await Task.Delay(200, cts.Token);
+        Assert.False(run.IsCompleted);
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta");
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+        Assert.Single(terminal.Pasted);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskModeWithAnUnusableFlag_DeletesItBeforeTheDecompositionBaseline()
+    {
+        // A non-empty but unreadable task-level result.json satisfies CompletionRule.FilesExist on
+        // the first poll, so leaving it in place would end the decomposition session before the
+        // agent had written anything.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+
+        Directory.CreateDirectory(tracking.TaskDirectory);
+        await File.WriteAllTextAsync(tracking.ResultAbsolute, "kein JSON, aber nicht leer");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+
+        Assert.False(
+            File.Exists(tracking.ResultAbsolute),
+            "The stale task-level flag survived into the decomposition session's baseline.");
+
+        await Task.Delay(200, cts.Token);
+        Assert.False(run.IsCompleted);
+
+        WriteIndex(tracking, "ST-001-alpha");
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+    }
+
+    [Fact]
+    public async Task PhaseFour_TrackingDirectoryLostItsMarker_SurfacesTheGermanErrorAndStaysRecoverable()
+    {
+        // Requirements 1.8 and 2.9: the marker can disappear between the start gate and phase-4
+        // entry. The run raises, never falls back to a normal full-context implementation session.
+        var tracking = CreateTrackingRepository(withTemplateMarker: false);
+        WriteDecompositionPrompt();
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var error = await Assert.ThrowsAsync<SubtaskConfigurationException>(
+            () => CreateOrchestrator().RunAsync(CreateSubtaskRequest(terminal, signal, tracking), cts.Token));
+
+        Assert.Contains(SubtaskPaths.TemplateFolderName, error.ValidationMessage, StringComparison.Ordinal);
+        Assert.Contains(tracking, error.ValidationMessage, StringComparison.Ordinal);
+
+        Assert.Empty(terminal.StartedSessions);
+        Assert.Empty(_state.SubtaskSettings);
+
+        // Recoverable: Implementation was recorded Active and never Completed.
+        Assert.Contains(
+            _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Active);
+        Assert.DoesNotContain(
+            _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Completed);
+    }
+
+    [Fact]
+    public async Task PhaseFour_DecompositionPublishesAnUnusableIndex_SurfacesTheGermanErrorAndStaysRecoverable()
+    {
+        // Requirement 2.9: the flag arrived, so the session ends - but it carries no order, which
+        // is the user-fixable error rather than a silently empty run.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+
+        // Non-empty, so the watcher is satisfied - but the subtasks array is empty, so no order
+        // can be established.
+        await File.WriteAllTextAsync(tracking.ResultAbsolute, """{"version":1,"subtasks":[]}""");
+
+        var error = await Assert.ThrowsAsync<SubtaskConfigurationException>(() => run);
+
+        Assert.Contains(tracking.ResultAbsolute, error.ValidationMessage, StringComparison.Ordinal);
+        Assert.Contains("subtasks", error.ValidationMessage, StringComparison.Ordinal);
+
+        Assert.Single(terminal.StartedSessions);
+        Assert.DoesNotContain(
+            _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Completed);
     }
 
     // The fixture's single rules file is shared by every test in the class; this one needs its
