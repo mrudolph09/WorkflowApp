@@ -77,7 +77,7 @@
 
 ## 3. Prompt and template contract
 
-- [ ] 3. Make the application and agent sessions agree on the file protocol
+- [x] 3. Make the application and agent sessions agree on the file protocol
 - [x] 3.1 Layer the substitution builders and add the new tokens
   - Add the absolute tracking-root, task-folder and subtasks-folder tokens, the task-title alias that does not remove the existing task-name token, and the per-subtask title and body tokens.
   - Layer the builders so the execution set extends the decomposition set, which extends the existing base set, rather than duplicating token construction.
@@ -117,7 +117,7 @@
   - _Requirements: 6.3, 6.4_
   - _Boundary: PromptTemplateCatalog, PromptTemplateService_
 
-- [ ] 3.5 (P) Publish the required tracking-repository template files
+- [x] 3.5 (P) Publish the required tracking-repository template files
   - Add the missing per-subtask status example with a `pending` status.
   - Replace the empty per-subtask flag example and add the missing task-level index example, both with non-empty content, because the application treats an empty file as no flag at all.
   - Leave the existing verification file in place and add no repository README; both are out of scope.
@@ -345,3 +345,9 @@
 - Standing project note, NOT a defect of 3.4: `verify.ps1` exits 1 in a headless session because V2 shells out to `dotnet test`, which is non-zero from the two environmental `ConPtySessionTests`. V1, V3 and V4 pass. The corrected `run_subtask.md` tells agents the gate must exit 0, which is therefore unreachable headless. If this is ever addressed, **V2 should exclude `ConPtySessionTests`** - the prompts should not change.
 - 3.4: `PromptTemplateService.ShippedTemplateFiles()` guards only `Directory.Exists`; an `UnauthorizedAccessException` or `IOException` from `Directory.EnumerateFiles` itself would escape `ValidateAll` as an unhandled startup exception instead of a German start-gate message, unlike every other failure in that method. Exposure is remote (the directory is inside the app's own install). Recorded for whoever next touches it.
 - Regression gate update: after 3.4 the suite is **571** total; the focused filter `PromptTemplateServiceTests|PromptVariablesTests|PromptTemplateCatalog` is **74**; the untouched remainder is still exactly **497**.
+- 3.5: the template files carry **concrete example values, never prompt tokens**. Nothing substitutes into a tracking-repository data file, so `{tasktitel}` would ship as a literal folder name - and a literal `<subtask_title>` is worse: `<` and `>` are in `Path.GetInvalidFileNameChars()`, so `SubtaskPaths.IsValidTitle` rejects it and `SubtaskLedger.Classify` would emit `Unsicherer Subtask-Name`. Braces are *not* invalid characters, so `{tasktitel}` would pass validation and silently become a real folder - the more insidious of the two. Tokens belong in prompts, concrete names in templates.
+- 3.5: the index lists `ST-001-subtask-template`, the one folder that exists, and this is **forced, not stylistic**: `TryRead` composes every path from the listed title and there is no directory listing or alphabetical fallback (requirement 6.1), so any other name gives a fresh copy an entry whose folder is `Absent` and which fails for a fabricated reason.
+- 3.5: the per-subtask flag example uses the **plan-of-record's neutral payload** (`note` + `summary`), not a `status` claim. The first attempt copied `run_subtask.md`'s completion example, which shipped a flag saying `complete` beside a `status.json` saying `pending` - mechanically harmless (nothing reads the flag's contents; `SubtaskResultFile` has no production consumer outside its own definition) but didactically wrong, and a template is read by people. Non-emptiness is the whole contract; the payload should not assert a state.
+- 3.5: the Observable's "a fresh copy satisfies the non-empty-file rule" is met **only for the three files 6.5 names**, and that is the correct reading. A fresh copy still derives `Failed` for its single entry (`Keine Beschreibung für 'ST-001-subtask-template'.`) because `subtask.md` stays 0 bytes - a **description**-path outcome under requirement 2.10, which 6.5 does not cover. Filling `subtask.md` would have been scope creep.
+- **CARRY-FORWARD INTO 4.2 - load-bearing ordering constraint.** Requirement 6.5 now puts a non-empty task-level `result.json` in the template, so a task folder produced by copying `task_template` - which is the template's entire purpose - reports `IsDecomposed == true` with one entry that immediately derives `Failed`. **4.2 must delete the stale task-level flag BEFORE it evaluates the reuse-an-existing-index check, not after**, or a hand-copied template skips decomposition altogether and reports 0/1 failed. This is not an application hazard today (the app never copies the template: no `File.Copy` anywhere in `Workflow/`, `SubtaskPaths.TemplateDirectory` has no production consumer, and `WorkflowDirectoryValidation` only probes the folder's existence as a marker) - the exposure is entirely through human or agent copies. `DeleteStaleDoneMarker` covers only `DoneAbsolute` and does not help.
+- 3.5 verification technique: the ledger's derivation was confirmed by compiling the **real** `SubtaskLedger.cs`/`SubtaskPaths.cs`/`SubtaskStatus.cs` in a throwaway scratchpad console project against a temp copy of the template, then deleting it. No test in this repo may hardcode the external tracking path, and no scratch artefact may be left in either repo.
