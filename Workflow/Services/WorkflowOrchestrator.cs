@@ -25,6 +25,21 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     /// </remarks>
     private const string DecompositionLauncher = "yo";
 
+    /// <summary>Prompt file that executes exactly one entry of the ordered subtask index.</summary>
+    /// <remarks>
+    /// Keyed by the same literal in <see cref="PromptTemplateCatalog"/>, which maps it to
+    /// <see cref="PromptVariables.SubtaskRunNames"/>.
+    /// </remarks>
+    private const string SubtaskRunPromptFile = "run_subtask.md";
+
+    /// <summary>Command typed into the shell to start the CLI for one subtask session.</summary>
+    /// <remarks>
+    /// Deliberately its own constant rather than an alias of <see cref="DecompositionLauncher"/>,
+    /// for the same reason that one is not an alias of phase 4's launcher: decomposition and
+    /// execution are separate sessions, and re-aiming one must never silently re-aim the other.
+    /// </remarks>
+    private const string SubtaskRunLauncher = "yo";
+
     private readonly IPromptTemplateService _prompts;
     /// <summary>Pause between the individual key presses of one auto-answer.</summary>
     private static readonly TimeSpan KeyPressGap = TimeSpan.FromMilliseconds(60);
@@ -224,7 +239,244 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
                 + "Erwartet wird ein JSON-Objekt mit einer nicht leeren Liste \"subtasks\" "
                 + "in Ausführungsreihenfolge.");
         }
+
+        await RunSubtaskLoopAsync(request, tracking, cancellationToken);
     }
+
+    /// <summary>
+    /// Executes the index in declared order, one session at a time and at most one attempt per
+    /// entry per run (requirements 2.4, 2.5, 2.7, 2.8, 2.10).
+    /// </summary>
+    /// <param name="request">The run parameters.</param>
+    /// <param name="tracking">The task's tracking paths.</param>
+    /// <param name="cancellationToken">Cancels the loop and the session it is waiting on.</param>
+    /// <remarks>
+    /// <para>
+    /// The ledger is re-read at the top of every iteration rather than being materialised once: a
+    /// session writes the very files the next decision reads, and requirement 4.5 forbids a stored
+    /// current-subtask cursor. The only state this run keeps in memory is
+    /// <c>attempted</c> - the titles it has already started work on - and it is deliberately local
+    /// to this method, so it cannot outlive the run. That single set is what makes eligibility
+    /// <c>state != Complete &amp;&amp; !attemptedThisRun</c> (design "Session and Loop", issue 2
+    /// resolved): an entry left <see cref="SubtaskStatus.Failed"/> or
+    /// <see cref="SubtaskStatus.Pending"/> by an earlier run is eligible again here and gets
+    /// exactly one fresh attempt, and no entry is ever attempted twice within one run.
+    /// </para>
+    /// <para>
+    /// Comparison is <see cref="StringComparer.OrdinalIgnoreCase"/> because that is precisely how
+    /// the ledger de-duplicates the index (requirement 2.12): a set that compared ordinally would
+    /// see two entries where the ledger reports one and could attempt the same folder twice.
+    /// </para>
+    /// <para>
+    /// Termination: every iteration either returns or adds one title to <c>attempted</c>, and only
+    /// unattempted titles are eligible, so the loop is bounded by the number of entries the index
+    /// lists. There is no execution timeout anywhere in it (requirement 2.8, E8); the bound is on
+    /// iterations, never on how long a live session may take.
+    /// </para>
+    /// </remarks>
+    private async Task RunSubtaskLoopAsync(
+        WorkflowRunRequest request,
+        SubtaskPaths tracking,
+        CancellationToken cancellationToken)
+    {
+        var attempted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var snapshot = SubtaskLedger.TryRead(tracking);
+            if (snapshot is null)
+            {
+                // The index was readable when this method was entered, so it has just become
+                // unreadable - most plausibly a transient lock while an agent rewrites it. The run
+                // ends here rather than raising, because the read is ambiguous: TryRead returns
+                // null for a momentary lock or a half-written file far more often than for a
+                // tracking repository that has genuinely gone away, and requirement 2.10's
+                // principle - no individual bad read invalidates the index - argues against
+                // escalating that ambiguity to a fatal error. Requirement 2.9's error belongs
+                // where no order could be established at all, and it still surfaces on the next
+                // Continue, which re-enters through EnsureUsable and IsDecomposed. Nothing is
+                // lost by returning: completed subtasks are already recorded on disk, and 2.9's
+                // error would leave implementation Active too.
+                return;
+            }
+
+            var entry = snapshot.States.FirstOrDefault(
+                state => state.Status != SubtaskStatus.Complete && !attempted.Contains(state.Title));
+
+            if (entry is null)
+            {
+                return;
+            }
+
+            // Marked before any work, so every exit below - a skip, a failure, an exception -
+            // still costs this entry its one attempt for this run.
+            attempted.Add(entry.Title);
+
+            var description = TryReadAttemptableDescription(tracking, entry.Title);
+            if (description is null)
+            {
+                // Requirement 2.10: the entry fails and the run continues with the others. The
+                // failure needs no recording here - the ledger derives exactly the same verdict
+                // from the same files on the next read, which is what the indicator displays.
+                continue;
+            }
+
+            // Only now, and only for the entry actually being attempted: a per-subtask result.json
+            // left by an earlier run is non-empty, so CompletionRule.FilesExist would be satisfied
+            // on the watcher's first poll and the session would end before the agent had written
+            // anything (the same failure mode the task-level flag has).
+            DeleteStaleFlag(tracking.SubtaskResultFile(entry.Title));
+
+            await RunSubtaskSessionAsync(request, tracking, entry.Title, description, cancellationToken);
+
+            if (ManualCompletionRequested(request.ManualSignal))
+            {
+                // 'Task abschliessen' is an explicit user override (design issue 6b), so the run
+                // stops here instead of starting a session per remaining entry - each of which the
+                // still-armed signal would end immediately anyway.
+                return;
+            }
+        }
+    }
+
+    /// <summary>Runs one subtask session and waits for that subtask's own completion flag.</summary>
+    /// <param name="request">The run parameters.</param>
+    /// <param name="tracking">The task's tracking paths, supplying the absolute prompt tokens.</param>
+    /// <param name="title">The entry being attempted; a safe title resolving to its own folder.</param>
+    /// <param name="description">The full text of that entry's <c>subtask.md</c> (requirement 2.5).</param>
+    /// <param name="cancellationToken">Cancels the session.</param>
+    /// <remarks>
+    /// Like every other session it runs in the <em>product</em> working directory - subtasks change
+    /// product code - and reaches the tracking repository only through the absolute tokens. Its
+    /// completion evidence is <em>this</em> subtask's <c>result.json</c>, so the watcher is aimed at
+    /// that subtask's folder: watching the task directory would let a sibling's flag, or the
+    /// task-level index, end the wrong session.
+    /// </remarks>
+    private async Task RunSubtaskSessionAsync(
+        WorkflowRunRequest request,
+        SubtaskPaths tracking,
+        string title,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        // Discarded for the reason its <returns> documents: Task.WhenAny leaves its winner
+        // unspecified in a tie, so a false value would not prove the user had not signalled. The
+        // loop asks the signal itself instead, which is exact in both directions.
+        _ = await RunSessionAsync(
+            request.Terminal,
+            request.ManualSignal,
+            request.Paths.WorkingDirectory,
+            SubtaskRunLauncher,
+            SubtaskRunPromptFile,
+            PromptVariables.ForSubtaskRun(
+                request.Paths, request.TaskDescription, tracking, title, description),
+            CompletionRule.FilesExist,
+            tracking.SubtaskDirectory(title),
+            [tracking.SubtaskResultFile(title)],
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads the description of an entry that may be attempted, or reports that it may not be.
+    /// </summary>
+    /// <param name="tracking">The task's tracking paths.</param>
+    /// <param name="title">The title exactly as the index listed it.</param>
+    /// <returns>
+    /// The full description text, or <see langword="null"/> when this entry is a failure that the
+    /// loop skips: an unsafe title, a title without its own folder, or a missing, empty or
+    /// unreadable <c>subtask.md</c>.
+    /// </returns>
+    /// <remarks>
+    /// Requirement 2.10 is honoured by the order of the checks: the two path tests are pure string
+    /// work and run <em>before</em> any file is touched, so an unsafe title never reaches the
+    /// filesystem at all - and the one read that does happen is composed by
+    /// <see cref="SubtaskPaths"/> and therefore always inside the tracking repository.
+    /// </remarks>
+    private static string? TryReadAttemptableDescription(SubtaskPaths tracking, string title)
+    {
+        if (!SubtaskPaths.IsValidTitle(title) || !ResolvesToItsOwnFolder(tracking, title))
+        {
+            return null;
+        }
+
+        var path = tracking.SubtaskMarkdown(title);
+
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            var text = File.ReadAllText(path);
+
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Reports whether a title gets a folder of its own on this filesystem.</summary>
+    /// <param name="tracking">The task's tracking paths.</param>
+    /// <param name="title">A title that already satisfies <see cref="SubtaskPaths.IsValidTitle"/>.</param>
+    /// <returns>True when the composed path still ends in the title itself.</returns>
+    /// <remarks>
+    /// <para>
+    /// Requirement 2.10 rejects only the exact dot-names <c>.</c> and <c>..</c>, so a title ending
+    /// in a dot is valid - but Windows strips trailing dots while resolving the path, so
+    /// <c>trailing.</c> resolves to the sibling entry <c>trailing</c> in <em>every</em> path
+    /// composed from it: its description, its status payload and its completion flag are that
+    /// sibling's files. Attempting it would therefore delete the sibling's flag, paste the
+    /// sibling's description a second time, and hand the agent a status path that overwrites the
+    /// sibling's evidence - while the ledger, which de-duplicates by title string and never by
+    /// resolved path, went on reporting the two entries as independent.
+    /// </para>
+    /// <para>
+    /// The collapse is not uniform, which is why the check is made on the folder rather than on any
+    /// one file: <c>trailing..</c> and <c>...</c> collapse in the <em>directory</em> path - the
+    /// session's watch root, which the watcher would then create and observe on the sibling - while
+    /// the file paths composed below them are left alone. One test on the folder covers all of
+    /// them, and none of the collapsing forms stray outside the tracking repository.
+    /// </para>
+    /// <para>
+    /// Such an entry is therefore skipped as a failure exactly like an unsafe title. It has no
+    /// distinct identity on disk, so there is nothing it could be attempted <em>as</em>; refusing
+    /// it costs one entry, while attempting it silently corrupts another entry's result - and the
+    /// ledger, which de-duplicates by title string and never by resolved path, would go on
+    /// reporting both entries as if they were independent.
+    /// </para>
+    /// <para>
+    /// <see cref="Path.GetFullPath(string)"/> performs the collapse as pure string work and touches
+    /// no file, which is what keeps this check compatible with "without accessing anything outside
+    /// the tracking repository".
+    /// </para>
+    /// </remarks>
+    private static bool ResolvesToItsOwnFolder(SubtaskPaths tracking, string title) =>
+        string.Equals(
+            Path.GetFileName(Path.GetFullPath(tracking.SubtaskDirectory(title))),
+            title.Trim(),
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Reports whether the user has asked to finish the task, without waiting.</summary>
+    /// <param name="manualSignal">The run's manual signal.</param>
+    /// <returns>True once <see cref="ManualPhaseSignal.Signal"/> has been called.</returns>
+    /// <remarks>
+    /// The signal is the authority, not the <c>manualWon</c> flag of a finished session: that flag
+    /// is derived from <see cref="Task.WhenAny(Task, Task)"/>, whose winner is unspecified when
+    /// both tasks are already complete, so it can report the watcher for a run the user did signal.
+    /// Asking the signal is exact in both directions and costs nothing - an uncancellable wait on
+    /// an already-completed source is the source's own task, so this only inspects its state.
+    /// </remarks>
+    private static bool ManualCompletionRequested(ManualPhaseSignal manualSignal) =>
+        manualSignal.WaitAsync(CancellationToken.None).IsCompleted;
 
     /// <summary>Runs the one decomposition session that turns the existing spec and plan into an index.</summary>
     /// <param name="request">The run parameters.</param>

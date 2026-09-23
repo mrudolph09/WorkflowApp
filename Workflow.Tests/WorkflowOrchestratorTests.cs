@@ -744,6 +744,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         // only a uniformly pending index cannot pass.
         var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
         WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
 
         WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
         StageSubtask(tracking, "ST-001-alpha", "complete");
@@ -753,20 +754,32 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         var terminal = new FakeTerminalController();
         terminal.ReadyGate.SetResult();
         var signal = new ManualPhaseSignal();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
 
-        await CreateOrchestrator().RunAsync(
+        var run = CreateOrchestrator().RunAsync(
             CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
 
-        // A counter, not a boolean: a branch that decomposed twice must not be able to pass either.
-        Assert.Empty(terminal.StartedSessions);
-        Assert.Empty(terminal.Pasted);
+        // Task 4.3 turned "no session at all" into "no DECOMPOSITION session": a reusing run now
+        // goes straight to executing the two entries that are not complete. The two prompts are
+        // textually distinct, so the claim is pinned on the rendered text rather than on a session
+        // count that execution legitimately raises.
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+        PublishSubtaskResult(tracking, "ST-002-beta", "complete");
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+        PublishSubtaskResult(tracking, "ST-003-gamma", "complete");
+
+        await run;
+
+        // Counters, not booleans: a branch that decomposed - once or twice - must not pass either.
+        Assert.DoesNotContain(terminal.Pasted, text => text.Contains("ZERLEGUNG", StringComparison.Ordinal));
+        Assert.Equal(2, terminal.StartedSessions.Count);
+        Assert.Equal(2, terminal.Pasted.Count);
 
         // The reusable index is retained. This is also what fails if the stale-flag deletion is
         // moved ahead of the reuse check.
         Assert.True(File.Exists(tracking.ResultAbsolute), "The reusable index was deleted.");
 
-        await WaitUntil(() => SubtaskReports().Any(r => r.Stage == SubtaskStage.Decomposing), cts.Token);
+        Assert.Contains(SubtaskReports(), r => r.Stage == SubtaskStage.Decomposing);
 
         Assert.Contains(
             _state.SubtaskSettings,
@@ -909,6 +922,359 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         Assert.Contains("subtasks", error.ValidationMessage, StringComparison.Ordinal);
 
         Assert.Single(terminal.StartedSessions);
+        Assert.DoesNotContain(
+            _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Completed);
+    }
+
+    // --- Phase 4, ordered subtask execution (task 4.3) ------------------------------------
+
+    /// <summary>The subtask execution prompt file name; the catalog keys it by this literal too.</summary>
+    private const string SubtaskRunPromptFile = "run_subtask.md";
+
+    // Every token the run set supplies that the loop must resolve is present, so a session that
+    // composed a path itself - or dropped the body - renders visibly differently.
+    private void WriteSubtaskRunPrompt() => File.WriteAllText(
+        Path.Combine(_promptDir, SubtaskRunPromptFile),
+        "AUSFUEHRUNG <{subtask_title}> | {task_path} | {subtask_path} | {spec_path}\n{subtask}");
+
+    /// <summary>Writes only the description of a subtask, leaving it without any status payload.</summary>
+    private static void WriteDescription(SubtaskPaths tracking, string title, string body)
+    {
+        Directory.CreateDirectory(tracking.SubtaskDirectory(title));
+        File.WriteAllText(tracking.SubtaskMarkdown(title), body);
+    }
+
+    /// <summary>Writes a status payload for one subtask, as an earlier run would have left it.</summary>
+    private static void WriteStatus(SubtaskPaths tracking, string title, string json) =>
+        File.WriteAllText(tracking.SubtaskStatusFile(title), json);
+
+    /// <summary>Leaves a non-empty completion flag behind, as an earlier run would have.</summary>
+    private static void WriteStaleFlag(SubtaskPaths tracking, string title) =>
+        File.WriteAllText(tracking.SubtaskResultFile(title), "uebrig aus einem alten Lauf");
+
+    /// <summary>Publishes one subtask's completion flag and, optionally, its status payload.</summary>
+    private static void PublishSubtaskResult(SubtaskPaths tracking, string title, string? status)
+    {
+        if (status is not null)
+        {
+            File.WriteAllText(tracking.SubtaskStatusFile(title), $$"""{"status":"{{status}}"}""");
+        }
+
+        File.WriteAllText(tracking.SubtaskResultFile(title), $$"""{"subtask":"{{title}}"}""");
+    }
+
+    /// <summary>Waits for the session numbered <paramref name="index"/> to have pasted its prompt.</summary>
+    private static Task WaitForPasteAsync(
+        FakeTerminalController terminal, int index, CancellationToken cancellationToken) =>
+        WaitUntil(() => terminal.Pasted.Count > index, cancellationToken);
+
+    [Fact]
+    public async Task PhaseFour_SubtaskLoop_RunsOnlyTheIncompleteEntriesInIndexOrder()
+    {
+        // Requirement 2.4 and the task's observable: three entries, the MIDDLE one already
+        // complete, so exactly two sessions run and they run in index order. Every dimension the
+        // loop evaluates is asymmetric: three distinct titles, three distinct descriptions, and
+        // three different on-disk states (complete / failed / untouched).
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        WriteDescription(tracking, "ST-003-gamma", "Beschreibung GAMMA-ONLY");
+
+        // The middle entry is already complete; the first is a leftover failure from an earlier
+        // run, which requirement 2.7 makes eligible for exactly one fresh attempt.
+        WriteStatus(tracking, "ST-002-beta", """{"status":"complete"}""");
+        WriteStatus(tracking, "ST-001-alpha", """{"status":"failed","failreason":"vorheriger Lauf"}""");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        // Session 1 is the FIRST index entry, not the first pending one and not the last.
+        Assert.Contains("AUSFUEHRUNG <ST-001-alpha>", terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains("Beschreibung ALPHA-ONLY", terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("Beschreibung GAMMA-ONLY", terminal.Pasted[0], StringComparison.Ordinal);
+        PublishSubtaskResult(tracking, "ST-001-alpha", "complete");
+
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+
+        // Session 2 skips the complete middle entry and takes the third.
+        Assert.Contains("AUSFUEHRUNG <ST-003-gamma>", terminal.Pasted[1], StringComparison.Ordinal);
+        Assert.Contains("Beschreibung GAMMA-ONLY", terminal.Pasted[1], StringComparison.Ordinal);
+        PublishSubtaskResult(tracking, "ST-003-gamma", "complete");
+
+        await run;
+
+        // A count, not a "contains": a loop that also ran the complete entry passes every
+        // assertion above and fails only here.
+        Assert.Equal(2, terminal.StartedSessions.Count);
+        Assert.Equal(2, terminal.Pasted.Count);
+        Assert.DoesNotContain(terminal.Pasted, text => text.Contains("ST-002-beta", StringComparison.Ordinal));
+
+        // The complete entry's own files were never touched.
+        Assert.False(File.Exists(tracking.SubtaskResultFile("ST-002-beta")));
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskLoop_RunsTheSessionInTheProductDirectoryWithResolvedPaths()
+    {
+        // Requirement 2.5: the full description - not a path to it - and correctly resolved
+        // tracking paths. The body is multi-line so a renderer that took only its first line, or
+        // trimmed it, is visible.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        const string Body = "# ST-001-alpha\n\nSchritt eins.\nSchritt zwei mit Umlaut: Grösse.\n";
+
+        WriteIndex(tracking, "ST-001-alpha");
+        WriteDescription(tracking, "ST-001-alpha", Body);
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        Assert.Equal(_paths.WorkingDirectory, terminal.StartedSessions[0]);
+        Assert.Equal($"cd \"{_paths.WorkingDirectory}\"\r", terminal.Sent[0]);
+        Assert.Equal("yo\r", terminal.Sent[1]);
+
+        Assert.Contains(Body, terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains(tracking.TaskDirectory, terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains(tracking.SubtaskPathToken, terminal.Pasted[0], StringComparison.Ordinal);
+        Assert.Contains(_paths.SpecRelative, terminal.Pasted[0], StringComparison.Ordinal);
+
+        // Requirement 2.8: no execution timeout. The flag has not been published, so the session
+        // is still alive well past every settle ceiling the fixture configures.
+        await Task.Delay(400, cts.Token);
+        Assert.False(run.IsCompleted);
+
+        PublishSubtaskResult(tracking, "ST-001-alpha", "complete");
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskLoop_AttemptsAnAlreadyFailedEntryExactlyOncePerRun()
+    {
+        // The task's second observable, and requirement 2.7: a run over an index whose only entry
+        // already failed starts one session; the second pass within that same run starts none,
+        // even though the entry is STILL failed when the loop looks again.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteStatus(tracking, "ST-001-alpha", """{"status":"failed","failreason":"vorheriger Lauf"}""");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        // The attempt ends with the entry still failed - exactly the state that made it eligible.
+        PublishSubtaskResult(tracking, "ST-001-alpha", "failed");
+
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+        Assert.Single(terminal.Pasted);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskLoop_SkipsUnsafeTitlesAndMissingDescriptions()
+    {
+        // Requirement 2.10: an unsafe title and an entry without a usable description each fail
+        // only themselves, without a session and without composing a path outside the tracking
+        // repository. The fixture is asymmetric: an unsafe title, a safe title whose subtask.md is
+        // absent, a safe title whose subtask.md is blank, and one attemptable entry - last, so a
+        // loop that stopped at the first bad entry never reaches it.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "..", "ST-002-beta", "ST-003-gamma", "ST-004-delta");
+        Directory.CreateDirectory(tracking.SubtaskDirectory("ST-002-beta"));    // folder, no subtask.md
+        WriteDescription(tracking, "ST-003-gamma", "   \n  ");                  // present but blank
+        WriteDescription(tracking, "ST-004-delta", "Beschreibung DELTA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        Assert.Contains("AUSFUEHRUNG <ST-004-delta>", terminal.Pasted[0], StringComparison.Ordinal);
+        PublishSubtaskResult(tracking, "ST-004-delta", "complete");
+
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+
+        // '..' resolves to the tracking TASK folder, so an entry that composed a path from it
+        // would have deleted the ordered index itself before starting a session.
+        Assert.True(
+            File.Exists(tracking.ResultAbsolute),
+            "The unsafe title '..' was taken to the filesystem and deleted the ordered index.");
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskLoop_SkipsATitleThatCollapsesOntoAnotherEntrysFolder()
+    {
+        // Implementation note from task 1.1: requirement 2.10 rejects only the exact dot-names, so
+        // 'ST-001-alpha.' is a valid index title - and Windows strips the trailing dot, so every
+        // path composed from it is 'ST-001-alpha''s. Attempting it would delete that sibling's
+        // freshly published flag, paste the sibling's description a second time, and point the
+        // agent at the sibling's status file.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-001-alpha.");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        Assert.Contains("AUSFUEHRUNG <ST-001-alpha>", terminal.Pasted[0], StringComparison.Ordinal);
+
+        // Deliberately WITHOUT a status payload: the sibling therefore stays unfinished, so the
+        // collapsing entry is still eligible on the next pass and the guard is the only thing that
+        // can stop it. A 'complete' payload here would make the ledger report the collapsing entry
+        // complete too - through the very collapse under test - and the fixture would prove nothing.
+        PublishSubtaskResult(tracking, "ST-001-alpha", status: null);
+
+        // Bounded and generous: the first session ends as soon as that flag lands, and an
+        // unguarded loop deletes the flag and starts its second session before the watcher's next
+        // poll - long before this elapses.
+        await Task.Delay(1500, cts.Token);
+
+        // The sibling's evidence survived the collapsing entry untouched.
+        Assert.True(
+            File.Exists(tracking.SubtaskResultFile("ST-001-alpha")),
+            "The collapsing entry deleted its sibling's completion flag.");
+
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+        Assert.Single(terminal.Pasted);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskLoop_DeletesThatEntrysStaleFlagBeforeItsSessionWaits()
+    {
+        // A per-subtask result.json left by an earlier run is non-empty, so it satisfies
+        // CompletionRule.FilesExist on the watcher's first poll. Only the entry being attempted is
+        // cleared - the sibling's stale flag stays, because it is that entry's evidence until its
+        // own attempt begins.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        WriteStaleFlag(tracking, "ST-001-alpha");
+        WriteStaleFlag(tracking, "ST-002-beta");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        Assert.False(
+            File.Exists(tracking.SubtaskResultFile("ST-001-alpha")),
+            "The attempted entry's stale flag survived into its own session's baseline.");
+        Assert.True(
+            File.Exists(tracking.SubtaskResultFile("ST-002-beta")),
+            "A later entry's flag was deleted before that entry was attempted.");
+
+        await Task.Delay(400, cts.Token);
+        Assert.False(run.IsCompleted);
+
+        PublishSubtaskResult(tracking, "ST-001-alpha", "complete");
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+
+        Assert.Contains("AUSFUEHRUNG <ST-002-beta>", terminal.Pasted[1], StringComparison.Ordinal);
+        Assert.False(File.Exists(tracking.SubtaskResultFile("ST-002-beta")));
+
+        PublishSubtaskResult(tracking, "ST-002-beta", "complete");
+        await run;
+
+        Assert.Equal(2, terminal.StartedSessions.Count);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskLoop_ManualCompletionStopsTheRunInsteadOfBurningTheIndex()
+    {
+        // 'Task abschliessen' is an explicit override (design issue 6b). The still-armed signal
+        // would end every following session the instant it started, so a loop that ignored it
+        // would start a session per remaining entry.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        WriteDescription(tracking, "ST-003-gamma", "Beschreibung GAMMA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+
+        signal.Signal();
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+        Assert.Single(terminal.Pasted);
+
+        // Recoverable: the two untouched entries were never attempted and Implementation is still
+        // Active, so pressing Continue starts a new run over them.
+        Assert.False(File.Exists(tracking.SubtaskResultFile("ST-002-beta")));
         Assert.DoesNotContain(
             _state.Recorded, r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Completed);
     }
