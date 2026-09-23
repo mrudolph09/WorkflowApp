@@ -7,7 +7,7 @@ namespace Workflow.Tests;
 
 /// <summary>
 /// Pins the file protocol the shipped subtask prompts must state, against the very files the build
-/// copies next to the application (task 3.2, requirements 6.2, 6.4, 6.6 and 6.7).
+/// copies next to the application (tasks 3.2 and 3.3, requirements 6.2, 6.4, 6.6, 6.7 and 6.8).
 /// </summary>
 /// <remarks>
 /// <para>
@@ -24,6 +24,7 @@ namespace Workflow.Tests;
 public sealed class ShippedPromptContractTests
 {
     private const string CreateSubtasks = "create_subtasks.md";
+    private const string RunSubtask = "run_subtask.md";
 
     /// <summary>
     /// The token pattern of <see cref="PromptTemplateService"/>, restated here on purpose: a test that
@@ -38,6 +39,11 @@ public sealed class ShippedPromptContractTests
     private const string TrackingRoot = @"D:\tracking\workflows\repo";
     private const string TaskName = "alpha-task";
     private const string TaskDescription = "Erste Zeile\nZweite Zeile";
+
+    // Execution adds two more dimensions, kept distinct from every value above and from each other so
+    // a prompt that substituted the wrong one would render visibly wrong rather than plausibly right.
+    private const string SubtaskTitle = "ST-042-flag-order";
+    private const string SubtaskBody = "Koerper der Subtask-Beschreibung";
 
     private static string ShippedPromptDirectory => Path.Combine(AppContext.BaseDirectory, "Prompt");
 
@@ -61,6 +67,16 @@ public sealed class ShippedPromptContractTests
                 new TaskPaths(WorkingDirectory, TaskName),
                 TaskDescription,
                 new SubtaskPaths(TrackingRoot, TaskName)));
+
+    private static string RenderRunSubtask() =>
+        new PromptTemplateService(ShippedPromptDirectory).Render(
+            RunSubtask,
+            PromptVariables.ForSubtaskRun(
+                new TaskPaths(WorkingDirectory, TaskName),
+                TaskDescription,
+                new SubtaskPaths(TrackingRoot, TaskName),
+                SubtaskTitle,
+                SubtaskBody));
 
     [Fact]
     public void CreateSubtasksPrompt_RendersWithoutAnUnknownPlaceholder()
@@ -178,5 +194,167 @@ public sealed class ShippedPromptContractTests
         Assert.False(SubtaskPaths.IsValidTitle("C:ST-001"));
         Assert.False(SubtaskPaths.IsValidTitle(".."));
         Assert.True(SubtaskPaths.IsValidTitle("ST-001-kurzer-titel"));
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_RendersWithoutAnUnknownPlaceholder()
+    {
+        var rendered = RenderRunSubtask();
+
+        // The substituted values carry Windows separators while the prompt writes its own with '/',
+        // so the composed paths are compared in the same separator-insensitive form as the sources.
+        var slashed = rendered.Replace('\\', '/');
+
+        Assert.Contains(SubtaskBody, rendered, StringComparison.Ordinal);
+        Assert.Contains(
+            "D:/tracking/workflows/repo/alpha-task/subtasks/ST-042-flag-order",
+            slashed,
+            StringComparison.Ordinal);
+
+        // The doubled prefix the source text produced: an absolute token pasted behind another root.
+        Assert.DoesNotContain(
+            "D:/tracking/workflows/repo/D:/tracking/workflows/repo",
+            slashed,
+            StringComparison.Ordinal);
+        Assert.Empty(Regex.Matches(rendered, TokenPattern, RegexOptions.CultureInvariant));
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_UsesOnlyTokensOfTheExecutionSet()
+    {
+        var unsupported = TokensIn(RunSubtask)
+            .Where(t => !PromptVariables.SubtaskRunNames.Contains(t))
+            .ToList();
+
+        Assert.Empty(unsupported);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_LetsTheApplicationSubstituteTheSubtaskTitle()
+    {
+        // The inverse of CreateSubtasksPrompt_LeavesTheSubtaskTitleToTheAgent: at execution time the
+        // application is running one known subtask and holds its title, so re-deriving it in angle
+        // form would hand the session a name it cannot resolve (requirements 6.4 and 6.6).
+        Assert.Contains("subtask_title", TokensIn(RunSubtask), StringComparer.Ordinal);
+        Assert.DoesNotContain("<subtask_title>", Read(RunSubtask), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_DoesNotDeriveThePathsTheApplicationSupplies()
+    {
+        var text = ReadWithForwardSlashes(RunSubtask);
+
+        Assert.DoesNotContain("{workflow_path}/{subtask_path}", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("{workflow_path}/{task_path}", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("{task_path}/subtasks", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_NamesTheTaskFolderForGlobalFindings()
+    {
+        var text = ReadWithForwardSlashes(RunSubtask);
+
+        // Requirement 6.8: task-wide findings live beside the per-subtask ones, at the task root, so
+        // that {subtask_path} holds nothing but subtask folders.
+        Assert.Contains("{task_path}/findings.md", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("{subtask_path}/findings.md", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_NamesBothCompletionFilesInTheSubtaskFolder()
+    {
+        var text = ReadWithForwardSlashes(RunSubtask);
+
+        Assert.Contains("{subtask_path}/{subtask_title}/status.json", text, StringComparison.Ordinal);
+        Assert.Contains("{subtask_path}/{subtask_title}/result.json", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_UsesTheSingularFlagName()
+    {
+        var text = Read(RunSubtask);
+
+        Assert.DoesNotContain("results.json", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("result.json", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_RequiresANonEmptyFlag()
+    {
+        var text = Read(RunSubtask);
+
+        // A zero-byte file reads as no flag at all, so the session would appear never to have finished.
+        Assert.Contains("must not be empty", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("0 byte", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_RequiresAtomicPublicationOfBothFiles()
+    {
+        var text = Read(RunSubtask);
+
+        Assert.Contains("status.json.tmp", text, StringComparison.Ordinal);
+        Assert.Contains("result.json.tmp", text, StringComparison.Ordinal);
+        Assert.Contains("rename", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_PublishesTheStatusPayloadBeforeTheFlag()
+    {
+        var text = Read(RunSubtask);
+
+        // Structural, not editorial: whatever the wording, the temporary file of the payload must be
+        // introduced before the temporary file of the flag the application actually watches (6.2).
+        var status = text.IndexOf("status.json.tmp", StringComparison.Ordinal);
+        var flag = text.IndexOf("result.json.tmp", StringComparison.Ordinal);
+
+        Assert.InRange(status, 0, int.MaxValue);
+        Assert.InRange(flag, status + 1, int.MaxValue);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_StatesThePublicationOrderBeforeItDescribesEitherFile()
+    {
+        var text = Read(RunSubtask);
+
+        // The sibling test above compares the two *.tmp names, which the prompt happens to list in one
+        // single sentence of the atomic-publication section; that pins word order inside a list, not
+        // the protocol. Requirement 6.2 is about which file reaches the disk first, so this compares
+        // the bare names: their first mention is the explicit order statement, and inverting it - the
+        // exact defect the application cannot survive, because it watches the flag and reads the
+        // payload only afterwards - moves the flag in front of the payload here.
+        var status = text.IndexOf("status.json", StringComparison.Ordinal);
+        var flag = text.IndexOf("result.json", StringComparison.Ordinal);
+
+        Assert.InRange(status, 0, int.MaxValue);
+        Assert.InRange(flag, status + 1, int.MaxValue);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_StatesTheOutcomeFieldsTheApplicationReads()
+    {
+        var text = Read(RunSubtask);
+
+        Assert.Contains("\"status\": \"complete\"", text, StringComparison.Ordinal);
+        Assert.Contains("failreason", text, StringComparison.Ordinal);
+        Assert.Contains("\"failed\"", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_DoesNotAskForAnOrderedIndexInTheFlag()
+    {
+        var text = Read(RunSubtask);
+
+        // The ordered index is the creation prompt's task-level result.json (requirement 6.7). The
+        // per-subtask flag is only a flag; the application never interprets its contents.
+        Assert.DoesNotContain("right order", text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"subtasks\"", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_KeepsTheAcceptanceGate()
+    {
+        // Design P12: correcting the file protocol must not cost the verification gate.
+        Assert.Contains("verify.ps1", Read(RunSubtask), StringComparison.Ordinal);
     }
 }
