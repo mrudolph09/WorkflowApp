@@ -3,6 +3,40 @@ using System.IO;
 namespace Workflow.Models;
 
 /// <summary>
+/// What the subtask evidence establishes about a subtask-mode task's implementation phase.
+/// </summary>
+/// <remarks>
+/// The classification is the carrier requirement 4.6 asks for when it says the condition must be
+/// <em>surfaced</em> rather than silently reinterpreted: reconciliation decides demotion from it,
+/// and presentation can name the same condition without re-deriving the ledger's vocabulary - which
+/// is exactly the duplication <see cref="SubtaskLedger"/> exists to prevent. Rendering it, in
+/// German, belongs to the indicator and not to this type.
+/// </remarks>
+public enum SubtaskEvidence
+{
+    /// <summary>The journal does not record subtask mode, so the normal done-marker decides.</summary>
+    NotApplicable,
+
+    /// <summary>
+    /// The user ended implementation through <c>Task abschliessen</c>. The ledger is not consulted
+    /// at all (requirement 5.4).
+    /// </summary>
+    CompletedManually,
+
+    /// <summary>A freshly read ledger reports every entry complete (requirement 4.3).</summary>
+    AllComplete,
+
+    /// <summary>A freshly read ledger reports work that is not finished. The only demoting case.</summary>
+    Incomplete,
+
+    /// <summary>
+    /// The stored tracking path is blank or malformed, or the ordered index cannot be read. The
+    /// recorded phase state is retained (requirement 4.6).
+    /// </summary>
+    Unavailable,
+}
+
+/// <summary>
 /// The demote-never-promote rule that reconciles a workflow journal against the artefacts actually
 /// on disk, plus the resume-phase lookup that depends on it.
 /// </summary>
@@ -45,7 +79,7 @@ public static class PhaseReconciliation
 
             if (!demoteFromHere
                 && entry.Status == PhaseStatus.Completed
-                && !ArtefactsPresent(paths, entry.Phase))
+                && !ArtefactsPresent(paths, state, entry.Phase))
             {
                 demoteFromHere = true;
             }
@@ -79,15 +113,117 @@ public static class PhaseReconciliation
         return null;
     }
 
+    /// <summary>Classifies what the subtask evidence says about one task's implementation phase.</summary>
+    /// <param name="paths">The task's path set. Supplies the task name the tracking folder is named after.</param>
+    /// <param name="state">The journal, read for its subtask mode, tracking path and manual override.</param>
+    /// <returns>The condition the evidence establishes.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="paths"/> or <paramref name="state"/> is null.</exception>
+    /// <remarks>
+    /// <para>
+    /// The rule order is fixed by the design's resolved decision for issue 9 and is not an
+    /// optimisation: <c>ImplementationCompletedManually</c> is an explicit user override and is
+    /// honoured <em>without consulting the ledger</em> (requirement 5.4), so a task the user stopped
+    /// half-way through stays completed even though most of its subtasks never ran.
+    /// </para>
+    /// <para>
+    /// Every remaining answer comes from a fresh read: <see cref="SubtaskLedger.AllComplete"/> takes
+    /// the path set rather than a snapshot and reads the disk itself, so no stale in-memory evidence
+    /// can reach this decision (requirement 4.5).
+    /// </para>
+    /// </remarks>
+    public static SubtaskEvidence Evaluate(TaskPaths paths, TaskState state)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(state);
+
+        if (!state.SubtasksEnabled)
+        {
+            return SubtaskEvidence.NotApplicable;
+        }
+
+        if (state.ImplementationCompletedManually)
+        {
+            return SubtaskEvidence.CompletedManually;
+        }
+
+        var tracking = TryTrackingPaths(paths, state);
+        if (tracking is null)
+        {
+            return SubtaskEvidence.Unavailable;
+        }
+
+        if (SubtaskLedger.AllComplete(tracking))
+        {
+            return SubtaskEvidence.AllComplete;
+        }
+
+        // AllComplete answers false both for "not finished yet" and for "the evidence could not be
+        // read", and only the first may demote. The readability probe therefore runs AFTER the
+        // completion read, so an index that disappears between the two lands on Unavailable - which
+        // keeps the recorded state - rather than on Incomplete, which would demote it.
+        return SubtaskLedger.IsDecomposed(tracking)
+            ? SubtaskEvidence.Incomplete
+            : SubtaskEvidence.Unavailable;
+    }
+
+    /// <summary>Composes the tracking path set from the stored directory, or reports it unusable.</summary>
+    /// <param name="paths">The task's path set, for the task name.</param>
+    /// <param name="state">The journal carrying the stored tracking directory.</param>
+    /// <returns>The tracking paths, or null when the stored directory is blank or malformed.</returns>
+    /// <remarks>
+    /// The store writes the chosen directory verbatim - no trim, no blank-nulling - precisely so this
+    /// distinction survives, and a hand-edited or older journal can carry anything. The null check is
+    /// compiler-mandated rather than defensive: <c>WorkflowDirectory</c> is <c>string?</c> and the
+    /// constructor's parameter is not. The constructor itself rejects empty and whitespace.
+    /// </remarks>
+    private static SubtaskPaths? TryTrackingPaths(TaskPaths paths, TaskState state)
+    {
+        var directory = state.WorkflowDirectory;
+
+        if (directory is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return new SubtaskPaths(directory, paths.TaskName);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
     // ResolveReview is never demoted: its completion is baseline-relative and leaves no trace on
     // disk, so the journal is the only evidence there is.
-    private static bool ArtefactsPresent(TaskPaths paths, WorkflowPhase phase) => phase switch
+    private static bool ArtefactsPresent(TaskPaths paths, TaskState state, WorkflowPhase phase) => phase switch
     {
         WorkflowPhase.Specification => NonEmpty(paths.SpecAbsolute) && NonEmpty(paths.PlanAbsolute),
         WorkflowPhase.Review => NonEmpty(paths.ReviewAbsolute),
-        WorkflowPhase.Implementation => NonEmpty(paths.DoneAbsolute),
+        WorkflowPhase.Implementation => ImplementationPresent(paths, state),
         _ => true,
     };
+
+    /// <summary>Applies the resolved rule table of design issue 9 to the implementation phase.</summary>
+    /// <param name="paths">The task's path set.</param>
+    /// <param name="state">The journal.</param>
+    /// <returns>False only when the evidence positively shows unfinished work.</returns>
+    /// <remarks>
+    /// A subtask task never falls back to the normal done-marker: that marker is absent by design
+    /// and consulting it would demote a completed task on every restart, contradicting requirement
+    /// 4.3. Unavailable evidence keeps the recorded state for the same reason - unreadable is not
+    /// the same as unfinished (requirement 4.6).
+    /// </remarks>
+    private static bool ImplementationPresent(TaskPaths paths, TaskState state) =>
+        Evaluate(paths, state) switch
+        {
+            SubtaskEvidence.CompletedManually => true,
+            SubtaskEvidence.AllComplete => true,
+            SubtaskEvidence.Unavailable => true,
+            SubtaskEvidence.Incomplete => false,
+            _ => NonEmpty(paths.DoneAbsolute),
+        };
 
     private static bool NonEmpty(string path)
     {
