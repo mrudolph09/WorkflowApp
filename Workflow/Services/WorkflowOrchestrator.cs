@@ -282,6 +282,54 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         }
 
         await RunSubtaskLoopAsync(request, tracking, cancellationToken);
+
+        CompleteImplementationIfEveryEntryIsComplete(request, tracking);
+    }
+
+    /// <summary>
+    /// Closes the journal transition <see cref="RunPhaseAsync"/> deliberately deferred, and only on
+    /// evidence read from disk after the loop has ended (requirements 3.5 and 3.6).
+    /// </summary>
+    /// <param name="request">The run parameters, supplying the journal key and progress channel.</param>
+    /// <param name="tracking">The task's tracking paths; the read is composed from these, not handed in.</param>
+    /// <remarks>
+    /// <para>
+    /// The rule is design decision (issues 6a and 9): a <em>freshly read, non-null</em> final
+    /// snapshot with <c>Total &gt; 0 &amp;&amp; Completed == Total</c>.
+    /// <see cref="SubtaskLedger.AllComplete(SubtaskPaths)"/> is that rule and nothing else - it takes
+    /// the path set and performs the read itself, so it is structurally incapable of being fed the
+    /// snapshot the loop last held. Re-deriving the predicate here from a
+    /// <see cref="SubtaskSnapshot"/> would both duplicate the ledger's vocabulary and re-open the
+    /// very door the decision closes; note 4.1's rule applies here in full, one level up from the
+    /// session: the run's own outcome is never evidence about the artefact.
+    /// </para>
+    /// <para>
+    /// Both of the loop's exits therefore land in the same place. Whether it ended because no entry
+    /// remained eligible or because its own read came back null, this reads again - so an
+    /// unreadable index cannot complete a task on the strength of what was true a moment earlier,
+    /// and "no failures" is not enough either, because an untouched entry is
+    /// <see cref="SubtaskStatus.Pending"/>, not <see cref="SubtaskStatus.Failed"/>.
+    /// </para>
+    /// <para>
+    /// Refusing writes nothing. Implementation keeps the <see cref="PhaseStatus.Active"/> that phase
+    /// entry recorded, which is exactly what leaves the task recoverable and offered again
+    /// (requirement 3.6). Manual completion is not decided here at all: it is an explicit user
+    /// override owned by the view model (design decision, issue 6b).
+    /// </para>
+    /// </remarks>
+    private void CompleteImplementationIfEveryEntryIsComplete(
+        WorkflowRunRequest request,
+        SubtaskPaths tracking)
+    {
+        if (!SubtaskLedger.AllComplete(tracking))
+        {
+            return;
+        }
+
+        // Store before reporting, for the reason RunPhaseAsync states: a busy dispatcher must not
+        // be able to delay the durable write.
+        _state.RecordPhase(request.Paths, WorkflowPhase.Implementation, PhaseStatus.Completed);
+        request.Progress.Report(new PhaseProgress(WorkflowPhase.Implementation, PhaseStatus.Completed));
     }
 
     /// <summary>

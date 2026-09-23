@@ -695,6 +695,12 @@ public sealed class WorkflowOrchestratorTests : IDisposable
             SubtaskProgress = new InlineProgress<SubtaskProgress>(RecordSubtaskReport),
         };
 
+    /// <summary>
+    /// Runs on the orchestrator's own thread the instant a report is published, so a test can put
+    /// the tracking repository into a chosen state at an exactly known point of the run.
+    /// </summary>
+    private Action<SubtaskProgress>? _afterSubtaskReport;
+
     /// <summary>Records one published report, on the thread that published it.</summary>
     private void RecordSubtaskReport(SubtaskProgress report)
     {
@@ -702,6 +708,9 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         {
             _subtaskProgress.Add(report);
         }
+
+        // Outside the lock: the hook may itself do file work, and nothing it does needs the list.
+        _afterSubtaskReport?.Invoke(report);
     }
 
     private SubtaskProgress[] SubtaskReports()
@@ -795,7 +804,12 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         await WaitForPasteAsync(terminal, 0, cts.Token);
         PublishSubtaskResult(tracking, "ST-002-beta", "complete");
         await WaitForPasteAsync(terminal, 1, cts.Token);
-        PublishSubtaskResult(tracking, "ST-003-gamma", "complete");
+
+        // Task 4.5 made the last entry's OUTCOME matter to this test's closing assertion. It
+        // publishes its flag with no status payload beside it - Pending under the resolved
+        // vocabulary - so this run still ends without every entry complete and the deferred journal
+        // transition still does not fire. The fixture moved; every assertion below is unchanged.
+        PublishSubtaskResult(tracking, "ST-003-gamma", status: null);
 
         await run;
 
@@ -1693,6 +1707,233 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         PublishRawStatusAndFlag(tracking, "ST-002-beta", """{"status":"complete"}""");
 
         await run;
+    }
+
+    // --- Phase 4, automatic completion from fresh evidence (task 4.5) ---------------------
+
+    /// <summary>Stages an entry that an earlier run already finished: description plus a status.</summary>
+    private static void StageCompletedSubtask(SubtaskPaths tracking, string title, string description)
+    {
+        WriteDescription(tracking, title, description);
+        WriteStatus(tracking, title, """{"status":"complete"}""");
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskRunWhereEveryEntryCompletes_RecordsImplementationCompleted()
+    {
+        // Requirement 3.5 and the task's first observable. Three entries, two already complete on
+        // disk and the middle one executed here, so the final snapshot is Total 3 / Completed 3 /
+        // Failed 0 - three pairwise distinct numbers, which is what makes a decision that compared
+        // the wrong pair of counters visible rather than accidentally right (note 1.2).
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        StageCompletedSubtask(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        StageCompletedSubtask(tracking, "ST-003-gamma", "Beschreibung GAMMA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+        Assert.Contains("AUSFUEHRUNG <ST-002-beta>", terminal.Pasted[0], StringComparison.Ordinal);
+        PublishSubtaskResult(tracking, "ST-002-beta", "complete");
+
+        await run;
+
+        Assert.Single(terminal.StartedSessions);
+
+        // The fixture really is the all-complete, failure-free shape the decision was given.
+        var final = SubtaskReports()[^1];
+        Assert.Equal(3, final.Total);
+        Assert.Equal(3, final.Completed);
+        Assert.Equal(0, final.Failed);
+
+        // The whole of this task's journal contract: phase entry recorded Active, and the run ends
+        // by recording Completed - in that order, and exactly once each. A count and two indexed
+        // comparisons rather than Assert.Contains, so a second or misordered write is visible too.
+        Assert.Equal(2, _state.Recorded.Count);
+        Assert.Equal((WorkflowPhase.Implementation, PhaseStatus.Active), _state.Recorded[0]);
+        Assert.Equal((WorkflowPhase.Implementation, PhaseStatus.Completed), _state.Recorded[1]);
+
+        lock (_progress)
+        {
+            Assert.Contains(
+                _progress,
+                p => p.Phase == WorkflowPhase.Implementation && p.Status == PhaseStatus.Completed);
+        }
+
+        // Automatic completion only; the manual override is the view model's (design issue 6b).
+        Assert.Empty(_state.ManualCompletions);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskRunWhoseFinalIndexReadFails_LeavesImplementationActive()
+    {
+        // The task's second observable, requirement 3.6 and design decision (issues 6a and 9): the
+        // last snapshot this run held in memory says every entry is complete, and the decision must
+        // still refuse, because the read it makes for itself fails.
+        //
+        // The index is opened for exclusive access from inside the all-complete report, which
+        // InlineProgress delivers on the orchestrator's own thread - so the lock is provably in
+        // place before the run takes another step, and nothing here depends on winning a race.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        StageCompletedSubtask(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        StageCompletedSubtask(tracking, "ST-003-gamma", "Beschreibung GAMMA-ONLY");
+
+        FileStream? seized = null;
+        try
+        {
+            _afterSubtaskReport = report =>
+            {
+                if (seized is null && report.Total > 0 && report.Completed == report.Total)
+                {
+                    seized = new FileStream(
+                        tracking.ResultAbsolute, FileMode.Open, FileAccess.Read, FileShare.None);
+                }
+            };
+
+            var terminal = new FakeTerminalController();
+            terminal.ReadyGate.SetResult();
+            var signal = new ManualPhaseSignal();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+            var run = CreateSettlingOrchestrator().RunAsync(
+                CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+            await WaitForPasteAsync(terminal, 0, cts.Token);
+            PublishSubtaskResult(tracking, "ST-002-beta", "complete");
+
+            await run;
+
+            // The premise: an all-complete snapshot really was the last thing this run knew.
+            Assert.NotNull(seized);
+            var lastKnown = SubtaskReports()[^1];
+            Assert.Equal(3, lastKnown.Total);
+            Assert.Equal(3, lastKnown.Completed);
+            Assert.Equal(0, lastKnown.Failed);
+
+            // And the index really is unreadable at the moment the decision is taken.
+            Assert.Null(SubtaskLedger.TryRead(tracking));
+
+            Assert.DoesNotContain(_state.Recorded, r => r.Status == PhaseStatus.Completed);
+            Assert.Contains(
+                _state.Recorded,
+                r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Active);
+        }
+        finally
+        {
+            if (seized is not null)
+            {
+                await seized.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskRunLeavingPendingEntriesWithoutFailures_LeavesImplementationActive()
+    {
+        // Requirement 3.6 and design's "'no failures' is not sufficient evidence". Both executed
+        // entries publish their completion flag with no status payload beside it, which the resolved
+        // vocabulary reads as Pending, not Failed. The final snapshot is therefore
+        // Total 3 / Completed 1 / Failed 0 - pairwise distinct, and with zero failures - so a
+        // decision that asked "were there failures?" rather than "is every entry complete?" would
+        // wrongly record completion here.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        StageCompletedSubtask(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        WriteDescription(tracking, "ST-003-gamma", "Beschreibung GAMMA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+        PublishSubtaskResult(tracking, "ST-002-beta", status: null);
+
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+        PublishSubtaskResult(tracking, "ST-003-gamma", status: null);
+
+        await run;
+
+        Assert.Equal(2, terminal.StartedSessions.Count);
+
+        var final = SubtaskReports()[^1];
+        Assert.Equal(3, final.Total);
+        Assert.Equal(1, final.Completed);
+        Assert.Equal(0, final.Failed);
+
+        Assert.DoesNotContain(_state.Recorded, r => r.Status == PhaseStatus.Completed);
+        Assert.Contains(
+            _state.Recorded,
+            r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Active);
+    }
+
+    [Fact]
+    public async Task PhaseFour_SubtaskRunThatFinishesWithFailures_LeavesImplementationActive()
+    {
+        // Requirement 3.6's literal first clause: automatic execution that finishes WITH failures
+        // leaves implementation incomplete and the task retained for recovery. Final snapshot
+        // Total 3 / Completed 2 / Failed 1 - pairwise distinct once more, and the mirror image of
+        // the pending-only run above, so the refusal is pinned for both reasons an entry can be
+        // short of Complete rather than only for the one that is easier to get right.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta", "ST-003-gamma");
+        StageCompletedSubtask(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+        WriteDescription(tracking, "ST-003-gamma", "Beschreibung GAMMA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var run = CreateSettlingOrchestrator().RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+        PublishSubtaskResult(tracking, "ST-002-beta", "failed");
+
+        // The failure does not end the run: the remaining entry still gets its session.
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+        PublishSubtaskResult(tracking, "ST-003-gamma", "complete");
+
+        await run;
+
+        Assert.Equal(2, terminal.StartedSessions.Count);
+
+        var final = SubtaskReports()[^1];
+        Assert.Equal(3, final.Total);
+        Assert.Equal(2, final.Completed);
+        Assert.Equal(1, final.Failed);
+
+        Assert.DoesNotContain(_state.Recorded, r => r.Status == PhaseStatus.Completed);
+        Assert.Contains(
+            _state.Recorded,
+            r => r.Phase == WorkflowPhase.Implementation && r.Status == PhaseStatus.Active);
     }
 
     // The fixture's single rules file is shared by every test in the class; this one needs its
