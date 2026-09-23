@@ -56,19 +56,48 @@ foreach ($relative in $required) {
 }
 
 Write-Host 'V4  Prompt templates'
+# Requirement 6.3/6.4: every shipped prompt is validated against ITS OWN token set, mirroring
+# PromptTemplateCatalog.AllowedTokens. A single flat list would accept {subtask} inside a phase
+# prompt and, before this catalog existed, rejected {tasktitel} in the two code-unreferenced
+# prompts. Keep the three layers and the eight entries below in step with
+# Workflow\Services\PromptTemplateCatalog.cs and Workflow\Services\PromptTemplateService.cs.
 $promptDir = Join-Path $repo 'Workflow\Prompt'
-$known = @('taskbezeichnung', 'taskbeschreibung', 'AppDirectory', 'spec_path', 'plan_path', 'review_path', 'done_path')
+$baseTokens = @('taskbezeichnung', 'taskbeschreibung', 'AppDirectory', 'spec_path', 'plan_path', 'review_path', 'done_path')
+$creationTokens = $baseTokens + @('workflow_path', 'tasktitel', 'task_path', 'subtask_path')
+$runTokens = $creationTokens + @('subtask_title', 'subtask')
 
-foreach ($file in Get-ChildItem -Path $promptDir -Filter '*.md') {
+$promptCatalog = [ordered] @{
+    'initial_prompt.md'        = $baseTokens
+    'review_prompt.md'         = $baseTokens
+    'resolve_review_prompt.md' = $baseTokens
+    'implementation_prompt.md' = $baseTokens
+    'create_subtasks.md'       = $creationTokens
+    'counter_prompt.md'        = $creationTokens
+    'evidence_gate.md'         = $creationTokens
+    'run_subtask.md'           = $runTokens
+}
+
+foreach ($name in $promptCatalog.Keys) {
+    Assert-True (Test-Path (Join-Path $promptDir $name)) "catalogued prompt ships: $name"
+}
+
+foreach ($file in Get-ChildItem -Path $promptDir -Filter '*.md' -Recurse -File) {
+    $relative = $file.FullName.Substring($promptDir.Length).TrimStart('\', '/')
     $content = Get-Content -Raw -Path $file.FullName
-    Assert-True ($content.Trim().Length -gt 0) "non-empty: $($file.Name)"
+    Assert-True ($content.Trim().Length -gt 0) "non-empty: $relative"
 
+    if (-not $promptCatalog.Contains($relative)) {
+        Assert-True $false "prompt catalog recognizes shipped file: $relative"
+        continue
+    }
+
+    $allowed = $promptCatalog[$relative]
     $tokens = [regex]::Matches($content, '\{(?<n>[A-Za-z_][A-Za-z0-9_]*)\}') |
         ForEach-Object { $_.Groups['n'].Value } |
         Sort-Object -Unique
 
     foreach ($token in $tokens) {
-        Assert-True ($known -contains $token) "known token {$token} in $($file.Name)"
+        Assert-True ($allowed -contains $token) "token {$token} allowed in $relative"
     }
 }
 

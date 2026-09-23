@@ -190,23 +190,35 @@ public sealed partial class PromptTemplateService : IPromptTemplateService
     {
         var errors = new List<string>();
 
-        foreach (var definition in PhaseCatalog.All)
+        foreach (var fileName in ShippedTemplateFiles())
         {
+            if (!PromptTemplateCatalog.AllowedTokens.TryGetValue(fileName, out var allowed))
+            {
+                // Requirement 6.3: a shipped file the catalog does not recognize is itself an
+                // error. Skipping it silently is how counter_prompt.md and evidence_gate.md went
+                // unvalidated in the first place.
+                errors.Add(
+                    $"Die Prompt-Datei '{fileName}' ist dem Prompt-Katalog nicht bekannt und kann nicht geprüft werden.");
+                continue;
+            }
+
             try
             {
-                var text = ReadTemplate(definition.PromptFile);
+                var text = ReadTemplate(fileName);
 
+                // Requirement 6.4: checked against THIS file's set, never against the union of all
+                // known names - the union would accept {subtask} inside a phase prompt.
                 var unknown = TokenRegex()
                     .Matches(text)
                     .Select(m => m.Groups["name"].Value)
-                    .Where(n => !PromptVariables.KnownNames.Contains(n))
+                    .Where(n => !allowed.Contains(n))
                     .Distinct(StringComparer.Ordinal)
                     .ToList();
 
                 if (unknown.Count > 0)
                 {
                     var names = string.Join(", ", unknown.Select(n => "{" + n + "}"));
-                    errors.Add($"Die Prompt-Datei '{definition.PromptFile}' enthält unbekannte Platzhalter: {names}.");
+                    errors.Add($"Die Prompt-Datei '{fileName}' enthält unbekannte Platzhalter: {names}.");
                 }
             }
             catch (PromptTemplateException ex)
@@ -216,6 +228,31 @@ public sealed partial class PromptTemplateService : IPromptTemplateService
         }
 
         return errors;
+    }
+
+    /// <summary>Every <c>*.md</c> file the prompt directory currently holds, in a stable order.</summary>
+    /// <remarks>
+    /// Validation is driven by what is on disk rather than by the catalog's key set, so the two
+    /// directions stay asymmetric: a file with no catalog entry is reported as unrecognized, while
+    /// a catalog entry with no file is left to <see cref="ReadTemplate"/>'s "not found" error at
+    /// the point of use. A directory that legitimately supplies only some templates - a test
+    /// fixture, or a partially deployed output folder - therefore raises no spurious startup
+    /// errors for the templates it never claimed to provide.
+    /// </remarks>
+    private List<string> ShippedTemplateFiles()
+    {
+        if (!Directory.Exists(_promptDirectory))
+        {
+            return [];
+        }
+
+        // AllDirectories mirrors the Prompt\**\*.md content glob, so a template dropped into a
+        // subdirectory is seen (and, having no catalog entry, reported) rather than missed.
+        return Directory
+            .EnumerateFiles(_promptDirectory, "*.md", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(_promptDirectory, path))
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private string ReadTemplate(string fileName)
