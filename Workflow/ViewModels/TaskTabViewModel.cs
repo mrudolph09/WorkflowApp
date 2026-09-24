@@ -493,7 +493,20 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     // Requirement 1.2: the tracking row exists only in subtask mode, so its verdict has to be
     // recomputed when the mode is toggled - a directory that blocks the start action must stop
     // blocking it the moment the user goes back to a normal run.
-    partial void OnSubtasksEnabledChanged(bool value) => RefreshWorkflowDirectoryValidation();
+    partial void OnSubtasksEnabledChanged(bool value)
+    {
+        RefreshWorkflowDirectoryValidation();
+
+        if (!value)
+        {
+            // The indicator belongs to subtask mode (requirement 3.1) and disappears with the row.
+            // Left as it was, it would come back carrying the counts of a mode the task no longer
+            // runs in the moment the checkbox is ticked again. Only the OFF direction clears:
+            // ticking the box on must not wipe what the ledger seeded on a recovered tab
+            // (requirement 4.5), and LoadForResume restores this very property.
+            SubtaskIndicator.Reset();
+        }
+    }
 
     partial void OnWorkflowDirectoryChanged(string? value)
     {
@@ -754,6 +767,24 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         IsNameLocked = true;
         IsRunning = true;
 
+        var startPhase = ResumePhase ?? WorkflowPhase.Specification;
+
+        // Requirement 3.4: the subtask indicator is grey before phase 4, and it cannot be grey
+        // "with counts" - a row reading '3 von 6' while phase 1 runs describes work this run has
+        // not looked at. Anything the row was showing therefore goes now, AFTER the start gate, so
+        // a refused start never destroys what the user is reading while they fix it.
+        //
+        // The one exception is a run that starts AT phase 4. Its counts are not a previous run's
+        // leftovers: LoadForResume read them off the tracking files moments ago (requirement 4.5)
+        // and they are exactly the state this run continues from, so the grey-before-phase-4 rule
+        // has nothing left to say about them. Resetting there would make the tab claim '0 von 0'
+        // work done - and keep claiming it if the run failed before publishing anything, which the
+        // phase-4 configuration check can do (requirement 1.8).
+        if (startPhase != WorkflowPhase.Implementation)
+        {
+            SubtaskIndicator.Reset();
+        }
+
         var paths = new TaskPaths(WorkingDirectory, TaskName);
 
         // Persist the description BEFORE the run: a crash one second from now must still recover
@@ -768,7 +799,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             Terminal,
             _manualSignal,
             new Progress<PhaseProgress>(ApplyProgress),
-            ResumePhase ?? WorkflowPhase.Specification,
+            startPhase,
             // Requirement 4.2: without this a continued subtask task takes the normal
             // implementation branch and the skip-completed loop is never reached.
             //
@@ -785,7 +816,19 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             // synchronous [RelayCommand] would escape ICommand.Execute after IsRunning was already
             // set. Deferring the capture strengthens that last point rather than weakening it -
             // the factory now runs inside RunAsync, where the catch list is.
-            SubtaskConfiguration.Deferred(this));
+            SubtaskConfiguration.Deferred(this),
+            // Requirements 3.2 and 3.7: the run's own progress reaches the indicator through this
+            // sink, so the count advances after each subtask and a failure's reason is readable
+            // while the run continues. Until now the parameter defaulted to null and nothing in the
+            // application ever supplied it.
+            //
+            // Constructed HERE, on the UI thread, exactly like the Progress<PhaseProgress> above:
+            // Progress<T> captures the SynchronizationContext of the thread that creates it, so
+            // this one captures the dispatcher's and posts every report onto its single-threaded
+            // FIFO queue. Built on a pool thread instead it would have no context, fall back to
+            // unordered ThreadPool.QueueUserWorkItem, and let requirement 3.7's ordered states
+            // latch a stale payload - besides touching observable properties off the UI thread.
+            new Progress<SubtaskProgress>(SubtaskIndicator.Apply));
 
         _ = RunAsync(request, _run.Token);
     }
