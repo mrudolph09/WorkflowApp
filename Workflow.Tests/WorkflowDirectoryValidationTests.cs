@@ -1,4 +1,5 @@
 ﻿using System.IO;
+using System.Text;
 using Workflow.Models;
 
 namespace Workflow.Tests;
@@ -188,4 +189,56 @@ public sealed class WorkflowDirectoryValidationTests : IDisposable
         Assert.False(result.IsValid);
         Assert.Equal("Fehler.", result.ErrorMessage);
     }
+
+    /// <summary>
+    /// The three messages are pinned above against literals that live in this same source tree and
+    /// therefore share its encoding. If the validator's file and this file were ever re-saved in a
+    /// non-UTF-8 encoding <em>together</em>, both sides would be wrong in exactly the same way,
+    /// every equality assertion above would still pass, and the product would ship mojibake. This
+    /// is the encoding-proof pin (method carried forward from task 6.1): the expected fragments are
+    /// written as ASCII-only C# unicode escapes, so no re-encoding of any source file can corrupt
+    /// them, and they are looked for in the compiled assembly rather than in source. Nothing in
+    /// this test, comments included, is allowed to be a non-ASCII byte.
+    /// </summary>
+    /// <remarks>
+    /// The encoding is chosen by where the string lives. A C# string literal is stored in the
+    /// <c>#US</c> metadata heap as UTF-16LE; only a XAML literal reaches the assembly as UTF-8,
+    /// inside compiled BAML, which is why <c>PhaseCompletionRemovalTests</c> scans for UTF-8 and
+    /// this test must not.
+    /// </remarks>
+    [Fact]
+    public void TheCompiledApplication_ShipsTheThreeMessagesWithTheirGermanCharactersIntact()
+    {
+        var assembly = File.ReadAllBytes(typeof(WorkflowDirectoryValidation).Assembly.Location);
+
+        // Positive control of the same storage class as the two cases below: a fragment of the
+        // missing-directory message, the one message that carries no German character at all. If
+        // the #US heap scan itself stopped working, this fails first.
+        Assert.True(
+            CarriesUtf16(assembly, "Das Workflow-Verzeichnis '"),
+            "The #US heap scan found no part of the missing-directory message.");
+
+        // Each fragment below is asserted to occur in the assembly, so it must identify exactly
+        // one message. The bare fragment "auswaehlen." does not: the unrelated
+        // TaskFolderService message "Bitte ein gueltiges Arbeitsverzeichnis auswaehlen." carries
+        // the same tail, and would keep this assertion green while the blank-selection message
+        // rotted. The full message text is used instead, which occurs once.
+        Assert.True(
+            CarriesUtf16(assembly, "Bitte ein Workflow-Verzeichnis ausw\u00e4hlen."),
+            "The shipped blank-selection message is no longer the exact German text that spells "
+                + "'auswaehlen' with an a-umlaut.");
+        Assert.True(
+            CarriesUtf16(assembly, "enth\u00e4lt keinen Ordner "),
+            "The shipped marker message no longer spells 'enthaelt' with an a-umlaut.");
+
+        // The signature of a UTF-8 file re-read as Windows-1252: a-umlaut becomes 'A-tilde' plus a
+        // currency-sign character. It is what the user would see, and exactly what an equality
+        // assertion against a co-corrupted literal is structurally unable to see.
+        Assert.False(
+            CarriesUtf16(assembly, "Bitte ein Workflow-Verzeichnis ausw\u00c3\u00a4hlen."),
+            "The shipped assembly carries the mojibake spelling of the blank-selection message.");
+    }
+
+    private static bool CarriesUtf16(byte[] assembly, string literal) =>
+        assembly.AsSpan().IndexOf(Encoding.Unicode.GetBytes(literal).AsSpan()) >= 0;
 }

@@ -363,6 +363,7 @@ public sealed class TaskStateStoreTests : IDisposable
         _store.SaveDescription(_paths, "eine Beschreibung");
         _store.SaveSubtaskSettings(_paths, enabled: true, workflowDirectory: @"C:\Workflows\Ablage");
         _store.SetDismissed(_paths, dismissed: true);
+        _store.RecordPhase(_paths, WorkflowPhase.Review, PhaseStatus.Completed);
 
         _store.SetImplementationCompletedManually(_paths, completedManually: true);
 
@@ -375,6 +376,13 @@ public sealed class TaskStateStoreTests : IDisposable
         Assert.Equal(@"C:\Workflows\Ablage", state.WorkflowDirectory);
         Assert.True(state.Dismissed);
         Assert.Equal("eine Beschreibung", state.TaskDescription);
+
+        // The phase ledger is the other half of "manual completion survives a restart"
+        // (requirement 5.4): the marker is only useful if the run it completes is still there
+        // after the reload. Without this, the entailment rested on Save being shared with the
+        // neighbouring SaveSubtaskSettings_KeepsTheRecordedPhases rather than on this path.
+        Assert.Equal(PhaseStatus.Completed, state.Phases[1].Status);
+        Assert.Equal(PhaseStatus.Pending, state.Phases[0].Status);
     }
 
     [Fact]
