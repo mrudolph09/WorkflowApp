@@ -440,6 +440,54 @@ public sealed class TaskTabCompletionTests : IDisposable
         Assert.Null(PhaseReconciliation.FirstIncomplete(state));
     }
 
+    /// <summary>
+    /// The write ORDER inside <c>CompleteTaskAsync</c>, which no other fixture in this class can
+    /// observe. <see cref="TaskStateStore.RecordPhase"/> creates the journal when none exists
+    /// (<c>TryLoad(paths) ?? CreateEmpty()</c>), while
+    /// <see cref="TaskStateStore.SetImplementationCompletedManually"/> is a documented no-op without
+    /// one. Every other test here reaches completion through <c>StartWorkflow</c>, whose
+    /// <c>SaveDescription</c> has already created the journal, so both orders leave identical state
+    /// and the deliberate ordering is unpinned. The journal is therefore removed here after the run
+    /// has started - the state in which the two orders differ - and the override must survive it.
+    /// The real <see cref="TaskStateStore"/> is used rather than a fake, because the asymmetry being
+    /// relied on is the production store's own.
+    /// </summary>
+    [WpfFact]
+    public async Task CompleteTask_WithoutAnExistingJournal_StillRecordsTheManualOverride()
+    {
+        var orchestrator = new WindingDownOrchestrator();
+        var store = new TaskStateStore();
+        using var vm = StartAnImplementationRun(orchestrator, store);
+
+        var paths = new TaskPaths(_workspace, TaskName);
+
+        // Positive control: the run really did write a journal, so deleting it really does produce
+        // the journal-less state - the assertion below is not passing for want of a fixture.
+        Assert.NotNull(store.TryLoad(paths));
+        File.Delete(paths.StateAbsolute);
+        Assert.Null(store.TryLoad(paths));
+
+        var closed = false;
+        vm.CloseRequested += (_, _) => closed = true;
+
+        vm.CompleteTaskCommand.Execute(null);
+
+        await Settle(() => closed, "the task completion never requested the tab close");
+
+        var state = store.TryLoad(paths);
+        Assert.NotNull(state);
+
+        // Passes in either order - RecordPhase creates the journal wherever it runs.
+        Assert.Equal(
+            PhaseStatus.Completed,
+            state.Phases.Single(entry => entry.Phase == WorkflowPhase.Implementation).Status);
+
+        // Fails in the other order: the override would have been dropped on the floor.
+        Assert.True(
+            state.ImplementationCompletedManually,
+            "the manual override was written before the journal that holds it existed");
+    }
+
     /// <summary>Writes the artefacts the three earlier phases are reconciled against.</summary>
     private static void WriteEarlierPhaseArtefacts(TaskPaths paths)
     {

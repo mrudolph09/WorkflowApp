@@ -1310,6 +1310,87 @@ public sealed class WorkflowOrchestratorTests : IDisposable
     }
 
     [Fact]
+    public async Task PhaseFour_SubtaskLoop_ASecondRunRetriesTheEntryTheFirstRunFailed()
+    {
+        // The task's fourth observable, and the OTHER half of design decision (issue 2): "exactly
+        // one fresh attempt per run". The attempted-title set that enforces the "one" is declared
+        // local to RunSubtaskLoopAsync precisely so the next Continue starts with an empty one -
+        // and the application keeps a single WorkflowOrchestrator for the whole process, so the
+        // two runs below deliberately share one instance. Nothing else in this class runs the same
+        // orchestrator twice, so an `attempted` set promoted to a field survives every other test
+        // here while silently making a failed subtask unretryable for the rest of the session.
+        //
+        // Asymmetric in every dimension the loop evaluates (note 1.2): two distinct titles, two
+        // distinct descriptions, two different outcomes in run one, and three sessions that are
+        // pairwise distinguishable by which title they carry.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        WriteSubtaskRunPrompt();
+
+        WriteIndex(tracking, "ST-001-alpha", "ST-002-beta");
+        WriteDescription(tracking, "ST-001-alpha", "Beschreibung ALPHA-ONLY");
+        WriteDescription(tracking, "ST-002-beta", "Beschreibung BETA-ONLY");
+
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        // One orchestrator, two runs - the shape the application actually has.
+        var orchestrator = CreateSettlingOrchestrator();
+
+        var first = orchestrator.RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        await WaitForPasteAsync(terminal, 0, cts.Token);
+        Assert.Contains("AUSFUEHRUNG <ST-001-alpha>", terminal.Pasted[0], StringComparison.Ordinal);
+        PublishSubtaskResult(tracking, "ST-001-alpha", "failed");
+
+        await WaitForPasteAsync(terminal, 1, cts.Token);
+        Assert.Contains("AUSFUEHRUNG <ST-002-beta>", terminal.Pasted[1], StringComparison.Ordinal);
+        PublishSubtaskResult(tracking, "ST-002-beta", "complete");
+
+        await first;
+
+        // Run one really did leave exactly the state the retry is about: one failed entry, one
+        // complete entry, and an implementation phase still open for recovery.
+        Assert.Equal(2, terminal.StartedSessions.Count);
+        Assert.DoesNotContain((WorkflowPhase.Implementation, PhaseStatus.Completed), _state.Recorded);
+
+        var second = orchestrator.RunAsync(
+            CreateSubtaskRequest(terminal, signal, tracking.WorkflowDirectory), cts.Token);
+
+        // Either the retry session pastes, or the second run ends without one. Waiting on both
+        // keeps the failure a fast assertion below rather than a twenty-second timeout.
+        await WaitUntil(() => terminal.Pasted.Count > 2 || second.IsCompleted, cts.Token);
+
+        Assert.Equal(3, terminal.Pasted.Count);
+        Assert.Contains("AUSFUEHRUNG <ST-001-alpha>", terminal.Pasted[2], StringComparison.Ordinal);
+        Assert.Contains("Beschreibung ALPHA-ONLY", terminal.Pasted[2], StringComparison.Ordinal);
+
+        PublishSubtaskResult(tracking, "ST-001-alpha", "complete");
+        await second;
+
+        // The retry is one session for the one still-incomplete entry: the complete one is not
+        // re-run, so the second run adds exactly one session and no more.
+        Assert.Equal(3, terminal.StartedSessions.Count);
+        Assert.DoesNotContain(
+            terminal.Pasted.Skip(2),
+            text => text.Contains("ST-002-beta", StringComparison.Ordinal));
+
+        // And the retry is what closes the task: every entry is complete on the second run's own
+        // final read, so implementation is recorded Completed exactly once, by that run.
+        Assert.Equal(
+            new[]
+            {
+                (WorkflowPhase.Implementation, PhaseStatus.Active),
+                (WorkflowPhase.Implementation, PhaseStatus.Active),
+                (WorkflowPhase.Implementation, PhaseStatus.Completed),
+            },
+            _state.Recorded);
+    }
+
+    [Fact]
     public async Task PhaseFour_SubtaskLoop_SkipsUnsafeTitlesAndMissingDescriptions()
     {
         // Requirement 2.10: an unsafe title and an entry without a usable description each fail
