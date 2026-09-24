@@ -57,6 +57,36 @@
                               SelectedItem="{Binding WorkingDirectory, Mode=TwoWay}" />
                 </DockPanel>
 
+                <!-- Requirement 1.2: structurally identical to the Arbeitsverzeichnis row above,
+                     so the two read as one family, and shown only while subtask mode is selected.
+                     Both controls sit in this DockPanel, so hiding it hides the whole row. -->
+                <DockPanel Margin="0,12,0,0"
+                           LastChildFill="True"
+                           Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Button DockPanel.Dock="Right"
+                            Margin="8,0,0,0"
+                            ToolTip="Workflow-Verzeichnis auswählen"
+                            Style="{StaticResource MaterialDesignIconButton}"
+                            IsEnabled="{Binding IsSubtaskConfigurationEditable}"
+                            Command="{Binding BrowseWorkflowDirectoryCommand}">
+                        <materialDesign:PackIcon Kind="FolderOpen" />
+                    </Button>
+
+                    <ComboBox materialDesign:HintAssist.Hint="Workflow-Verzeichnis"
+                              IsEditable="False"
+                              IsEnabled="{Binding IsSubtaskConfigurationEditable}"
+                              ItemsSource="{Binding RecentWorkflowDirectories}"
+                              SelectedItem="{Binding WorkflowDirectory, Mode=TwoWay}" />
+                </DockPanel>
+
+                <!-- Requirement 1.3. Its own surface, not the working-directory message above:
+                     that one is rewritten on every keystroke by the folder synchronisation. -->
+                <TextBlock Margin="4,4,0,0"
+                           Foreground="{DynamicResource MaterialDesignValidationErrorBrush}"
+                           TextWrapping="Wrap"
+                           Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"
+                           Text="{Binding WorkflowDirectoryMessage}" />
+
                 <Button Margin="0,16,0,0"
                         HorizontalAlignment="Left"
                         Style="{StaticResource MaterialDesignRaisedButton}"
@@ -67,18 +97,41 @@
                     </StackPanel>
                 </Button>
 
-                <ItemsControl Margin="0,20,0,0" ItemsSource="{Binding Phases}">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <WrapPanel Orientation="Horizontal" />
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <views:PhaseIndicatorView />
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <!-- Requirements 1.1 and 3.1: the checkbox and the subtask indicator sit beside
+                     the Implementierung indicator and wrap with it on a narrow window, so the
+                     phase indicators and the subtask controls share one outer panel. -->
+                <WrapPanel Margin="0,20,0,0" Orientation="Horizontal">
+
+                    <ItemsControl ItemsSource="{Binding Phases}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <views:PhaseIndicatorView />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <CheckBox Margin="0,0,24,0"
+                              VerticalAlignment="Top"
+                              Content="Subtasks"
+                              IsChecked="{Binding SubtasksEnabled, Mode=TwoWay}"
+                              IsEnabled="{Binding IsSubtaskConfigurationEditable}"
+                              ToolTip="Wenn die Aufgabe das Kontextfenster eines Agents übersteigt, aktiviere Subtasks" />
+
+                    <!-- The wrapper keeps the tab's DataContext for the Visibility binding while
+                         the inner view receives the indicator view model; one element cannot do
+                         both. The indicator's contents belong to SubtaskIndicatorViewModel. -->
+                    <StackPanel Orientation="Horizontal"
+                                VerticalAlignment="Top"
+                                Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <views:SubtaskIndicatorView DataContext="{Binding SubtaskIndicator}" />
+                    </StackPanel>
+
+                </WrapPanel>
 
                 <Button Margin="0,16,0,8"
                         HorizontalAlignment="Left"

@@ -70,6 +70,24 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     [ObservableProperty]
     private string? _infoMessage;
 
+    /// <summary>
+    /// Why the selected tracking directory cannot be used, or null while subtask mode is off or
+    /// the selection is usable (requirement 1.3).
+    /// </summary>
+    /// <remarks>
+    /// A channel of its own rather than a second writer of <see cref="ValidationMessage"/>, for two
+    /// reasons. <see cref="SyncFolder"/> assigns <see cref="ValidationMessage"/> unconditionally on
+    /// every name and working-directory change, so a tracking message written there would be
+    /// cleared by the next keystroke while the start gate stayed closed - or survive after the
+    /// user fixed the directory. And the two messages describe different rows: this one is shown
+    /// beside the <c>Workflow-Verzeichnis</c> selector and disappears with it when subtask mode is
+    /// deselected. It is part of <see cref="CanStartWorkflow"/> because requirement 1.3 asks for
+    /// the start action to be disabled, not merely annotated.
+    /// </remarks>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    private string? _workflowDirectoryMessage;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StartButtonLabel))]
     private WorkflowPhase? _resumePhase;
@@ -137,10 +155,28 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             PhaseCatalog.All.Select(d => new PhaseIndicatorViewModel(d)));
         RecentDirectories = new ObservableCollection<string>(settings.Settings.RecentDirectories);
 
+        // A settings file carrying "RecentWorkflowDirectories": null reaches us as a null
+        // collection: System.Text.Json assigns the JSON null straight over the property
+        // initializer instead of leaving the empty list in place. The list is restored rather than
+        // merely tolerated, because SettingsService.Promote dereferences it - a read-side null
+        // check here would still throw the moment the user picks a tracking directory.
+        settings.Settings.RecentWorkflowDirectories ??= [];
+
+        RecentWorkflowDirectories =
+            new ObservableCollection<string>(settings.Settings.RecentWorkflowDirectories);
+
         if (!string.IsNullOrWhiteSpace(settings.Settings.LastDirectory)
             && Directory.Exists(settings.Settings.LastDirectory))
         {
             WorkingDirectory = settings.Settings.LastDirectory;
+        }
+
+        // Requirement 1.4: the tracking directory is offered again on a new tab, from its own
+        // history rather than the working-directory one.
+        if (!string.IsNullOrWhiteSpace(settings.Settings.LastWorkflowDirectory)
+            && Directory.Exists(settings.Settings.LastWorkflowDirectory))
+        {
+            WorkflowDirectory = settings.Settings.LastWorkflowDirectory;
         }
     }
 
@@ -158,6 +194,27 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     /// <summary>Working directories offered in the ComboBox.</summary>
     public ObservableCollection<string> RecentDirectories { get; }
+
+    /// <summary>Tracking directories offered in the <c>Workflow-Verzeichnis</c> ComboBox.</summary>
+    /// <remarks>
+    /// A list of its own, kept from <see cref="AppSettings.RecentWorkflowDirectories"/>: the
+    /// product working directory and the tracking repository are independent choices
+    /// (requirement 1.4). Reconciled by <see cref="SyncRecentWorkflowDirectories"/>, which never
+    /// clears, for the reason documented on <see cref="SyncRecentDirectories"/>.
+    /// </remarks>
+    public ObservableCollection<string> RecentWorkflowDirectories { get; }
+
+    /// <summary>
+    /// False while phase 4 is running, which is when requirement 1.6 freezes the subtask
+    /// configuration: the checkbox, the tracking-directory selector and the folder-picker button.
+    /// </summary>
+    /// <remarks>
+    /// Derived from the same <c>_activePhase</c> field the task-completion commands read, so
+    /// <see cref="ApplyProgress"/> - the only writer - raises the change notification for it. Phases
+    /// 1 to 3 deliberately leave the configuration editable: the snapshot the run carries is taken
+    /// at phase-4 entry, not at run entry, so an edit made while they run still reaches the run.
+    /// </remarks>
+    public bool IsSubtaskConfigurationEditable => _activePhase != WorkflowPhase.Implementation;
 
     /// <summary>This tab's terminal.</summary>
     public TerminalViewModel Terminal { get; }
@@ -186,6 +243,12 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
         CompleteTaskCommand.NotifyCanExecuteChanged();
         CompleteCurrentPhaseCommand.NotifyCanExecuteChanged();
+
+        // _activePhase is a plain field, so nothing else announces the editing lock. Without these
+        // two lines the XAML IsEnabled bindings would be evaluated once and never again, and the
+        // phase-4 lock of requirement 1.6 would exist only inside this class.
+        OnPropertyChanged(nameof(IsSubtaskConfigurationEditable));
+        BrowseWorkflowDirectoryCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>Prefills this tab from an interrupted task found by the startup scan.</summary>
@@ -427,34 +490,92 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         ScheduleFolderSync();
     }
 
+    // Requirement 1.2: the tracking row exists only in subtask mode, so its verdict has to be
+    // recomputed when the mode is toggled - a directory that blocks the start action must stop
+    // blocking it the moment the user goes back to a normal run.
+    partial void OnSubtasksEnabledChanged(bool value) => RefreshWorkflowDirectoryValidation();
+
+    partial void OnWorkflowDirectoryChanged(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            // Blank is a real stored value (a journal keeps the user's choice verbatim), not a
+            // programming error, and Normalise would throw on it.
+            RefreshWorkflowDirectoryValidation();
+            return;
+        }
+
+        // Same trap as OnWorkingDirectoryChanged: the MRU stores the normalised form, so a raw
+        // picker result with a trailing separator would match no item and the TwoWay Selector
+        // would push null straight back in here.
+        var normalised = WorkingDirectoryPath.Normalise(value);
+        if (!string.Equals(normalised, value, StringComparison.Ordinal))
+        {
+            WorkflowDirectory = normalised;
+            return;
+        }
+
+        var validation = WorkflowDirectoryValidation.Validate(normalised);
+        WorkflowDirectoryMessage = SubtasksEnabled ? validation.ErrorMessage : null;
+
+        // LoadForResume restores this property inside its _suppressFolderSync block precisely for
+        // the lines below: a value that came back from the journal is not a fresh user choice, and
+        // promoting it would reorder the history - and rewrite LastWorkflowDirectory - on every
+        // restart. Unlike ScheduleFolderSync, this write is not IsNameLocked-guarded, so the flag
+        // is the only thing standing between a restore and the MRU.
+        //
+        // Requirement 1.4 also offers the choice again only once it is a usable tracking
+        // repository, so a rejected directory is shown, not remembered.
+        if (_suppressFolderSync || !validation.IsValid)
+        {
+            return;
+        }
+
+        _settings.AddRecentWorkflowDirectory(normalised);
+        _settings.Save();
+        SyncRecentWorkflowDirectories();
+    }
+
+    private void RefreshWorkflowDirectoryValidation() =>
+        WorkflowDirectoryMessage = SubtasksEnabled
+            ? WorkflowDirectoryValidation.Validate(WorkflowDirectory).ErrorMessage
+            : null;
+
     // Deliberately never Clear()s. TaskTabView.xaml binds this collection to the ComboBox's
     // ItemsSource while SelectedItem is bound TwoWay to WorkingDirectory, so emptying it makes the
     // Selector drop the selection and write null back into WorkingDirectory. Re-adding the entries
     // afterwards does not restore the selection: the box goes blank, validation reports a missing
     // working directory and 'Start workflow' dies the moment a second directory is picked.
-    private void SyncRecentDirectories()
-    {
-        var desired = _settings.Settings.RecentDirectories;
+    private void SyncRecentDirectories() =>
+        Reconcile(RecentDirectories, _settings.Settings.RecentDirectories);
 
-        for (var i = RecentDirectories.Count - 1; i >= 0; i--)
+    // The same never-Clear() reconciliation for the tracking-directory ComboBox, which binds its
+    // SelectedItem TwoWay to WorkflowDirectory and would be blanked by a rebuild in exactly the
+    // same way.
+    private void SyncRecentWorkflowDirectories() =>
+        Reconcile(RecentWorkflowDirectories, _settings.Settings.RecentWorkflowDirectories);
+
+    private static void Reconcile(ObservableCollection<string> shown, Collection<string> desired)
+    {
+        for (var i = shown.Count - 1; i >= 0; i--)
         {
-            if (!desired.Contains(RecentDirectories[i]))
+            if (!desired.Contains(shown[i]))
             {
-                RecentDirectories.RemoveAt(i);
+                shown.RemoveAt(i);
             }
         }
 
         for (var i = 0; i < desired.Count; i++)
         {
-            var at = RecentDirectories.IndexOf(desired[i]);
+            var at = shown.IndexOf(desired[i]);
 
             if (at < 0)
             {
-                RecentDirectories.Insert(i, desired[i]);
+                shown.Insert(i, desired[i]);
             }
             else if (at != i)
             {
-                RecentDirectories.Move(at, i);
+                shown.Move(at, i);
             }
         }
     }
@@ -607,6 +728,10 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         // flag only on MainWindowViewModel leaves the button executable once the modal is gone.
         && _startupErrors.Count == 0
         && ValidationMessage is null
+        // Requirement 1.3: subtask mode with an unusable tracking directory disables starting a
+        // workflow. The property is null whenever subtask mode is off, so a normal run is
+        // unaffected by a stale tracking selection.
+        && WorkflowDirectoryMessage is null
         && !string.IsNullOrWhiteSpace(TaskName)
         && !string.IsNullOrWhiteSpace(WorkingDirectory);
 
@@ -614,6 +739,13 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     private void StartWorkflow()
     {
         SyncFolder();
+
+        // The marker can be removed from an already-selected directory, and nothing announces
+        // that: the verdict is about the file system, not about a property. The start action
+        // re-derives it for the same reason it calls SyncFolder - a gate that trusts a stale
+        // answer is not a gate (requirement 1.3).
+        RefreshWorkflowDirectoryValidation();
+
         if (!CanStartWorkflow() || string.IsNullOrWhiteSpace(WorkingDirectory))
         {
             return;
@@ -732,6 +864,23 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         if (!string.IsNullOrWhiteSpace(chosen))
         {
             WorkingDirectory = chosen;
+        }
+    }
+
+    /// <remarks>
+    /// The caption is task 6.2's reason for the <c>title</c> parameter. The command's own
+    /// <c>CanExecute</c> carries the phase-4 lock as well as the view's <c>IsEnabled</c> binding:
+    /// <see cref="System.Windows.Controls.Primitives.ButtonBase"/> ands the two together, so the
+    /// button is dead if either says so and the lock does not depend on one binding alone
+    /// (requirement 1.6).
+    /// </remarks>
+    [RelayCommand(CanExecute = nameof(IsSubtaskConfigurationEditable))]
+    private void BrowseWorkflowDirectory()
+    {
+        var chosen = _picker.PickDirectory(WorkflowDirectory, "Workflow-Verzeichnis auswählen");
+        if (!string.IsNullOrWhiteSpace(chosen))
+        {
+            WorkflowDirectory = chosen;
         }
     }
 

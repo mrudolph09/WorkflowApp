@@ -39,7 +39,12 @@ public sealed class TaskTabSubtaskRecoveryTests : IDisposable
         _workspace = Path.Combine(_root, "arbeit");
         _tracking = Path.Combine(_root, "workflows");
         Directory.CreateDirectory(_workspace);
-        Directory.CreateDirectory(_tracking);
+
+        // Task 6.3 gates the start action on the tracking directory being a real tracking
+        // repository (requirement 1.3), so the fixture now carries the marker folder a checked-out
+        // Workflows repository has. Fixture only: no assertion in this file changes.
+        Directory.CreateDirectory(Path.Combine(_tracking, SubtaskPaths.TemplateFolderName));
+
         _settings = new SettingsService(Path.Combine(_root, "settings.json"));
     }
 
