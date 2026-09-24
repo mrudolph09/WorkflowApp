@@ -3,18 +3,34 @@
 .SYNOPSIS
     Acceptance gate for the Workflow application.
 .DESCRIPTION
-    Automates criteria A1-A6 and V1-V4 of the specification. Manual steps V5-V8 are listed at
-    the end and are not automated: they need a human watching a live terminal.
+    Automates criteria A1-A6, V1-V4 and the subtask checks V4a/V4b of the specification. Manual
+    steps V5-V21 are listed at the end and are not automated: they need a human watching a live
+    terminal.
+
+    This script requires PowerShell 7 (pwsh), not Windows PowerShell 5.1 (powershell).
+.PARAMETER WorkflowDirectory
+    Root of a checked-out Workflows tracking repository. Optional. When it is supplied, V4b checks
+    the shipped task_template against requirement 6.5; when it is not, V4b reports those checks as
+    SKIPPED rather than passing them, because the tracking repository is a separate checkout that
+    this repository cannot assume is present.
+.PARAMETER SkipConPtyTests
+    Excludes the two ConPtySessionTests that need a real pseudo-console from V2. A headless session
+    has no console, so the PTY yields no bytes and those two fail for environmental reasons, taking
+    `dotnet test`'s exit code with them. OFF by default: on a machine with an attached console they
+    are real coverage, and a gate that silently drops them is worth less than one that fails loudly.
 #>
 [CmdletBinding()]
 param(
-    [string] $Configuration = 'Release'
+    [string] $Configuration = 'Release',
+    [string] $WorkflowDirectory = '',
+    [switch] $SkipConPtyTests
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $solution = Join-Path $repo 'Workflow.sln'
 $failures = @()
+$skips = @()
 
 function Assert-True {
     param([bool] $Condition, [string] $Message)
@@ -27,40 +43,40 @@ function Assert-True {
     }
 }
 
+# A skipped check is NOT a passed check. Anything reported here was not verified by this run, and
+# the summary repeats it so a green exit cannot be mistaken for full coverage.
+function Write-Skip {
+    param([string] $Message, [string] $HowToRun)
+    Write-Host "  SKIP  $Message" -ForegroundColor Yellow
+    $script:skips += "$Message -- to check it: $HowToRun"
+}
+
 Write-Host 'V1  Build with warnings as errors'
 $buildLog = & dotnet build $solution -c $Configuration --nologo 2>&1
 Assert-True ($LASTEXITCODE -eq 0) 'dotnet build exits 0'
 Assert-True (-not ($buildLog | Select-String -Pattern ': warning ' -Quiet)) 'build produced no warnings'
 
 Write-Host 'V2  Tests'
-& dotnet test $solution -c $Configuration --nologo | Out-Host
+$testArguments = @('test', $solution, '-c', $Configuration, '--nologo')
+if ($SkipConPtyTests) {
+    # Exactly the two tests that need a live pseudo-console, not the whole class: the other five
+    # ConPtySessionTests pass headlessly and excluding them too would give up real coverage.
+    $testArguments += @(
+        '--filter',
+        'FullyQualifiedName!~ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput&FullyQualifiedName!~ConPtySessionTests.Start_EmitsTheLauncherFrameBeforeAnyInput')
+    Write-Skip 'ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput and .Start_EmitsTheLauncherFrameBeforeAnyInput excluded from V2' `
+        'run without -SkipConPtyTests on a machine with an attached console'
+}
+& dotnet @testArguments | Out-Host
 Assert-True ($LASTEXITCODE -eq 0) 'dotnet test exits 0'
 
-Write-Host 'V3  Output directory manifest'
-$out = Join-Path $repo "Workflow\bin\$Configuration\net8.0-windows"
-$required = @(
-    'Prompt\initial_prompt.md',
-    'Prompt\review_prompt.md',
-    'Prompt\resolve_review_prompt.md',
-    'Prompt\implementation_prompt.md',
-    'Assets\autoanswer.rules.json',
-    'Assets\Terminal\terminal.html',
-    'Assets\Terminal\terminal.js',
-    'Assets\Terminal\xterm.js',
-    'Assets\Terminal\xterm.css',
-    'Assets\Terminal\addon-fit.js'
-)
-foreach ($relative in $required) {
-    $path = Join-Path $out $relative
-    Assert-True ((Test-Path $path) -and ((Get-Item $path).Length -gt 0)) "present and non-empty: $relative"
-}
-
-Write-Host 'V4  Prompt templates'
 # Requirement 6.3/6.4: every shipped prompt is validated against ITS OWN token set, mirroring
 # PromptTemplateCatalog.AllowedTokens. A single flat list would accept {subtask} inside a phase
 # prompt and, before this catalog existed, rejected {tasktitel} in the two code-unreferenced
 # prompts. Keep the three layers and the eight entries below in step with
-# Workflow\Services\PromptTemplateCatalog.cs and Workflow\Services\PromptTemplateService.cs.
+# Workflow\Services\PromptTemplateCatalog.cs and Workflow\Services\PromptTemplateService.cs; V4
+# now checks that agreement mechanically instead of trusting it.
+# Defined here rather than in V4 because V3 derives its prompt manifest from the same catalog.
 $promptDir = Join-Path $repo 'Workflow\Prompt'
 $baseTokens = @('taskbezeichnung', 'taskbeschreibung', 'AppDirectory', 'spec_path', 'plan_path', 'review_path', 'done_path')
 $creationTokens = $baseTokens + @('workflow_path', 'tasktitel', 'task_path', 'subtask_path')
@@ -77,6 +93,27 @@ $promptCatalog = [ordered] @{
     'run_subtask.md'           = $runTokens
 }
 
+Write-Host 'V3  Output directory manifest'
+$out = Join-Path $repo "Workflow\bin\$Configuration\net8.0-windows"
+# The prompt entries are derived from $promptCatalog instead of being listed a second time. A
+# hand-written copy had already drifted: it named only the four phase prompts, so the four subtask
+# templates could be catalogued and token-checked in source yet fail to reach bin\ without any
+# check noticing.
+$required = @($promptCatalog.Keys | ForEach-Object { "Prompt\$_" }) + @(
+    'Assets\autoanswer.rules.json',
+    'Assets\Terminal\terminal.html',
+    'Assets\Terminal\terminal.js',
+    'Assets\Terminal\xterm.js',
+    'Assets\Terminal\xterm.css',
+    'Assets\Terminal\addon-fit.js'
+)
+foreach ($relative in $required) {
+    $path = Join-Path $out $relative
+    Assert-True ((Test-Path $path) -and ((Get-Item $path).Length -gt 0)) "present and non-empty: $relative"
+}
+
+Write-Host 'V4  Prompt templates'
+# The catalog itself is defined above V3, which shares it.
 foreach ($name in $promptCatalog.Keys) {
     Assert-True (Test-Path (Join-Path $promptDir $name)) "catalogued prompt ships: $name"
 }
@@ -108,14 +145,191 @@ Assert-True (Select-String -Path (Join-Path $promptDir 'review_prompt.md') -Patt
 Assert-True (Select-String -Path (Join-Path $promptDir 'implementation_prompt.md') -Pattern '\{done_path\}' -Quiet) `
     'implementation_prompt.md uses {done_path}'
 
+# The catalog above exists twice - here and in C# - with nothing mechanically tying the two lists
+# together, which is a recorded risk rather than a theoretical one. These checks tie them: a prompt
+# file or a substituted token added on one side and forgotten on the other now breaks a gate
+# loudly, instead of leaving this script silently validating against a stale set.
+$phaseSource = Get-Content -Raw -Path (Join-Path $repo 'Workflow\Models\PhaseCatalog.cs')
+$catalogSource = Get-Content -Raw -Path (Join-Path $repo 'Workflow\Services\PromptTemplateCatalog.cs')
+$variableSource = Get-Content -Raw -Path (Join-Path $repo 'Workflow\Services\PromptTemplateService.cs')
+
+$csharpPrompts = [regex]::Matches("$phaseSource`n$catalogSource", '"(?<f>[A-Za-z0-9_.-]+\.md)"') |
+    ForEach-Object { $_.Groups['f'].Value } |
+    Sort-Object -Unique
+$promptDrift = Compare-Object -ReferenceObject @($promptCatalog.Keys) -DifferenceObject @($csharpPrompts)
+if ($promptDrift) {
+    $detail = ($promptDrift | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ', '
+    Assert-True $false "prompt catalog agrees with PhaseCatalog + PromptTemplateCatalog ($detail)"
+}
+else {
+    Assert-True $true 'prompt catalog agrees with PhaseCatalog + PromptTemplateCatalog'
+}
+
+# Every token PromptVariables actually substitutes, read from its dictionary writes. The lookbehind
+# skips Regex `Groups["name"]`, which is not a substitution.
+$substituted = [regex]::Matches($variableSource, '(?<!Groups)\["(?<t>[A-Za-z_][A-Za-z0-9_]*)"\]') |
+    ForEach-Object { $_.Groups['t'].Value } |
+    Sort-Object -Unique
+$tokenDrift = Compare-Object -ReferenceObject @($runTokens | Sort-Object -Unique) -DifferenceObject @($substituted)
+if ($tokenDrift) {
+    $detail = ($tokenDrift | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ', '
+    Assert-True $false "token layers agree with the tokens PromptTemplateService substitutes ($detail)"
+}
+else {
+    Assert-True $true 'token layers agree with the tokens PromptTemplateService substitutes'
+}
+
+Write-Host 'V4a  Subtask prompt contract'
+# Requirements 6.2, 6.4, 6.6, 6.7 and 6.8. V4 proves each prompt uses only tokens it is ALLOWED to
+# use; it cannot prove the prompt still says the right thing. Every correction tasks 3.2 and 3.3
+# made could be undone without introducing a single unknown token, so it needs its own checks.
+
+# A catalogued prompt that is MISSING is already reported by V4 above. Reading it unguarded would
+# then throw under $ErrorActionPreference = 'Stop' and end the run before the FAILED summary: the
+# gate would still exit non-zero, but would never say what failed. An absent or empty file becomes
+# an empty string instead, so the checks below fail loudly and the summary still prints.
+function Read-PromptText {
+    param([string] $FileName)
+    $path = Join-Path $promptDir $FileName
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    $raw = Get-Content -Raw -Path $path
+    if ($null -eq $raw) { return '' }
+    return $raw
+}
+
+$creationPrompt = Read-PromptText 'create_subtasks.md'
+$runPrompt = Read-PromptText 'run_subtask.md'
+$subtaskPrompts = [ordered] @{
+    'create_subtasks.md' = $creationPrompt
+    'run_subtask.md'     = $runPrompt
+}
+
+foreach ($name in $subtaskPrompts.Keys) {
+    $text = $subtaskPrompts[$name]
+
+    # 6.6: every substituted path token is absolute, so one must never be prefixed with another.
+    # The source prompts wrote {workflow_path}\{subtask_path}\..., which double-prefixed every path.
+    Assert-True (-not ($text -match '\{(?:workflow_path|task_path)\}[\\/]\s*\{(?:task_path|subtask_path)\}')) `
+        "no duplicated path prefix in $name"
+
+    # 6.4: the completion flag is task-local and singular. A plural name misses the file the
+    # application reads; a flag under the shared tracking root reports the NEXT task complete at once.
+    Assert-True (-not ($text -match 'results\.json')) "no plural flag name in $name"
+    Assert-True (-not ($text -match '\{workflow_path\}[\\/]result\.json')) "no root-level flag in $name"
+
+    # 6.2: both files are published atomically through a temporary file, or the application reads a
+    # half-written one.
+    Assert-True ($text -match 'status\.json\.tmp') "$name requires atomic status.json publication"
+    Assert-True ($text -match 'result\.json\.tmp') "$name requires atomic result.json publication"
+
+    # 6.2: and the status payload is published BEFORE the flag, because the application reacts to
+    # the flag alone. Anchored on the RULE, not on order of first mention: first mention cannot
+    # fail for create_subtasks.md, whose file listing names status.json long before the rule, so an
+    # inverted rule would pass such a check. The two prompts are written in different languages, so
+    # the ordering keyword is accepted in either one, but the shape is the same in both and the
+    # match may not cross a blank line: the rule has to say it inside a single paragraph.
+    $span = '(?:[^\r\n]|\r?\n(?!\s*\r?\n))*?'
+    $orderRule = '(?i)\b(?:zuerst|first)\b' + $span + 'status\.json(?!\.tmp)' +
+        $span + '\b(?:danach|then)\b' + $span + 'result\.json(?!\.tmp)'
+    Assert-True ($text -match $orderRule) `
+        "$name states in one paragraph that status.json is published before result.json"
+
+    # The non-empty rule (6.5): a 0-byte flag is read as no flag at all.
+    Assert-True ($text -match '(?i)0\s*byte') "$name states the 0-byte flag rule"
+
+    # 6.8: task-wide findings live in the task folder, so {subtask_path} holds subtask folders only.
+    Assert-True ($text -match '\{task_path\}[\\/]findings\.md') `
+        "$name sends task-wide findings to {task_path}/findings.md"
+}
+
+# 6.7: the creation prompt publishes the ordered index as the task-local flag, and shows `pending`
+# as the initial status rather than the `complete` example the source prompt carried.
+Assert-True ($creationPrompt -match '\{task_path\}[\\/]result\.json') `
+    'create_subtasks.md publishes {task_path}/result.json'
+Assert-True ($creationPrompt -match '"subtasks"') `
+    'create_subtasks.md names the mandatory ordered "subtasks" field'
+Assert-True ($creationPrompt -match '"status"\s*:\s*"pending"') `
+    'create_subtasks.md shows the initial status pending'
+
+# 6.6: the only composition left to an agent is appending a subtask name to {subtask_path}. Angle
+# brackets mark the name the agent chooses, braces the values the application replaces.
+Assert-True ($creationPrompt -match '\{subtask_path\}[\\/]<subtask_title>') `
+    'create_subtasks.md composes only {subtask_path}/<subtask_title>'
+Assert-True ($runPrompt -match '\{subtask_path\}[\\/]\{subtask_title\}') `
+    'run_subtask.md composes only {subtask_path}/{subtask_title}'
+
+Write-Host 'V4b  Tracking contract'
+# Requirements 6.1 and 6.5. The tracking repository is a SEPARATE checkout, so only two things can
+# be asserted honestly from here: the application-side names that define the contract, which do live
+# in this repository, and the shipped template - the latter only when a tracking directory is
+# actually supplied. A template check that "passed" whenever that repository is absent would be
+# worse than no check at all.
+$subtaskPathsSource = Get-Content -Raw -Path (Join-Path $repo 'Workflow\Models\SubtaskPaths.cs')
+
+# Every tracking file name the prompts above teach must be a name SubtaskPaths actually composes.
+# Renaming one on either side without the other is the failure this guards; nothing else connects
+# the prose of the prompts to the C# path set.
+foreach ($literal in @('"task_template"', '"subtasks"', '"subtask.md"', '"status.json"', '"result.json"')) {
+    Assert-True ($subtaskPathsSource.Contains($literal)) "SubtaskPaths composes $literal"
+}
+Assert-True ($subtaskPathsSource -match 'TemplateFolderName\s*=\s*"task_template"') `
+    'SubtaskPaths.TemplateFolderName is task_template'
+
+$exampleSubtask = 'ST-001-subtask-template'
+if ([string]::IsNullOrWhiteSpace($WorkflowDirectory)) {
+    Write-Skip 'tracking-repository template (requirement 6.5) not checked' `
+        'pass -WorkflowDirectory <root of the checked-out Workflows repository>'
+}
+else {
+    $template = Join-Path $WorkflowDirectory 'task_template'
+    Assert-True (Test-Path -Path $template -PathType Container) `
+        "tracking template folder exists: $template"
+
+    # 6.5: the three files whose absence or emptiness teaches the wrong contract. The application's
+    # non-empty-file rule reads a 0-byte example as no flag at all.
+    foreach ($relative in @('result.json', "subtasks\$exampleSubtask\status.json", "subtasks\$exampleSubtask\result.json")) {
+        $path = Join-Path $template $relative
+        Assert-True ((Test-Path -Path $path -PathType Leaf) -and ((Get-Item $path).Length -gt 0)) `
+            "template file present and non-empty: task_template\$relative"
+    }
+
+    $statusPath = Join-Path $template "subtasks\$exampleSubtask\status.json"
+    Assert-True ((Test-Path -Path $statusPath -PathType Leaf) -and
+        ((Get-Content -Raw -Path $statusPath) -match '"status"\s*:\s*"pending"')) `
+        'template status.json shows the initial status pending'
+
+    # 6.1: order comes from the index, never from a directory listing, so the one folder that exists
+    # must be the one the index names.
+    $index = $null
+    try {
+        $index = Get-Content -Raw -Path (Join-Path $template 'result.json') | ConvertFrom-Json
+    }
+    catch {
+        $index = $null
+    }
+    Assert-True ($null -ne $index -and $null -ne $index.subtasks -and @($index.subtasks) -contains $exampleSubtask) `
+        "template result.json lists $exampleSubtask in its ordered subtasks array"
+}
+
 Write-Host ''
+if ($skips.Count -gt 0) {
+    Write-Host "SKIPPED: $($skips.Count) check group(s) - NOT verified by this run" -ForegroundColor Yellow
+    $skips | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+    Write-Host ''
+}
+
 if ($failures.Count -gt 0) {
     Write-Host "FAILED: $($failures.Count) check(s)" -ForegroundColor Red
     $failures | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
     exit 1
 }
 
-Write-Host 'All automated checks passed.' -ForegroundColor Green
+if ($skips.Count -gt 0) {
+    Write-Host 'All automated checks that were run passed; see SKIPPED above.' -ForegroundColor Green
+}
+else {
+    Write-Host 'All automated checks passed.' -ForegroundColor Green
+}
 Write-Host ''
 Write-Host 'Remaining manual steps (V5-V21) - see specification section 15.3:'
 Write-Host '  V5  Run the full four-phase pipeline against a scratch directory.'
