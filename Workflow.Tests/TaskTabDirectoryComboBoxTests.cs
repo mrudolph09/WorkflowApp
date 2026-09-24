@@ -31,7 +31,7 @@ public sealed class TaskTabDirectoryComboBoxTests : IDisposable
 
     private sealed class Picker : IDirectoryPickerService
     {
-        public string? PickDirectory(string? initialDirectory) => null;
+        public string? PickDirectory(string? initialDirectory, string title = IDirectoryPickerService.DefaultTitle) => null;
     }
 
 #pragma warning disable CA2000

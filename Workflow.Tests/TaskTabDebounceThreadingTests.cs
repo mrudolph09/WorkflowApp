@@ -42,7 +42,7 @@ public sealed class TaskTabDebounceThreadingTests : IDisposable
 
     private sealed class StubDirectoryPicker : IDirectoryPickerService
     {
-        public string? PickDirectory(string? initialDirectory) => null;
+        public string? PickDirectory(string? initialDirectory, string title = IDirectoryPickerService.DefaultTitle) => null;
     }
 
 #pragma warning disable CA2000

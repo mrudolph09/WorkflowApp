@@ -100,7 +100,7 @@ public sealed class TaskTabSubtaskRecoveryTests : IDisposable
 
     private sealed class StubDirectoryPicker : IDirectoryPickerService
     {
-        public string? PickDirectory(string? initialDirectory) => null;
+        public string? PickDirectory(string? initialDirectory, string title = IDirectoryPickerService.DefaultTitle) => null;
     }
 
     // -----------------------------------------------------------------------------------------

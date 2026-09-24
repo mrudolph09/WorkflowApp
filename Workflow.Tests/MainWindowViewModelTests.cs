@@ -57,7 +57,7 @@ public sealed class MainWindowViewModelTests : IDisposable
 
         private sealed class StubPicker : IDirectoryPickerService
         {
-            public string? PickDirectory(string? initialDirectory) => null;
+            public string? PickDirectory(string? initialDirectory, string title = IDirectoryPickerService.DefaultTitle) => null;
         }
     }
 

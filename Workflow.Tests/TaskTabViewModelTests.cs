@@ -87,7 +87,7 @@ public sealed class TaskTabViewModelTests : IDisposable
 
     private sealed class StubDirectoryPicker(string? result) : IDirectoryPickerService
     {
-        public string? PickDirectory(string? initialDirectory) => result;
+        public string? PickDirectory(string? initialDirectory, string title = IDirectoryPickerService.DefaultTitle) => result;
     }
 
     // --- Regressions pinned by the review -------------------------------------------------
