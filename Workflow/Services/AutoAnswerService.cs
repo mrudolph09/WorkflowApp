@@ -19,6 +19,8 @@ public sealed class AutoAnswerService : IAutoAnswerService
     };
 
     private readonly List<(AutoAnswerRule Rule, Regex? Regex)> _compiled = [];
+    private readonly Regex? _readyRegex;
+    private readonly Regex? _pastePendingRegex;
 
     /// <summary>Creates the service.</summary>
     /// <param name="shippedRulesPath">Path to Assets\autoanswer.rules.json in the output directory.</param>
@@ -46,6 +48,73 @@ public sealed class AutoAnswerService : IAutoAnswerService
             }
 
             _compiled.Add((rule, regex));
+        }
+
+        if (!string.IsNullOrWhiteSpace(RuleSet.ReadyPattern))
+        {
+            try
+            {
+                _readyRegex = new Regex(RuleSet.ReadyPattern, RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
+            }
+            catch (ArgumentException)
+            {
+                // A broken ready pattern must not take the app down; readiness then falls back to
+                // "always ready", i.e. the pre-ready-gate behaviour.
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(RuleSet.PastePendingPattern))
+        {
+            try
+            {
+                _pastePendingRegex = new Regex(RuleSet.PastePendingPattern, RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
+            }
+            catch (ArgumentException)
+            {
+                // A broken pattern must not take the app down; the submit loop then falls back to
+                // its output-count verification.
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public bool IsLauncherReady(string screenText)
+    {
+        if (_readyRegex is null)
+        {
+            return true;
+        }
+
+        if (string.IsNullOrEmpty(screenText))
+        {
+            return false;
+        }
+
+        try
+        {
+            return _readyRegex.IsMatch(screenText);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
+    public bool IsPastePending(string screenText)
+    {
+        if (_pastePendingRegex is null || string.IsNullOrEmpty(screenText))
+        {
+            return false;
+        }
+
+        try
+        {
+            return _pastePendingRegex.IsMatch(screenText);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return false;
         }
     }
 
@@ -112,7 +181,9 @@ public sealed class AutoAnswerService : IAutoAnswerService
             dto.PasteQuietPeriodMs > 0 ? dto.PasteQuietPeriodMs : 800,
             dto.PasteSettleTimeoutMs > 0 ? dto.PasteSettleTimeoutMs : 15000,
             dto.SubmitVerifyMs > 0 ? dto.SubmitVerifyMs : 1500,
-            dto.MaxSubmitAttempts > 0 ? dto.MaxSubmitAttempts : 2);
+            dto.MaxSubmitAttempts > 0 ? dto.MaxSubmitAttempts : 4,
+            dto.ReadyPattern ?? string.Empty,
+            dto.PastePendingPattern ?? string.Empty);
     }
 
     private sealed class RuleSetDto
@@ -140,6 +211,12 @@ public sealed class AutoAnswerService : IAutoAnswerService
 
         [JsonPropertyName("maxSubmitAttempts")]
         public int MaxSubmitAttempts { get; set; } = 2;
+
+        [JsonPropertyName("readyPattern")]
+        public string? ReadyPattern { get; set; }
+
+        [JsonPropertyName("pastePendingPattern")]
+        public string? PastePendingPattern { get; set; }
 
         [JsonPropertyName("rules")]
         public List<RuleDto>? Rules { get; set; }

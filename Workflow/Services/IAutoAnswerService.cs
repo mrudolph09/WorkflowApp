@@ -13,4 +13,21 @@ public interface IAutoAnswerService
     /// <param name="alreadyFiredRuleIds">Rule identifiers already used in this phase.</param>
     /// <returns>The matching rule, or null.</returns>
     public AutoAnswerRule? Match(string screenText, IReadOnlySet<string> alreadyFiredRuleIds);
+
+    /// <summary>
+    /// True when the rendered screen shows the launcher's interactive input is ready to accept the
+    /// prompt. When no ready pattern is configured this returns true so behaviour is unchanged.
+    /// </summary>
+    /// <param name="screenText">The last rendered rows of the terminal.</param>
+    /// <returns>Whether the prompt may now be pasted.</returns>
+    public bool IsLauncherReady(string screenText);
+
+    /// <summary>
+    /// True when the rendered screen still shows a pasted-but-unsubmitted prompt in the input box.
+    /// When no pattern is configured this returns false, so the submit loop keeps its previous
+    /// output-based verification.
+    /// </summary>
+    /// <param name="screenText">The last rendered rows of the terminal.</param>
+    /// <returns>Whether an unsubmitted paste is still in the input.</returns>
+    public bool IsPastePending(string screenText);
 }

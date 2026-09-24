@@ -32,6 +32,13 @@ public sealed class FakeTerminalController : ITerminalController
     /// <summary>Queues the text that the next SnapshotAsync call returns.</summary>
     public void QueueSnapshot(string text) => _snapshots.Enqueue(text);
 
+    /// <summary>
+    /// Sticky screen returned by SnapshotAsync whenever the queue is empty. Lets a test hold the
+    /// terminal on one screen (e.g. "not ready", or a pasted-but-unsubmitted prompt) and then flip
+    /// it, without counting individual snapshot calls.
+    /// </summary>
+    public string? CurrentSnapshot { get; set; }
+
     /// <summary>Simulates a chunk of launcher output arriving on the live session.</summary>
     public void EmitOutput()
     {
@@ -52,7 +59,7 @@ public sealed class FakeTerminalController : ITerminalController
     public void ClearScreen() => ClearCount++;
 
     public Task<string> SnapshotAsync(int lines, CancellationToken cancellationToken) =>
-        Task.FromResult(_snapshots.Count > 0 ? _snapshots.Dequeue() : string.Empty);
+        Task.FromResult(_snapshots.Count > 0 ? _snapshots.Dequeue() : CurrentSnapshot ?? string.Empty);
 
     public void Send(string text)
     {

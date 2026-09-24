@@ -5,20 +5,34 @@
   "maxAnswersPerPhase": 5,
   "pasteQuietPeriodMs": 800,
   "pasteSettleTimeoutMs": 15000,
-  "submitVerifyMs": 1500,
-  "maxSubmitAttempts": 2,
+  "submitVerifyMs": 1200,
+  "maxSubmitAttempts": 8,
+  "readyPattern": "(?is)(\\? for shortcuts|shift\\+tab to cycle|esc to interrupt|ask codex to do anything|context \\d+% used)",
+  "pastePendingPattern": "(?is)paste again to expand",
   "rules": [
     {
       "id": "claude-bypass-permissions",
       "pattern": "(?is)bypass permissions mode",
-      "send": "2\\r",
-      "description": "claude --dangerously-skip-permissions warning. Option 2 is 'Yes, I accept'. The default selection is 'No, exit', so sending Enter alone would abort the run."
+      "send": "\\e[B\\r",
+      "description": "claude --dangerously-skip-permissions warning. 'No, exit' is preselected and 'Yes, I accept' is the row below it, so the answer is Arrow-Down then Enter. Enter alone would abort the run; the digit hotkey '2' proved unreliable."
+    },
+    {
+      "id": "claude-trust-folder-safety-check",
+      "pattern": "(?is)(quick safety check|is this a project you created or one you trust|yes, i trust this folder)",
+      "send": "\\e[B\\r",
+      "description": "Trust dialog of Claude Code 2.1.x ('Quick safety check: Is this a project you created or one you trust?'). 'No, exit' is preselected and 'Yes, I trust this folder' is the row below, so the answer is Arrow-Down then Enter. Enter alone exits Claude."
     },
     {
       "id": "claude-trust-folder",
       "pattern": "(?is)do you trust the files in this folder",
       "send": "\\r",
       "description": "Trust dialog. Option 1 'Yes, proceed' is preselected, so Enter is correct."
+    },
+    {
+      "id": "codex-trust-directory",
+      "pattern": "(?is)do\\s+you\\s+trust\\s+the\\s+contents\\s+of\\s+this\\s+directory",
+      "send": "\\r",
+      "description": "Codex CLI startup gate, shown in every directory not yet listed under [projects.'...'] in ~/.codex/config.toml; '--yolo' does not skip it. Captured screen: '> 1. Yes, continue / 2. No, quit / Press enter to continue' - the affirmative row is preselected, so Enter is correct. The word gaps are \\s+ because the snapshot is a wrapped 120-column buffer and the sentence spans rows."
     },
     {
       "id": "codex-yolo-warning",

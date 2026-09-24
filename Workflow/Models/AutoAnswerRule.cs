@@ -15,8 +15,21 @@ public sealed record AutoAnswerRule(string Id, string Pattern, string Send, stri
 /// <param name="Rules">Rules in evaluation order; the first match wins.</param>
 /// <param name="PasteQuietPeriodMs">Terminal silence after the paste block that counts as "drained".</param>
 /// <param name="PasteSettleTimeoutMs">Ceiling on waiting for that silence.</param>
-/// <param name="SubmitVerifyMs">How long to wait for output proving the carriage return was accepted.</param>
+/// <param name="SubmitVerifyMs">How long to wait after each carriage return before checking whether the prompt was submitted.</param>
 /// <param name="MaxSubmitAttempts">Total carriage returns written, including the first.</param>
+/// <param name="ReadyPattern">
+/// Regular expression that identifies the launcher's interactive input being ready to receive the
+/// prompt. Until the rendered screen matches it, a quiet terminal with no matching answer rule is
+/// treated as "still starting up", not as "ready" — this is what stops the prompt being pasted
+/// into a shell while Claude Code / Codex is still cold-starting (SPEC section 7.3).
+/// </param>
+/// <param name="PastePendingPattern">
+/// Regular expression that identifies a pasted-but-unsubmitted prompt still sitting in the input
+/// box (Claude Code collapses a multi-line paste to "[Pasted text #1 …] paste again to expand").
+/// The submit loop presses Enter until this marker is gone, because a single carriage return after
+/// a bracketed paste is treated as a newline, not as submit, in the pwsh → yo → Claude chain
+/// (SPEC section 9.3).
+/// </param>
 public sealed record AutoAnswerRuleSet(
     int Version,
     int QuietPeriodMs,
@@ -26,4 +39,6 @@ public sealed record AutoAnswerRuleSet(
     int PasteQuietPeriodMs = 800,
     int PasteSettleTimeoutMs = 15000,
     int SubmitVerifyMs = 1500,
-    int MaxSubmitAttempts = 2);
+    int MaxSubmitAttempts = 4,
+    string ReadyPattern = "",
+    string PastePendingPattern = "");
