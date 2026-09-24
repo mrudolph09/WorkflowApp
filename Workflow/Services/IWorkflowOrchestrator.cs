@@ -6,7 +6,7 @@ namespace Workflow.Services;
 /// <param name="Paths">The task's path set.</param>
 /// <param name="TaskDescription">Plain-text task description fed into prompt 1.</param>
 /// <param name="Terminal">The terminal this run drives.</param>
-/// <param name="ManualSignal">Signal raised by the 'Phase abschliessen' / 'Task abschliessen' buttons.</param>
+/// <param name="ManualSignal">Signal raised by the 'Task abschliessen' button.</param>
 /// <param name="Progress">Receives every phase status change.</param>
 /// <param name="StartPhase">
 /// The phase the run begins at. Everything before it is skipped and never reported - a resumed

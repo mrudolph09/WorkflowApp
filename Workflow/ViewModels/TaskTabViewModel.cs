@@ -242,7 +242,6 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         _activePhase = progress.Status == PhaseStatus.Active ? progress.Phase : null;
 
         CompleteTaskCommand.NotifyCanExecuteChanged();
-        CompleteCurrentPhaseCommand.NotifyCanExecuteChanged();
 
         // _activePhase is a plain field, so nothing else announces the editing lock. Without these
         // two lines the XAML IsEnabled bindings would be evaluated once and never again, and the
@@ -926,11 +925,6 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             WorkflowDirectory = chosen;
         }
     }
-
-    private bool CanCompleteCurrentPhase() => IsRunning && _activePhase is not null;
-
-    [RelayCommand(CanExecute = nameof(CanCompleteCurrentPhase))]
-    private void CompleteCurrentPhase() => _manualSignal.Signal();
 
     private bool CanCompleteTask() => IsRunning && _activePhase == WorkflowPhase.Implementation;
 

@@ -7,7 +7,6 @@ namespace Workflow.ViewModels;
 public sealed partial class PhaseIndicatorViewModel : ObservableObject
 {
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsActive))]
     private PhaseStatus _status = PhaseStatus.Pending;
 
     /// <summary>Creates the indicator from a phase definition.</summary>
@@ -25,7 +24,4 @@ public sealed partial class PhaseIndicatorViewModel : ObservableObject
 
     /// <summary>German label shown under the icon.</summary>
     public string DisplayName { get; }
-
-    /// <summary>True while this phase is running; shows the 'Phase abschliessen' button.</summary>
-    public bool IsActive => Status == PhaseStatus.Active;
 }

@@ -20,16 +20,5 @@
                        Text="{Binding DisplayName}"
                        Foreground="{Binding Status, Converter={StaticResource PhaseStatusToBrushConverter}}" />
         </StackPanel>
-
-        <Button Margin="30,2,0,0"
-                Padding="0"
-                HorizontalAlignment="Left"
-                Style="{StaticResource MaterialDesignFlatButton}"
-                FontSize="10"
-                Content="Phase abschliessen"
-                ToolTip="Diese Phase manuell beenden, falls die Artefakte nicht erkannt werden"
-                Visibility="{Binding IsActive, Converter={StaticResource BooleanToVisibilityConverter}}"
-                Command="{Binding DataContext.CompleteCurrentPhaseCommand,
-                                  RelativeSource={RelativeSource AncestorType=UserControl, AncestorLevel=2}}" />
     </StackPanel>
 </UserControl>
