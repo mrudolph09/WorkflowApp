@@ -620,6 +620,73 @@ public sealed class SubtaskLedgerTests : IDisposable
         Assert.Equal(0, snapshot.Completed);
     }
 
+    // Same table row, the other half of "unfinished": the entries above have no status.json at all,
+    // so they only prove the description rule for an ABSENT payload. The design makes the rule
+    // belong to every unfinished entry - "every other parsed value ... and an absent payload leave
+    // the entry unfinished, and an unfinished entry then needs a usable description" - so a payload
+    // that parses to a non-decisive value must be held to it too, while a `complete` payload in the
+    // very same fixture is not.
+    //
+    // Asymmetric in every dimension this step evaluates: 6 entries, 1 Complete, 3 Failed, 2 Pending
+    // - four distinct numbers - the declared order is not alphabetical, and the pending count is
+    // pinned structurally so it cannot be absorbed by either decisive counter.
+    [Fact]
+    public void TryRead_FailsAnUnfinishedEntryWhoseParsedStatusLeavesItWithoutAUsableDescription()
+    {
+        WriteIndexOf(
+            "ST-004-verify", "ST-001-parse", "ST-006-ship", "ST-003-persist", "ST-002-render", "ST-005-audit");
+
+        // Unrecognised value, folder never created: unfinished with nothing to attempt.
+        WriteStatus("ST-004-verify", """{ "status": "running" }""");
+
+        // The literal `pending` of a fresh decomposition, with the description deleted afterwards.
+        WriteStatus("ST-001-parse", """{ "status": "pending" }""");
+
+        // Present but blank: requirement 2.10 asks for a USABLE description.
+        WriteStatus("ST-006-ship", """{ "status": "in_progress" }""");
+        WriteDescription("ST-006-ship", " \r\n\t ");
+
+        WriteStatus("ST-003-persist", """{ "status": "queued" }""");
+        WriteDescription("ST-003-persist");
+
+        WriteStatus("ST-002-render", """{ "status": "done" }""");
+        WriteDescription("ST-002-render");
+
+        // The contrast that keeps the rule where the design puts it: completion outranks the very
+        // same missing description, so this entry stays Complete inside a fixture that fails three.
+        WriteStatus("ST-005-audit", """{ "status": "complete" }""");
+
+        var snapshot = SubtaskLedger.TryRead(_paths);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(
+            [
+                SubtaskStatus.Failed,
+                SubtaskStatus.Failed,
+                SubtaskStatus.Failed,
+                SubtaskStatus.Pending,
+                SubtaskStatus.Pending,
+                SubtaskStatus.Complete,
+            ],
+            snapshot.States.Select(state => state.Status));
+
+        Assert.Equal(6, snapshot.Total);
+        Assert.Equal(1, snapshot.Completed);
+        Assert.Equal(3, snapshot.Failed);
+        Assert.Equal(snapshot.Total, snapshot.Completed + snapshot.Failed + 2);
+
+        // Each failure explains itself by naming its own entry, which the shared
+        // unreadable-or-malformed-status reason never does: the description is what is missing here,
+        // not the payload, and the payload parsed perfectly well.
+        Assert.All(
+            snapshot.States.Where(state => state.Status == SubtaskStatus.Failed),
+            state => Assert.Contains(state.Title, state.FailReason ?? string.Empty, StringComparison.Ordinal));
+
+        Assert.All(
+            snapshot.States.Where(state => state.Status != SubtaskStatus.Failed),
+            state => Assert.Null(state.FailReason));
+    }
+
     // The precedence rule, stated once in the design and pinned here in both of its forms:
     // a completion status outranks a deleted description AND a never-published flag (4.4).
     [Theory]
