@@ -31,6 +31,11 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     private readonly IReadOnlyList<string> _startupErrors;
 
     private CancellationTokenSource? _run;
+
+    // The handle on the in-flight run. StartWorkflow deliberately does not await it - see
+    // RunAsync - but requirement 5.3 needs SOMETHING to await, so the task is kept rather than
+    // discarded. It is never awaited from Dispose: teardown cancels and moves on.
+    private Task? _runTask;
     private CancellationTokenSource? _folderDebounceSource;
     private string? _folderOnDisk;
     private WorkflowPhase? _activePhase;
@@ -829,7 +834,11 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             // latch a stale payload - besides touching observable properties off the UI thread.
             new Progress<SubtaskProgress>(SubtaskIndicator.Apply));
 
-        _ = RunAsync(request, _run.Token);
+        // Kept, not discarded: CompleteTaskAsync awaits this handle so the tab closes only after the
+        // run has ended (requirement 5.3). Still not awaited HERE - StartWorkflow must return to the
+        // dispatcher at once - so on every path except that await, RunAsync's own catch list is the
+        // only error surface. On that one path it is not: see CompleteTaskAsync's remarks.
+        _runTask = RunAsync(request, _run.Token);
     }
 
     // StartWorkflow deliberately does not await this task, so every failure it can produce has to
@@ -928,8 +937,98 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     private bool CanCompleteTask() => IsRunning && _activePhase == WorkflowPhase.Implementation;
 
+    /// <summary>
+    /// The <c>Task abschliessen</c> action: requirement 5.3 in its stated order - signal the run,
+    /// await its end, record the explicit manual override - Implementation <c>Completed</c> plus
+    /// <c>ImplementationCompletedManually</c>, both halves of design decision 6b - and only then
+    /// ask for the tab to close.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The signal is the only thing that ends the run here, and it does end it: every session
+    /// races its artefact watcher against this same <see cref="ManualPhaseSignal"/>, and the
+    /// subtask loop re-asks the signal after each entry and returns when it has been raised. The
+    /// signal is re-armed once per phase, never inside the loop, so it stays raised until the run
+    /// is out. This stays the ONLY caller of <see cref="ManualPhaseSignal.Signal"/> in the
+    /// application - that single-caller fact is what makes requirement 5.2 structural.
+    /// </para>
+    /// <para>
+    /// The journal writes come AFTER the await and not before, which is both what requirement
+    /// 5.3 lists and what keeps them safe: while the run is winding down the orchestrator still
+    /// writes the journal itself - <c>SaveSubtaskSettings</c>, and
+    /// <c>RecordPhase(Implementation, Completed)</c> if the final read happens to come back
+    /// all-complete - and every one of those is a read-modify-write of the whole record from disk.
+    /// Writing the override first would put it in a race with those; writing it last cannot lose.
+    /// </para>
+    /// <para>
+    /// BOTH halves of design decision 6b are written here, and both are load-bearing. The flag
+    /// alone does not satisfy requirement 5.4's recovery half: <c>PhaseReconciliation.Reconcile</c>
+    /// only consults the evidence - and therefore only ever reads
+    /// <c>ImplementationCompletedManually</c> - for an entry whose recorded status is already
+    /// <see cref="PhaseStatus.Completed"/>, and <c>FirstIncomplete</c> hands an
+    /// <see cref="PhaseStatus.Active"/> entry straight back as the phase to resume. In subtask mode
+    /// the orchestrator deliberately records no completion of its own unless the final ledger read
+    /// is all-complete, so this <c>RecordPhase</c> is the only writer of that half - recovery gets
+    /// nothing for free from the recovery work of task 5.1. Requirement 5.4's presentation half,
+    /// by contrast, does need nothing here: the indicator is driven by the counts alone, so a
+    /// manual override leaves it showing what the ledger reported.
+    /// </para>
+    /// <para>
+    /// What awaiting <c>_runTask</c> does and does not expose. It does NOT expose cancellation:
+    /// <c>RunAsync</c> catches <see cref="OperationCanceledException"/> itself, so a cancelled run
+    /// completes that task successfully and no such exception ever reaches this method. It DOES
+    /// expose anything outside <c>RunAsync</c>'s catch list: without the await such a fault was
+    /// merely an unobserved task exception, whereas the await re-throws it inside the generated
+    /// <see cref="IAsyncRelayCommand"/>, which rethrows onto the UI thread - and the journal writes
+    /// and the <see cref="Close"/> below are then skipped. That catch list is exhaustive for the
+    /// paths this design specifies, so the case is believed unreachable; it is stated rather than
+    /// called unchanged, because the await genuinely changed where such a fault would land.
+    /// </para>
+    /// <para>
+    /// A second click while the first invocation is still awaiting is refused rather than queued.
+    /// The generated <see cref="IAsyncRelayCommand"/> defaults to <c>AllowConcurrentExecutions =
+    /// false</c>, so its <c>CanExecute</c> is false for as long as the execution task is pending
+    /// and <see cref="System.Windows.Controls.Primitives.ButtonBase"/> - the only caller - keeps
+    /// the button disabled. That guard sits on <c>CanExecute</c>, not on <c>Execute</c>, so it is
+    /// the framework that enforces it; nothing here calls the command directly. Allowing
+    /// concurrency instead would buy nothing - the signal is idempotent - and would cost a second
+    /// <see cref="CloseRequested"/> for one user action.
+    /// </para>
+    /// </remarks>
     [RelayCommand(CanExecute = nameof(CanCompleteTask))]
-    private void CompleteTask() => _manualSignal.Signal();
+    private async Task CompleteTaskAsync()
+    {
+        _manualSignal.Signal();
+
+        var running = _runTask;
+        if (running is not null)
+        {
+            await running;
+        }
+
+        // CanCompleteTask required IsRunning, so both are set; the guard mirrors
+        // NotifyClosedByUser and keeps a composed path out of an impossible state.
+        if (!string.IsNullOrWhiteSpace(WorkingDirectory) && !string.IsNullOrWhiteSpace(TaskName))
+        {
+            var paths = new TaskPaths(WorkingDirectory, TaskName);
+
+            // RecordPhase FIRST, deliberately: it creates the journal when none exists, whereas
+            // SetImplementationCompletedManually is a documented no-op without one. In the other
+            // order the override could be dropped on the floor for a task whose journal never got
+            // written. Two calls rather than one because RecordPhase touches a single phase entry
+            // (ITaskStateStore.ReplacePhases remarks) and the flag lives outside the phase array;
+            // each is its own whole-record read-modify-write, and the pair is not atomic. A crash
+            // between them leaves Implementation Completed with the flag clear, which the next
+            // reconciliation demotes off the unfinished ledger - the task is offered again, which
+            // is the pre-override behaviour and never a false completion.
+            _stateStore.RecordPhase(paths, WorkflowPhase.Implementation, PhaseStatus.Completed);
+            _stateStore.SetImplementationCompletedManually(paths, completedManually: true);
+        }
+
+        // The same event the close button raises, so MainWindowViewModel's existing handling -
+        // which dismisses a recovered task - applies unchanged (design "Presentation and Recovery").
+        Close();
+    }
 
     [RelayCommand]
     private void Close() => CloseRequested?.Invoke(this, EventArgs.Empty);
