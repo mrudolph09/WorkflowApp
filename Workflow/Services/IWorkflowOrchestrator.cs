@@ -14,12 +14,20 @@ namespace Workflow.Services;
 /// A defaulted positional parameter, so existing construction sites are unaffected.
 /// </param>
 /// <param name="Subtasks">
-/// The subtask configuration, captured as one immutable snapshot when phase 4 is entered
-/// (requirement 1.6). Null - the default - means subtask mode is disabled, so existing construction
-/// sites keep describing a normal implementation run without being edited. The request carries the
-/// snapshot and never <see cref="ISubtaskConfiguration"/>: the orchestrator has nothing it could
-/// re-read, which is what stops the enabled flag and the directory being observed from two different
-/// moments.
+/// The subtask configuration as a <em>deferred, once-only</em> capture, forced when phase 4 is
+/// entered and never before (requirement 1.6). Null - the default - means subtask mode is disabled,
+/// so existing construction sites keep describing a normal implementation run without being edited.
+/// <para>
+/// Deferred rather than already taken, because requirement 1.6 lets the user change the
+/// configuration while phases 1-3 run: a snapshot taken when the request was built would freeze a
+/// choice the user was still entitled to revise. <see cref="Lazy{T}"/> rather than a delegate,
+/// because the orchestrator reads this member twice - in the phase-4 guard and again to compose the
+/// tracking paths - and a re-readable member would let the enabled flag and the directory be
+/// observed from two different moments. Forcing it yields the same immutable
+/// <see cref="SubtaskConfiguration"/> record forever, so nothing downstream of phase-4 entry can
+/// ever see a second pair, and the request still never carries
+/// <see cref="ISubtaskConfiguration"/> itself.
+/// </para>
 /// </param>
 /// <param name="SubtaskProgress">
 /// Receives every subtask progress report. Null - the default - when nothing is listening, which is
@@ -32,7 +40,7 @@ public sealed record WorkflowRunRequest(
     ManualPhaseSignal ManualSignal,
     IProgress<PhaseProgress> Progress,
     WorkflowPhase StartPhase = WorkflowPhase.Specification,
-    SubtaskConfiguration? Subtasks = null,
+    Lazy<SubtaskConfiguration>? Subtasks = null,
     IProgress<SubtaskProgress>? SubtaskProgress = null);
 
 /// <summary>Drives a task through the four phases.</summary>

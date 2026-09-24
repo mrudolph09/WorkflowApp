@@ -7,7 +7,9 @@ namespace Workflow.Services;
 /// </summary>
 /// <remarks>
 /// This interface exists <em>only</em> as the capture source for
-/// <see cref="SubtaskConfiguration.Capture(ISubtaskConfiguration)"/> (design issue 3 resolved).
+/// <see cref="SubtaskConfiguration.Capture(ISubtaskConfiguration)"/> (design issue 3 resolved),
+/// reached either directly or through the deferred form
+/// <see cref="SubtaskConfiguration.Deferred(ISubtaskConfiguration)"/> the run carries.
 /// Nothing downstream of phase-4 entry may hold it: the orchestrator receives the captured
 /// <see cref="SubtaskConfiguration"/> record instead, which is what makes it impossible to observe
 /// the enabled flag at one moment and the tracking directory at another (requirement 1.6).
@@ -88,6 +90,70 @@ public sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirector
         ArgumentNullException.ThrowIfNull(source);
 
         return new SubtaskConfiguration(source.SubtasksEnabled, source.WorkflowDirectory);
+    }
+
+    /// <summary>
+    /// Hands the run a capture that has not been taken yet, so that <see cref="Capture"/> runs when
+    /// the run first needs the answer - phase-4 entry - rather than when the run is built.
+    /// </summary>
+    /// <param name="source">The tab's live, editable state.</param>
+    /// <returns>
+    /// A once-only deferred capture. Forcing it the first time reads
+    /// <paramref name="source"/>; every later force returns that same immutable record.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="source"/> is null.</exception>
+    /// <remarks>
+    /// <para>
+    /// Requirement 1.6 puts the snapshot at <em>phase-4 entry</em>, not at run entry: while phases
+    /// 1-3 run the user may still tick the checkbox or pick a different directory, and those edits
+    /// must reach the run. Capturing when the request is built would freeze the configuration
+    /// before the user was finished with it. Deferring the call is what closes that gap, and the
+    /// phase-4 guard in <c>WorkflowOrchestrator.RunPhaseAsync</c> - whose <c>&amp;&amp;</c>
+    /// short-circuits on the phase check - is what keeps a run that never reaches implementation
+    /// from reading the tab at all.
+    /// </para>
+    /// <para>
+    /// <see cref="Lazy{T}"/> rather than a bare delegate, and this is the load-bearing part: the
+    /// orchestrator touches the member twice, once in that guard and once to compose the tracking
+    /// paths, so a delegate would re-read the tab and could observe the enabled flag and the
+    /// directory from two different moments - exactly the defect the snapshot exists to prevent
+    /// (task 2.3). The default <see cref="Lazy{T}"/> factory constructor uses
+    /// <see cref="System.Threading.LazyThreadSafetyMode.ExecutionAndPublication"/>, so "captured at
+    /// most once" is a property of the type rather than of how carefully callers use it.
+    /// </para>
+    /// <para>
+    /// The null check runs here, where the request is built, and not inside the deferred factory:
+    /// the factory is invoked deep inside a run nobody awaits at the call site, so a programming
+    /// error must fail while the stack still names the caller.
+    /// </para>
+    /// <para>
+    /// <strong>Which thread reads the tab.</strong> In the application the factory runs on the WPF
+    /// dispatcher thread, exactly as the previous capture at run entry did, so no marshalling is
+    /// added and none is needed. The run is started from a <c>[RelayCommand]</c> on the UI thread
+    /// and <see cref="WorkflowOrchestrator"/> itself introduces no hop: that file contains no
+    /// <c>ConfigureAwait(false)</c> and no <c>Task.Run</c>. Note the scope - only the
+    /// <c>ConfigureAwait</c> half is a repository-wide rule (<c>Directory.Build.props</c> suppresses
+    /// CA2007 for it); <c>Task.Run</c> <em>is</em> used elsewhere in the app, in
+    /// <c>ArtifactWatcher</c>, <c>TaskRecoveryScanner</c> and <c>ConPtySession</c>. Those pool-thread
+    /// completions are harmless here, because an awaiter with a captured
+    /// <c>DispatcherSynchronizationContext</c> posts its continuation back to the dispatcher no
+    /// matter which thread completed the task. So every continuation, including the phase-4 guard
+    /// that forces this capture, resumes on the captured dispatcher context. There is therefore no
+    /// thread affinity to violate (these are plain CLR properties, not <c>DependencyObject</c>
+    /// state) and no cross-thread visibility question about the non-volatile fields
+    /// <c>[ObservableProperty]</c> generates.
+    /// Marshalling through the dispatcher would in fact be the riskier choice:
+    /// <see cref="Lazy{T}"/> holds its monitor while the factory runs, so a blocking
+    /// <c>Dispatcher.Invoke</c> from inside it would deadlock the run against a busy UI thread.
+    /// If that await discipline is ever relaxed for this orchestrator, revisit this paragraph -
+    /// the capture would then be taken on a pool thread.
+    /// </para>
+    /// </remarks>
+    public static Lazy<SubtaskConfiguration> Deferred(ISubtaskConfiguration source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        return new Lazy<SubtaskConfiguration>(() => Capture(source));
     }
 
     /// <summary>

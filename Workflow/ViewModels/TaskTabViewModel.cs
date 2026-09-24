@@ -12,8 +12,11 @@ namespace Workflow.ViewModels;
 /// <remarks>
 /// The tab is the live, editable subtask configuration of design issue 3: it implements
 /// <see cref="ISubtaskConfiguration"/> so that <see cref="SubtaskConfiguration.Capture"/> can take
-/// the one snapshot the run carries. Nothing downstream ever holds the tab itself, so the enabled
-/// flag and the tracking directory cannot be observed at two different moments (requirement 1.6).
+/// the one snapshot the run carries. The run is handed that capture <em>deferred</em>
+/// (<see cref="SubtaskConfiguration.Deferred"/>), so it is taken at phase-4 entry and the user may
+/// still change the configuration while phases 1-3 run; from that moment on it is one immutable
+/// record. Nothing downstream ever holds the tab itself, so the enabled flag and the tracking
+/// directory cannot be observed at two different moments (requirement 1.6).
 /// </remarks>
 public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfiguration, IDisposable
 {
@@ -635,13 +638,22 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             new Progress<PhaseProgress>(ApplyProgress),
             ResumePhase ?? WorkflowPhase.Specification,
             // Requirement 4.2: without this a continued subtask task takes the normal
-            // implementation branch and the skip-completed loop is never reached. Capture, not
-            // CaptureValidated: the start gate checks the directory before the run begins and the
-            // orchestrator re-validates the captured record at phase-4 entry, which is where
-            // requirements 1.6 and 1.8 put the second check. Validating here instead would reject
-            // a run whose phases 1-3 are still allowed to change the configuration, and would
-            // throw out of a synchronous command handler.
-            SubtaskConfiguration.Capture(this));
+            // implementation branch and the skip-completed loop is never reached.
+            //
+            // Deferred, not Capture: requirement 1.6 puts the snapshot at phase-4 entry, and this
+            // is run entry. The two coincide only for a resumed task; for a run started at phase 1
+            // the user may still tick the checkbox or pick a directory while phases 1-3 run, and
+            // capturing here would silently drop that edit. What travels is therefore a once-only
+            // capture the orchestrator forces when it enters phase 4 - still a snapshot from that
+            // moment on, still nothing the orchestrator can re-read.
+            //
+            // Deferred, not a validating variant, for the same two reasons as before: the start
+            // gate checks the directory before the run begins, the orchestrator re-validates the
+            // captured record at phase-4 entry (requirement 1.8), and a throw from this
+            // synchronous [RelayCommand] would escape ICommand.Execute after IsRunning was already
+            // set. Deferring the capture strengthens that last point rather than weakening it -
+            // the factory now runs inside RunAsync, where the catch list is.
+            SubtaskConfiguration.Deferred(this));
 
         _ = RunAsync(request, _run.Token);
     }

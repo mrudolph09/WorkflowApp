@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Reflection;
 using Workflow.Models;
 using Workflow.Services;
@@ -297,14 +297,14 @@ public sealed class SubtaskConfigurationTests : IDisposable
         Assert.Equal(WorkflowPhase.Specification, request.StartPhase);
         Assert.Null(request.Subtasks);
         Assert.Null(request.SubtaskProgress);
-        Assert.False(SubtaskConfiguration.IsEnabled(request.Subtasks));
+        Assert.False(SubtaskConfiguration.IsEnabled(request.Subtasks?.Value));
     }
 
     [Fact]
-    public void WorkflowRunRequest_CarriesTheCapturedSnapshotAndTheSubtaskProgressSink()
+    public void WorkflowRunRequest_CarriesTheDeferredCaptureAndTheSubtaskProgressSink()
     {
         var tracking = CreateTrackingRoot();
-        var captured = SubtaskConfiguration.Capture(new LiveSource(enabled: true, workflowDirectory: tracking));
+        var deferred = SubtaskConfiguration.Deferred(new LiveSource(enabled: true, workflowDirectory: tracking));
         var sink = new Progress<SubtaskProgress>(_ => { });
 
         var request = new WorkflowRunRequest(
@@ -314,12 +314,15 @@ public sealed class SubtaskConfigurationTests : IDisposable
             new ManualPhaseSignal(),
             new Progress<PhaseProgress>(_ => { }),
             WorkflowPhase.Implementation,
-            captured,
+            deferred,
             sink);
 
-        Assert.Same(captured, request.Subtasks);
+        Assert.Same(deferred, request.Subtasks);
         Assert.Same(sink, request.SubtaskProgress);
         Assert.Equal(WorkflowPhase.Implementation, request.StartPhase);
+
+        Assert.True(request.Subtasks!.Value.Enabled);
+        Assert.Equal(tracking, request.Subtasks.Value.WorkflowDirectory);
     }
 
     [Fact]
@@ -327,18 +330,110 @@ public sealed class SubtaskConfigurationTests : IDisposable
     {
         // The structural reason a two-moment read is impossible downstream: no member of the run
         // request can hand the orchestrator anything it could re-read.
+        //
+        // Task 2.5 turned the member into a DEFERRED capture, so that the one read happens at
+        // phase-4 entry rather than at run entry (requirement 1.6). The invariant is unchanged and
+        // still compile-enforced: Lazy<T> evaluates its factory at most once and afterwards serves
+        // the same immutable record forever, so what crosses the boundary is still a snapshot, not
+        // something re-readable. The scan below is correspondingly STRICTER than the one task 2.3
+        // wrote - it looks through generic arguments too, so a Lazy<ISubtaskConfiguration>, which
+        // would hand the orchestrator the live source after all, is rejected as well.
         var subtasks = typeof(WorkflowRunRequest).GetProperty("Subtasks");
         Assert.NotNull(subtasks);
-        Assert.Equal(typeof(SubtaskConfiguration), subtasks.PropertyType);
+        Assert.Equal(typeof(Lazy<SubtaskConfiguration>), subtasks.PropertyType);
 
         var live = typeof(WorkflowRunRequest)
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(property => typeof(ISubtaskConfiguration).IsAssignableFrom(property.PropertyType))
+            .Where(property => CanReachTheLiveSource(property.PropertyType))
             .Select(property => property.Name)
             .ToArray();
 
         Assert.Empty(live);
     }
+
+    [Fact]
+    public void Deferred_TakesNoSnapshotUntilItIsForced()
+    {
+        // Requirement 1.6 puts the capture at phase-4 ENTRY, so merely building the run request
+        // must read nothing. That is also what leaves the whole of phases 1-3 free to be edited.
+        var source = new LiveSource(enabled: true, workflowDirectory: CreateTrackingRoot());
+
+        var request = new WorkflowRunRequest(
+            new TaskPaths(_root, "Task"),
+            "Beschreibung",
+            new FakeTerminalController(),
+            new ManualPhaseSignal(),
+            new Progress<PhaseProgress>(_ => { }),
+            WorkflowPhase.Specification,
+            SubtaskConfiguration.Deferred(source));
+
+        Assert.False(request.Subtasks!.IsValueCreated);
+        Assert.Equal(0, source.EnabledReads);
+        Assert.Equal(0, source.DirectoryReads);
+    }
+
+    [Fact]
+    public void Deferred_ReadsEachMemberExactlyOnceHoweverOftenItIsForced()
+    {
+        // The orchestrator touches the member twice - once in the phase-4 guard, once to use the
+        // record - so deferring the capture only preserves task 2.3's invariant if the second
+        // access cannot produce a second pair. Lazy<T> makes that a property of the type rather
+        // than of convention: a plain Func<SubtaskConfiguration> would fail this test.
+        var tracking = CreateTrackingRoot();
+        var source = new LiveSource(enabled: true, workflowDirectory: tracking);
+        var deferred = SubtaskConfiguration.Deferred(source);
+
+        var first = deferred.Value;
+        var second = deferred.Value;
+        var third = deferred.Value;
+
+        Assert.Same(first, second);
+        Assert.Same(second, third);
+        Assert.Equal(1, source.EnabledReads);
+        Assert.Equal(1, source.DirectoryReads);
+    }
+
+    [Fact]
+    public void Deferred_FollowsAnEditMadeBeforeTheCaptureAndIgnoresOneMadeAfterIt()
+    {
+        // Both halves of requirement 1.6 against one fixture: an edit made while phases 1-3 run
+        // reaches the run, and from the capture onwards the pair is frozen.
+        var tracking = CreateTrackingRoot();
+        var source = new LiveSource(enabled: false, workflowDirectory: null);
+        var deferred = SubtaskConfiguration.Deferred(source);
+
+        source.Enabled = true;
+        source.Directory = tracking;
+
+        var captured = deferred.Value;
+
+        Assert.True(captured.Enabled);
+        Assert.Equal(tracking, captured.WorkflowDirectory);
+
+        source.Enabled = false;
+        source.Directory = null;
+
+        Assert.Same(captured, deferred.Value);
+        Assert.True(deferred.Value.Enabled);
+        Assert.Equal(tracking, deferred.Value.WorkflowDirectory);
+    }
+
+    [Fact]
+    public void Deferred_RejectsANullSourceWhereTheRequestIsBuilt_NotInsideTheRun()
+    {
+        // The factory now runs on the orchestrator's thread, inside a run nobody awaits at the
+        // call site, so a null source must fail here - while the stack still names the caller -
+        // rather than surfacing later as a run failure.
+        Assert.Throws<ArgumentNullException>(() => SubtaskConfiguration.Deferred(null!));
+    }
+
+    /// <summary>
+    /// Whether a run-request member could hand the orchestrator the live, re-readable source -
+    /// either directly or wrapped in a generic such as <see cref="Lazy{T}"/>.
+    /// </summary>
+    private static bool CanReachTheLiveSource(Type type) =>
+        typeof(ISubtaskConfiguration).IsAssignableFrom(type)
+        || Array.Exists(type.GetGenericArguments(), CanReachTheLiveSource);
 
     private static string MarkerMessage(string directory) =>
         $"Das Verzeichnis '{directory}' enthält keinen Ordner 'task_template' und ist daher nicht das ausgecheckte Workflows-Repository.";

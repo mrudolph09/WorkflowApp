@@ -368,8 +368,28 @@ public sealed class TaskTabSubtaskRecoveryTests : IDisposable
 
         // Without this the run takes the normal implementation branch and the skip-completed loop
         // is never reached, so "continuing runs only the entries that are not complete" cannot hold.
-        Assert.True(SubtaskConfiguration.IsEnabled(orchestrator.Request.Subtasks));
-        Assert.Equal(_tracking, orchestrator.Request.Subtasks!.WorkflowDirectory);
+        // Task 2.5 made the member a deferred capture, so the assertion forces it exactly as
+        // phase-4 entry would. The subject and the claim are unchanged.
+        Assert.True(SubtaskConfiguration.IsEnabled(orchestrator.Request.Subtasks?.Value));
+        Assert.Equal(_tracking, orchestrator.Request.Subtasks!.Value.WorkflowDirectory);
+    }
+
+    [StaFact]
+    public void StartWorkflow_HandsOverAnUnforcedCapture_SoPhasesOneToThreeStayEditable()
+    {
+        // Requirement 1.6: the snapshot belongs to phase-4 ENTRY, not to run entry. Task 5.2 wired
+        // the capture into StartWorkflow, which coincides with phase-4 entry only for a resumed
+        // task; task 2.5 defers it, so the request must leave the run holding an unforced capture.
+        var orchestrator = new CapturingOrchestrator();
+        using var vm = Create(orchestrator: orchestrator);
+        vm.WorkingDirectory = _workspace;
+        vm.TaskName = TaskName;
+
+        vm.StartWorkflowCommand.Execute(null);
+
+        Assert.NotNull(orchestrator.Request);
+        Assert.NotNull(orchestrator.Request.Subtasks);
+        Assert.False(orchestrator.Request.Subtasks.IsValueCreated);
     }
 
     [StaFact]
@@ -384,7 +404,7 @@ public sealed class TaskTabSubtaskRecoveryTests : IDisposable
         vm.StartWorkflowCommand.Execute(null);
 
         Assert.NotNull(orchestrator.Request);
-        Assert.False(SubtaskConfiguration.IsEnabled(orchestrator.Request.Subtasks));
+        Assert.False(SubtaskConfiguration.IsEnabled(orchestrator.Request.Subtasks?.Value));
     }
 
     [StaFact]

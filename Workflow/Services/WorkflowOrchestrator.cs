@@ -177,8 +177,15 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         // absent configuration reaches exactly the code it reached before (requirement 2.1):
         // SubtaskConfiguration.IsEnabled is the single place that decides what "enabled" means,
         // and a null snapshot - the default of WorkflowRunRequest.Subtasks - is disabled.
+        //
+        // This expression is also THE capture point of requirement 1.6. `Subtasks` is a deferred
+        // capture, and `?.Value` below is where it is forced; because `&&` short-circuits on the
+        // phase check, a run that never reaches implementation never reads the tab's configuration
+        // at all. Keep the phase test first. Forcing it here and again in
+        // RunSubtaskImplementationAsync is safe by construction - Lazy<T> runs its factory at most
+        // once, so both reads see the one pair taken at this moment.
         if (definition.Phase == WorkflowPhase.Implementation
-            && SubtaskConfiguration.IsEnabled(request.Subtasks))
+            && SubtaskConfiguration.IsEnabled(request.Subtasks?.Value))
         {
             await RunSubtaskImplementationAsync(request, cancellationToken);
 
@@ -231,14 +238,15 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         WorkflowRunRequest request,
         CancellationToken cancellationToken)
     {
-        // Not a re-capture. The snapshot was taken once, above this boundary, and arrives as an
-        // immutable record precisely so that nothing here can observe the enabled flag at one
-        // moment and the directory at another (requirement 1.6); SubtaskConfiguration.Capture and
+        // Not a re-capture. The one capture was taken by the phase-4 guard in RunPhaseAsync a few
+        // lines up - this run's entry into phase 4 - and Lazy<T> serves that same immutable record
+        // here, so nothing in this method can observe the enabled flag at one moment and the
+        // directory at another (requirement 1.6); SubtaskConfiguration.Capture, Deferred and
         // CaptureValidated take an ISubtaskConfiguration this method is never given. What phase-4
         // entry owes the run is the second validation - the marker can disappear between the start
         // gate and this moment - and EnsureUsable is that step, the same call CaptureValidated
         // makes after capturing (requirement 1.8).
-        var configuration = request.Subtasks!;
+        var configuration = request.Subtasks!.Value;
         configuration.EnsureUsable();
 
         // Non-null and usable by the line above, so the path set can be composed.

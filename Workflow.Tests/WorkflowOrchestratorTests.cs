@@ -691,9 +691,173 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         CreateRequest(terminal, signal) with
         {
             StartPhase = WorkflowPhase.Implementation,
-            Subtasks = new SubtaskConfiguration(true, trackingDirectory),
+            Subtasks = Captured(new SubtaskConfiguration(true, trackingDirectory)),
             SubtaskProgress = new InlineProgress<SubtaskProgress>(RecordSubtaskReport),
         };
+
+    /// <summary>
+    /// A deferred capture that is already taken. For a test that fixes the configuration up front,
+    /// the deferral is not the subject, so the <see cref="Lazy{T}"/> value constructor states the
+    /// pair directly instead of routing through a fake source.
+    /// </summary>
+    private static Lazy<SubtaskConfiguration> Captured(SubtaskConfiguration configuration) =>
+        new(configuration);
+
+    /// <summary>
+    /// A stand-in for the tab's live, editable configuration (task 2.5). Reads, writes and the
+    /// counters all go through one lock, so a test that edits it from the test thread while the
+    /// run reads it from the orchestrator's thread asserts on the design rather than on the
+    /// memory model.
+    /// </summary>
+    private sealed class LiveConfiguration : ISubtaskConfiguration
+    {
+        private readonly object _gate = new();
+        private bool _enabled;
+        private string? _directory;
+        private int _enabledReads;
+        private int _directoryReads;
+
+        public bool SubtasksEnabled
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    _enabledReads++;
+                    return _enabled;
+                }
+            }
+        }
+
+        public string? WorkflowDirectory
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    _directoryReads++;
+                    return _directory;
+                }
+            }
+        }
+
+        public int EnabledReads
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _enabledReads;
+                }
+            }
+        }
+
+        public int DirectoryReads
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _directoryReads;
+                }
+            }
+        }
+
+        /// <summary>Ticks the checkbox and picks the directory, as the user would mid-run.</summary>
+        public void SwitchOn(string directory)
+        {
+            lock (_gate)
+            {
+                _enabled = true;
+                _directory = directory;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ARunStartedAtPhaseOne_ReadsTheConfigurationAtPhaseFourEntryNotAtRunStart()
+    {
+        // Requirement 1.6's Observable, and the whole point of task 2.5: subtask mode switched ON
+        // while phases 1-3 are still running must reach phase 4. The run therefore reads the live
+        // source once, here - after the edit - and not at run entry, where it was still off.
+        var tracking = new SubtaskPaths(CreateTrackingRepository(withTemplateMarker: true), _paths.TaskName);
+        WriteDecompositionPrompt();
+        StageSubtask(tracking, "ST-001-alpha", "complete");
+
+        var live = new LiveConfiguration();
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+
+        var request = CreateRequest(terminal, signal) with
+        {
+            Subtasks = SubtaskConfiguration.Deferred(live),
+            SubtaskProgress = new InlineProgress<SubtaskProgress>(RecordSubtaskReport),
+        };
+
+        var run = CreateOrchestrator().RunAsync(request, cts.Token);
+
+        // Phase 1 is under way and the configuration is still off - exactly the window
+        // requirement 1.6 keeps open for edits. Nothing has been read yet.
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+        Assert.Equal(0, live.EnabledReads);
+        Assert.Equal(0, live.DirectoryReads);
+
+        live.SwitchOn(tracking.WorkflowDirectory);
+
+        WriteArtifacts(_paths.SpecAbsolute, _paths.PlanAbsolute);
+        await WaitUntil(() => terminal.StartedSessions.Count >= 2, cts.Token);
+        WriteArtifacts(_paths.ReviewAbsolute);
+        await WaitUntil(() => terminal.StartedSessions.Count >= 3, cts.Token);
+        await Task.Delay(80, cts.Token);
+        WriteArtifacts(_paths.SpecAbsolute, _paths.PlanAbsolute);
+
+        // Phase 4 runs as a SUBTASK run: the decomposition prompt, aimed at the directory the user
+        // picked after the run had already started. Captured at run entry it would have been the
+        // implementation prompt instead.
+        await WaitUntil(() => terminal.Pasted.Count >= 4, cts.Token);
+        Assert.Contains("ZERLEGUNG", terminal.Pasted[3], StringComparison.Ordinal);
+        Assert.Contains(tracking.WorkflowDirectory, terminal.Pasted[3], StringComparison.Ordinal);
+
+        WriteIndex(tracking, "ST-001-alpha");
+        await run;
+
+        // Exactly one capture, although the run touches the member twice: once in the phase-4
+        // guard and once to compose the tracking paths.
+        Assert.Equal(1, live.EnabledReads);
+        Assert.Equal(1, live.DirectoryReads);
+        Assert.Contains(
+            _state.SubtaskSettings,
+            s => s.Enabled && string.Equals(s.WorkflowDirectory, tracking.WorkflowDirectory, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ARunThatNeverReachesPhaseFour_NeverReadsTheConfiguration()
+    {
+        // The phase-4 guard short-circuits on the phase check, so a run that ends earlier never
+        // forces the deferred capture. A cancelled phase-1 run must leave the tab entirely unread.
+        var live = new LiveConfiguration();
+        var terminal = new FakeTerminalController();
+        terminal.ReadyGate.SetResult();
+        var signal = new ManualPhaseSignal();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+        var request = CreateRequest(terminal, signal) with
+        {
+            Subtasks = SubtaskConfiguration.Deferred(live),
+        };
+
+        var run = CreateOrchestrator().RunAsync(request, cts.Token);
+
+        await WaitUntil(() => terminal.Pasted.Count >= 1, cts.Token);
+        await cts.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+
+        Assert.False(request.Subtasks!.IsValueCreated);
+        Assert.Equal(0, live.EnabledReads);
+        Assert.Equal(0, live.DirectoryReads);
+    }
 
     /// <summary>
     /// Runs on the orchestrator's own thread the instant a report is published, so a test can put
@@ -755,7 +919,7 @@ public sealed class WorkflowOrchestratorTests : IDisposable
         var request = CreateRequest(terminal, signal) with
         {
             StartPhase = WorkflowPhase.Implementation,
-            Subtasks = SubtaskConfiguration.Disabled,
+            Subtasks = Captured(SubtaskConfiguration.Disabled),
         };
 
         var run = CreateOrchestrator().RunAsync(request, cts.Token);
