@@ -113,7 +113,15 @@ public static class PhaseReconciliation
         return null;
     }
 
-    /// <summary>Classifies what the subtask evidence says about one task's implementation phase.</summary>
+    /// <summary>
+    /// Classifies what the subtask evidence says about one task's implementation phase. This is a
+    /// <em>deliberate public member beyond the one the design names</em> - <em>Presentation and
+    /// Recovery</em> names only "<c>ArtefactsPresent</c> receives task state" - and it is retained
+    /// rather than folded private because requirement 4.6 asks for the condition to be
+    /// <em>surfaced</em>, not merely acted on. Demotion needs one bit; the user-facing layer needs
+    /// to tell "unreadable" from "unfinished", and deriving that a second time outside this class
+    /// is exactly the duplicated ledger vocabulary <see cref="SubtaskLedger"/> exists to prevent.
+    /// </summary>
     /// <param name="paths">The task's path set. Supplies the task name the tracking folder is named after.</param>
     /// <param name="state">The journal, read for its subtask mode, tracking path and manual override.</param>
     /// <returns>The condition the evidence establishes.</returns>
@@ -126,9 +134,13 @@ public static class PhaseReconciliation
     /// half-way through stays completed even though most of its subtasks never ran.
     /// </para>
     /// <para>
-    /// Every remaining answer comes from a fresh read: <see cref="SubtaskLedger.AllComplete"/> takes
-    /// the path set rather than a snapshot and reads the disk itself, so no stale in-memory evidence
-    /// can reach this decision (requirement 4.5).
+    /// Every remaining answer comes from <em>one</em> fresh read. <see cref="SubtaskLedger.TryRead"/>
+    /// answers both questions at once - null is "no order could be established", and the counts
+    /// decide completion - so there is no window in which the index can vanish between a completion
+    /// probe and a readability probe and turn a retain into a demotion. Two reads were the earlier
+    /// shape and their ordering was load-bearing but unpinnable; one read removes the case instead
+    /// of documenting it, and halves the index I/O on the debounced re-arm path (requirements 4.5
+    /// and 4.6).
     /// </para>
     /// </remarks>
     public static SubtaskEvidence Evaluate(TaskPaths paths, TaskState state)
@@ -152,18 +164,20 @@ public static class PhaseReconciliation
             return SubtaskEvidence.Unavailable;
         }
 
-        if (SubtaskLedger.AllComplete(tracking))
+        // A null snapshot is "the evidence could not be read", never "nothing is done": only
+        // positively unfinished work may demote (requirement 4.6). Both answers come from this one
+        // read, so the two can never describe different contents of the tracking repository.
+        var snapshot = SubtaskLedger.TryRead(tracking);
+        if (snapshot is null)
         {
-            return SubtaskEvidence.AllComplete;
+            return SubtaskEvidence.Unavailable;
         }
 
-        // AllComplete answers false both for "not finished yet" and for "the evidence could not be
-        // read", and only the first may demote. The readability probe therefore runs AFTER the
-        // completion read, so an index that disappears between the two lands on Unavailable - which
-        // keeps the recorded state - rather than on Incomplete, which would demote it.
-        return SubtaskLedger.IsDecomposed(tracking)
-            ? SubtaskEvidence.Incomplete
-            : SubtaskEvidence.Unavailable;
+        // Design issue 6a, the same condition the indicator's green uses: Total > 0 and every entry
+        // complete. The absence of failures is not completion - an all-pending task has none.
+        return snapshot.Total > 0 && snapshot.Completed == snapshot.Total
+            ? SubtaskEvidence.AllComplete
+            : SubtaskEvidence.Incomplete;
     }
 
     /// <summary>Composes the tracking path set from the stored directory, or reports it unusable.</summary>

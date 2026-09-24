@@ -9,7 +9,13 @@ using Workflow.Services;
 namespace Workflow.ViewModels;
 
 /// <summary>One Task, one tab: metadata, the four indicators, and the terminal.</summary>
-public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
+/// <remarks>
+/// The tab is the live, editable subtask configuration of design issue 3: it implements
+/// <see cref="ISubtaskConfiguration"/> so that <see cref="SubtaskConfiguration.Capture"/> can take
+/// the one snapshot the run carries. Nothing downstream ever holds the tab itself, so the enabled
+/// flag and the tracking directory cannot be observed at two different moments (requirement 1.6).
+/// </remarks>
+public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfiguration, IDisposable
 {
     private readonly ITaskFolderService _folders;
     private readonly IWorkflowOrchestrator _orchestrator;
@@ -47,6 +53,13 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool _isNameLocked;
 
+    /// <summary>
+    /// True while this tab is the one shown. The tab template keeps every tab's view alive and
+    /// toggles visibility on this flag, so each tab owns its WebView2 for its whole lifetime.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isSelected;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
     private string? _validationMessage;
@@ -60,6 +73,21 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private bool _isRecovered;
+
+    /// <summary>
+    /// Whether this task's implementation phase runs as subtasks (requirement 1.1). Editable while
+    /// phases 1-3 run; read exactly once, at capture time.
+    /// </summary>
+    [ObservableProperty]
+    private bool _subtasksEnabled;
+
+    /// <summary>
+    /// The tracking repository selected for subtask mode, or null while none is chosen
+    /// (requirement 1.2). Distinct from <see cref="WorkingDirectory"/>, which is the product
+    /// working directory the sessions run in.
+    /// </summary>
+    [ObservableProperty]
+    private string? _workflowDirectory;
 
     /// <summary>Creates the tab.</summary>
     /// <param name="folders">Task-folder service.</param>
@@ -131,6 +159,17 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
     /// <summary>This tab's terminal.</summary>
     public TerminalViewModel Terminal { get; }
 
+    /// <summary>
+    /// The second grey/yellow/green indicator, shown beside the phase indicators while subtask mode
+    /// is selected (requirement 3.1).
+    /// </summary>
+    /// <remarks>
+    /// The tab owns the instance for its whole lifetime and never replaces it, so a binding made
+    /// once keeps working; its contents are driven through <see cref="SubtaskIndicatorViewModel.Apply"/>
+    /// and <see cref="SubtaskIndicatorViewModel.Reset"/>.
+    /// </remarks>
+    public SubtaskIndicatorViewModel SubtaskIndicator { get; } = new();
+
     /// <summary>Applies a phase status change from the orchestrator. Public for testing.</summary>
     /// <param name="progress">The reported change.</param>
     public void ApplyProgress(PhaseProgress progress)
@@ -171,7 +210,16 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
             // BASE section 8.4 makes for a running pipeline.
             IsNameLocked = true;
 
+            // Requirement 4.1. Restored inside the suppression block for the same reason the
+            // fields above are: these two setters belong to the subtask configuration the tab
+            // owns, and letting the working-folder synchronisation run between them would
+            // recompute resume state - and, once the subtask row is bound, push a restored
+            // directory through the MRU as though the user had just picked it.
+            SubtasksEnabled = task.State.SubtasksEnabled;
+            WorkflowDirectory = task.State.WorkflowDirectory;
+
             ApplyJournal(task.State);
+            SeedSubtaskIndicatorFromLedger(task.Paths.TaskName);
             ResumePhase = task.ResumePhase;
             IsRecovered = true;
         }
@@ -229,6 +277,75 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
                 indicator.Status = entry.Status == PhaseStatus.Active ? PhaseStatus.Pending : entry.Status;
             }
         }
+    }
+
+    /// <summary>
+    /// Derives the subtask indicator's counts and failure reasons from the tracking files, so a
+    /// recovered tab shows what is on disk before any session starts (requirements 4.1 and 4.5).
+    /// </summary>
+    /// <param name="taskName">The task name the tracking folder is named after.</param>
+    /// <remarks>
+    /// <para>
+    /// There is no persisted cursor to read (requirement 4.5): the ledger is read fresh and the
+    /// counts fall out of it. The stage seeded is <see cref="SubtaskStage.Idle"/> - grey - because
+    /// nothing is running yet; requirement 3.4 reserves yellow for "while running", and the design
+    /// says a recovered tab's implementation indicator may initially be grey while its counts still
+    /// reflect disk. A task whose entries are all complete is green regardless, because
+    /// <see cref="SubtaskIndicatorViewModel"/> derives green from the counts alone.
+    /// </para>
+    /// <para>
+    /// Every unusable case - mode off, no directory, a blank or malformed stored path, or an index
+    /// that cannot be read - resets the indicator rather than guessing. Zero counts can never be
+    /// green, so unreadable evidence is structurally incapable of completing a task
+    /// (requirement 4.6). Naming that condition in German is not done here, because 4.6 is not among
+    /// this task's requirements - it belongs to section 6. When it is surfaced, the channel must be
+    /// <see cref="InfoMessage"/> and not <see cref="ValidationMessage"/>: the latter is part of
+    /// <see cref="CanStartWorkflow"/>, so writing the condition there would disable the start action
+    /// and make the recoverable task unrecoverable - the opposite of what 4.6 asks for.
+    /// </para>
+    /// <para>
+    /// This runs on the dispatcher, during the startup restore, and reads roughly two small files
+    /// per subtask once per recovered tab - the same order of synchronous disk work
+    /// <see cref="SyncFolder"/> already performs there.
+    /// </para>
+    /// </remarks>
+    private void SeedSubtaskIndicatorFromLedger(string taskName)
+    {
+        if (!SubtasksEnabled || WorkflowDirectory is null)
+        {
+            SubtaskIndicator.Reset();
+            return;
+        }
+
+        SubtaskPaths tracking;
+
+        try
+        {
+            tracking = new SubtaskPaths(WorkflowDirectory, taskName);
+        }
+        catch (ArgumentException)
+        {
+            // The journal stores the chosen directory verbatim, so a blank or whitespace-only
+            // value survives to here by design; it is a user condition, not a defect.
+            SubtaskIndicator.Reset();
+            return;
+        }
+
+        var snapshot = SubtaskLedger.TryRead(tracking);
+
+        if (snapshot is null)
+        {
+            SubtaskIndicator.Reset();
+            return;
+        }
+
+        SubtaskIndicator.Apply(new SubtaskProgress(
+            SubtaskStage.Idle,
+            snapshot.Completed,
+            snapshot.Total,
+            snapshot.Failed,
+            null,
+            snapshot.States));
     }
 
     // SPEC section 6.6. Two outcomes only: a resumable journal paints the indicators and sets
@@ -516,7 +633,15 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
             Terminal,
             _manualSignal,
             new Progress<PhaseProgress>(ApplyProgress),
-            ResumePhase ?? WorkflowPhase.Specification);
+            ResumePhase ?? WorkflowPhase.Specification,
+            // Requirement 4.2: without this a continued subtask task takes the normal
+            // implementation branch and the skip-completed loop is never reached. Capture, not
+            // CaptureValidated: the start gate checks the directory before the run begins and the
+            // orchestrator re-validates the captured record at phase-4 entry, which is where
+            // requirements 1.6 and 1.8 put the second check. Validating here instead would reject
+            // a run whose phases 1-3 are still allowed to change the configuration, and would
+            // throw out of a synchronous command handler.
+            SubtaskConfiguration.Capture(this));
 
         _ = RunAsync(request, _run.Token);
     }
@@ -540,6 +665,14 @@ public sealed partial class TaskTabViewModel : ObservableObject, IDisposable
         catch (PromptTemplateException ex)
         {
             ValidationMessage = ex.Message;
+        }
+        catch (SubtaskConfigurationException ex)
+        {
+            // Requirements 1.8 and 2.9: the tracking directory lost its marker, or decomposition
+            // produced no usable index. User-fixable, and the German text is already on the
+            // exception. The journal leaves Implementation Active, so the task stays recoverable -
+            // which is why this must never be mistaken for a reason to fall back to a normal run.
+            ValidationMessage = ex.ValidationMessage;
         }
         catch (ArtifactWatchException ex)
         {

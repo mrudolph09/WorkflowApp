@@ -331,8 +331,12 @@ public sealed class PhaseReconciliationTests : IDisposable
     }
 
     /// <summary>
-    /// The recorded state is retained, not promoted: an unreadable index leaves a phase that was
-    /// already Pending exactly where it was.
+    /// A pin of the demote-never-promote invariant, and <em>only</em> of that. It is structurally
+    /// unable to pin requirement 4.6's retention rule: <c>Reconcile</c> gates every write on
+    /// <c>entry.Status == PhaseStatus.Completed</c>, so a Pending phase cannot be promoted no
+    /// matter what the evidence says, and no mutation of the evidence rules can make it fail.
+    /// 4.6's retention is pinned by <see cref="Reconcile_SubtaskTaskWithAMalformedIndex_KeepsTheRecordedPhaseState"/>
+    /// and its siblings, which start from a Completed phase.
     /// </summary>
     [Fact]
     public void Reconcile_SubtaskTaskWithAnUnreadableIndexAndAPendingPhase_DoesNotPromoteIt()
@@ -384,6 +388,69 @@ public sealed class PhaseReconciliationTests : IDisposable
             tracking.SubtaskStatusFile("ST-003-schreiben"), """{ "status": "complete" }""", Utf8);
 
         Assert.Equal(SubtaskEvidence.AllComplete, PhaseReconciliation.Evaluate(_paths, state));
+    }
+
+    /// <summary>
+    /// Pins the completion predicate itself, now that one <c>TryRead</c> answers both questions.
+    /// The fixture is asymmetric in every dimension the classification could read - six entries,
+    /// three complete, two failed, one pending - so a mutant that completes on "no failures", on
+    /// "some complete", or on the mere readability of the index fails here.
+    /// </summary>
+    [Fact]
+    public void Evaluate_SubtaskTaskWithCompleteFailedAndPendingEntries_ReportsIncomplete()
+    {
+        var state = CompletedJournal();
+        state.SubtasksEnabled = true;
+        state.WorkflowDirectory = _tracking;
+
+        var tracking = TrackingPaths();
+        string[] titles =
+        [
+            "ST-001-lesen", "ST-002-pruefen", "ST-003-schreiben",
+            "ST-004-testen", "ST-005-melden", "ST-006-abschliessen",
+        ];
+
+        File.WriteAllText(
+            tracking.ResultAbsolute,
+            $$"""{ "version": 1, "subtasks": {{System.Text.Json.JsonSerializer.Serialize(titles)}} }""",
+            Utf8);
+
+        for (var i = 0; i < titles.Length; i++)
+        {
+            Directory.CreateDirectory(tracking.SubtaskDirectory(titles[i]));
+            File.WriteAllText(tracking.SubtaskMarkdown(titles[i]), "Beschreibung", Utf8);
+            File.WriteAllText(
+                tracking.SubtaskStatusFile(titles[i]),
+                i < 3 ? """{ "status": "complete" }"""
+                    : i < 5 ? """{ "status": "failed", "failreason": "Grund" }"""
+                    : """{ "status": "pending" }""",
+                Utf8);
+        }
+
+        Assert.Equal(SubtaskEvidence.Incomplete, PhaseReconciliation.Evaluate(_paths, state));
+        Assert.True(PhaseReconciliation.Reconcile(_paths, state));
+        Assert.Equal(PhaseStatus.Pending, StatusOf(state, WorkflowPhase.Implementation));
+    }
+
+    /// <summary>
+    /// The readability answer and the completion answer come from one read, so an index that
+    /// cannot be parsed reports <see cref="SubtaskEvidence.Unavailable"/> and never
+    /// <see cref="SubtaskEvidence.Incomplete"/>. Collapsing the two into "not all complete" would
+    /// demote a finished task whose tracking repository was momentarily unreadable.
+    /// </summary>
+    [Fact]
+    public void Evaluate_SubtaskTaskWhoseIndexCannotBeParsed_ReportsUnavailableAndNeverIncomplete()
+    {
+        var state = CompletedJournal();
+        state.SubtasksEnabled = true;
+        state.WorkflowDirectory = _tracking;
+
+        var tracking = TrackingPaths();
+        File.WriteAllText(tracking.ResultAbsolute, """{ "subtasks": [ """, Utf8);
+
+        Assert.Equal(SubtaskEvidence.Unavailable, PhaseReconciliation.Evaluate(_paths, state));
+        Assert.False(PhaseReconciliation.Reconcile(_paths, state));
+        Assert.Equal(PhaseStatus.Completed, StatusOf(state, WorkflowPhase.Implementation));
     }
 
     [Fact]
