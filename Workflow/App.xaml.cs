@@ -79,6 +79,11 @@ public partial class App : Application
         // disconnected network share. The recovered tabs materialise a moment later.
         _ = _shell.InitialiseAsync();
 
+        // Not awaited either, and deliberately silent: the installer downloads from the network,
+        // which is far too slow to hold up the window and far too unreliable to let it block a
+        // start. A run begun in the next few seconds simply uses the CLI already on the machine.
+        _ = new CodexUpdateService().UpdateAsync();
+
         if (startupErrors.Count > 0)
         {
             MessageBox.Show(
