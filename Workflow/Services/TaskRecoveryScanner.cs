@@ -92,6 +92,33 @@ public sealed class TaskRecoveryScanner : ITaskRecoveryScanner
         return [.. snapshot.OrderByDescending(t => t.State.UpdatedUtc).Take(_maxTasks)];
     }
 
+    /// <inheritdoc />
+    public RecoverableTask? Load(TaskPaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        var state = _store.TryLoad(paths);
+        if (state is null)
+        {
+            return null;
+        }
+
+        var resume = ReconcileAndFindResumePhase(paths, state);
+
+        // Loading is the user taking the task back (Workflow_LOAD_AND_PAUSE spec, decision D6). Left
+        // set, the flag would keep a loaded tab that is still open at shutdown out of the next
+        // startup's offer. Closing the tab dismisses it again, as for every recovered tab. The
+        // write-back is best-effort through the never-throw store; the returned State is the
+        // journal as read and reconciled in memory, and nothing downstream reads its Dismissed
+        // flag (spec 4.3).
+        if (state.Dismissed)
+        {
+            _store.SetDismissed(paths, dismissed: false);
+        }
+
+        return new RecoverableTask(paths, state, resume);
+    }
+
     private void Scan(
         IReadOnlyList<string> roots,
         ConcurrentQueue<RecoverableTask> found,
@@ -181,16 +208,24 @@ public sealed class TaskRecoveryScanner : ITaskRecoveryScanner
             return null;
         }
 
-        // Written back at once when it demotes anything. RecordPhase touches a single entry, so a
-        // resumed run would otherwise leave the demoted LATER phases marked Completed on disk and
-        // the next crash would skip them - losing the "and every phase after it" half of the rule
-        // across one restart (SPEC 6.3.1, D17).
+        // A finished task is not an interrupted one, so the scan does not offer it.
+        var resume = ReconcileAndFindResumePhase(paths, state);
+        return resume is null ? null : new RecoverableTask(paths, state, resume);
+    }
+
+    // Shared by the scan and by Load, so the two can never disagree about what a journal means.
+    // Written back at once when reconciliation changes anything. RecordPhase touches a single
+    // entry, so a resumed run would otherwise leave the demoted LATER phases marked Completed
+    // on disk and the next crash would skip them - losing the "and every phase after it" half
+    // of the rule across one restart (SPEC 6.3.1, D17). A promotion is written back for the
+    // same reason: the run starts behind it, so nothing else would ever record it.
+    private WorkflowPhase? ReconcileAndFindResumePhase(TaskPaths paths, TaskState state)
+    {
         if (PhaseReconciliation.Reconcile(paths, state))
         {
             _store.ReplacePhases(paths, [.. state.Phases]);
         }
 
-        var resume = PhaseReconciliation.FirstIncomplete(state);
-        return resume is null ? null : new RecoverableTask(paths, state, resume.Value);
+        return PhaseReconciliation.FirstIncomplete(state);
     }
 }

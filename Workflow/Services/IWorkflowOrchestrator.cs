@@ -33,6 +33,22 @@ namespace Workflow.Services;
 /// Receives every subtask progress report. Null - the default - when nothing is listening, which is
 /// the case for a normal implementation run.
 /// </param>
+/// <param name="LauncherStatus">
+/// Receives a human-readable reason whenever a session refuses to paste its prompt because the
+/// launcher is not running, and null again once the wait ends. Null - the default - when nothing is
+/// listening, so existing construction sites keep compiling.
+/// <para>
+/// Deliberately its own channel rather than a reuse of the tab's general info line: that line
+/// already carries independent facts (an existing task folder, a recovered run) which a launcher
+/// stall must not overwrite, and clearing this status must not clear those.
+/// </para>
+/// </param>
+/// <param name="Pause">
+/// The tab's pause switch (Workflow_LOAD_AND_PAUSE spec section 6.3). While it is paused the run
+/// waits at every boundary between two phases - never before the start phase, which the user has
+/// just asked for, and never inside a phase, so the running phase finishes and its session stays
+/// live. Null - the default - never holds a run, so existing construction sites are unaffected.
+/// </param>
 public sealed record WorkflowRunRequest(
     TaskPaths Paths,
     string TaskDescription,
@@ -41,7 +57,9 @@ public sealed record WorkflowRunRequest(
     IProgress<PhaseProgress> Progress,
     WorkflowPhase StartPhase = WorkflowPhase.Specification,
     Lazy<SubtaskConfiguration>? Subtasks = null,
-    IProgress<SubtaskProgress>? SubtaskProgress = null);
+    IProgress<SubtaskProgress>? SubtaskProgress = null,
+    IProgress<string?>? LauncherStatus = null,
+    PhasePauseGate? Pause = null);
 
 /// <summary>Drives a task through the four phases.</summary>
 public interface IWorkflowOrchestrator

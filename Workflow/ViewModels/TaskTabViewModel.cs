@@ -20,12 +20,23 @@ namespace Workflow.ViewModels;
 /// </remarks>
 public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfiguration, IDisposable
 {
+    /// <summary>
+    /// The info line of a finished task opened with <c>Task laden</c> (Workflow_LOAD_AND_PAUSE spec
+    /// section 5.5): its four green indicators stay, and this says what Start will do with it.
+    /// </summary>
+    private const string FinishedTaskMessage =
+        "Alle Phasen sind abgeschlossen. 'Start workflow' beginnt den Task von vorn.";
+
     private readonly ITaskFolderService _folders;
     private readonly IWorkflowOrchestrator _orchestrator;
     private readonly ISettingsService _settings;
     private readonly ITaskStateStore _stateStore;
     private readonly IDirectoryPickerService _picker;
     private readonly ManualPhaseSignal _manualSignal = new();
+
+    // The tab's pause switch (Workflow_LOAD_AND_PAUSE spec 6.4). One per tab for its whole lifetime,
+    // so a pause armed before 'Start workflow', or left armed when a run ends, reaches the next run.
+    private readonly PhasePauseGate _pauseGate = new();
     private readonly TimeSpan _folderDebounce;
 
     private readonly IReadOnlyList<string> _startupErrors;
@@ -76,6 +87,20 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     private string? _infoMessage;
 
     /// <summary>
+    /// Why the running session is not sending its prompt: the launcher is not up, and the terminal
+    /// is waiting for the user to start one by hand.
+    /// </summary>
+    /// <remarks>
+    /// Its own property rather than a second writer of <see cref="InfoMessage"/>. That line already
+    /// carries independent facts - a reused task folder, a recovered run - and a launcher stall must
+    /// neither overwrite them nor erase them when it clears. Like <see cref="InfoMessage"/> it is
+    /// deliberately NOT part of <see cref="CanStartWorkflow"/>: it annotates a run in progress and
+    /// must never disable an action.
+    /// </remarks>
+    [ObservableProperty]
+    private string? _launcherStatusMessage;
+
+    /// <summary>
     /// Why the selected tracking directory cannot be used, or null while subtask mode is off or
     /// the selection is usable (requirement 1.3).
     /// </summary>
@@ -114,6 +139,25 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     /// </summary>
     [ObservableProperty]
     private string? _workflowDirectory;
+
+    /// <summary>
+    /// True while the user has paused this tab: the running phase finishes, and the next phase
+    /// starts only after Play (Workflow_LOAD_AND_PAUSE spec section 6). Not persisted.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(PauseCommand))]
+    [NotifyCanExecuteChangedFor(nameof(UnpauseCommand))]
+    private bool _isPaused;
+
+    /// <summary>
+    /// True once a run on this tab has ended with every phase completed - phase 4 wrote its done
+    /// file. The Start button then gives way to <c>Task abschliessen</c>, which closes the tab:
+    /// there is nothing left to continue. Never cleared, because the name lock leaves this tab
+    /// bound to the finished task; restarting it is what <c>Task laden</c> is for.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    private bool _isTaskFinished;
 
     /// <summary>Creates the tab.</summary>
     /// <param name="folders">Task-folder service.</param>
@@ -235,6 +279,19 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     /// </remarks>
     public SubtaskIndicatorViewModel SubtaskIndicator { get; } = new();
 
+    /// <summary>Applies one launcher-status report from the running workflow.</summary>
+    /// <param name="message">
+    /// Why the session is not sending its prompt, or null once it no longer applies.
+    /// </param>
+    /// <remarks>
+    /// A named handler rather than a lambda inside the sink, for the same reason
+    /// <see cref="ApplyProgress"/> is one: a test that drove this through
+    /// <see cref="Progress{T}"/> would be exercising the dispatcher rather than this behaviour.
+    /// It writes only its own property, so an unrelated <see cref="InfoMessage"/> survives both the
+    /// report and the clear.
+    /// </remarks>
+    public void ApplyLauncherStatus(string? message) => LauncherStatusMessage = message;
+
     /// <summary>Applies a phase status change from the orchestrator. Public for testing.</summary>
     /// <param name="progress">The reported change.</param>
     public void ApplyProgress(PhaseProgress progress)
@@ -255,7 +312,10 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         BrowseWorkflowDirectoryCommand.NotifyCanExecuteChanged();
     }
 
-    /// <summary>Prefills this tab from an interrupted task found by the startup scan.</summary>
+    /// <summary>
+    /// Prefills this tab from an interrupted task found by the startup scan, or from a task folder
+    /// picked with <c>Task laden</c> - which may be a finished one.
+    /// </summary>
     /// <param name="task">The task to restore.</param>
     public void LoadForResume(RecoverableTask task)
     {
@@ -292,6 +352,12 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             SeedSubtaskIndicatorFromLedger(task.Paths.TaskName);
             ResumePhase = task.ResumePhase;
             IsRecovered = true;
+
+            // Only 'Task laden' hands over a finished task; the startup scan never does.
+            if (task.ResumePhase is null)
+            {
+                InfoMessage = FinishedTaskMessage;
+            }
         }
         finally
         {
@@ -435,9 +501,10 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
         var state = _stateStore.TryLoad(paths);
 
-        // The same demote-never-promote rule the startup scan applies, from the same helper: an
-        // unreconciled re-arm would resume into a phase whose inputs have been deleted, which is
-        // exactly what the rule exists to prevent (SPEC section 6.3.2).
+        // The same reconciliation the startup scan applies, from the same helper: an unreconciled
+        // re-arm would resume into a phase whose inputs have been deleted, or re-run one whose
+        // outputs already exist (SPEC section 6.3.2). Without a journal there is nothing to
+        // reconcile, and the tab below stays a fresh start even if the folder holds artefacts.
         if (state is not null && PhaseReconciliation.Reconcile(paths, state))
         {
             _stateStore.ReplacePhases(paths, [.. state.Phases]);
@@ -459,11 +526,16 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         ResumePhase = next;
     }
 
-    private void ResetPhaseIndicators()
+    // From the given phase on, never before it: the phases before a resumed run's start phase are
+    // the only record that they happened - the same split ClearPhasesFrom makes in the journal.
+    private void ResetPhaseIndicators(WorkflowPhase from = WorkflowPhase.Specification)
     {
         foreach (var indicator in Phases)
         {
-            indicator.Status = PhaseStatus.Pending;
+            if (indicator.Phase >= from)
+            {
+                indicator.Status = PhaseStatus.Pending;
+            }
         }
     }
 
@@ -740,6 +812,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     private bool CanStartWorkflow() =>
         !IsRunning
+        && !IsTaskFinished
         // F17 / spec section 9.4: a prompt-template problem disables Start on EVERY tab,
         // including tabs opened with '+' after the startup dialog was dismissed. Holding the
         // flag only on MainWindowViewModel leaves the button executable once the modal is gone.
@@ -772,6 +845,12 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         IsRunning = true;
 
         var startPhase = ResumePhase ?? WorkflowPhase.Specification;
+
+        // The orchestrator's first act is to clear the journal from the start phase on
+        // (ClearPhasesFrom); the indicators follow suit here, after the start gate, so a refused
+        // start destroys nothing. Without it a restarted finished task - which 'Task laden' can
+        // open - would show phases 2-4 green while phase 1 runs.
+        ResetPhaseIndicators(startPhase);
 
         // Requirement 3.4: the subtask indicator is grey before phase 4, and it cannot be grey
         // "with counts" - a row reading '3 von 6' while phase 1 runs describes work this run has
@@ -832,7 +911,16 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             // FIFO queue. Built on a pool thread instead it would have no context, fall back to
             // unordered ThreadPool.QueueUserWorkItem, and let requirement 3.7's ordered states
             // latch a stale payload - besides touching observable properties off the UI thread.
-            new Progress<SubtaskProgress>(SubtaskIndicator.Apply));
+            new Progress<SubtaskProgress>(SubtaskIndicator.Apply),
+            // Created on the UI thread for the same reason as the two sinks above: Progress<T>
+            // captures the creating thread's SynchronizationContext, and only the dispatcher's
+            // gives ordered delivery onto observable properties. Without this argument the
+            // orchestrator's stall reason would exist but reach nothing, and the refusal to paste
+            // would be visible only as a terminal that appears to have stopped for no reason.
+            new Progress<string?>(ApplyLauncherStatus),
+            // Spec 6.3: the run waits at a phase boundary while this tab is paused. The tab's own
+            // gate rather than a fresh one, so a pause armed before Start still counts.
+            _pauseGate);
 
         // Kept, not discarded: CompleteTaskAsync awaits this handle so the tab closes only after the
         // run has ended (requirement 5.3). Still not awaited HERE - StartWorkflow must return to the
@@ -852,6 +940,9 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         try
         {
             await _orchestrator.RunAsync(request, cancellationToken);
+
+            // Only a run that came back normally can have finished the task.
+            IsTaskFinished = IsEveryPhaseCompleted(request.Paths);
         }
         catch (OperationCanceledException)
         {
@@ -905,8 +996,19 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         finally
         {
             IsRunning = false;
+
+            // The orchestrator clears this itself on every ordinary exit, but a run that ends by
+            // exception unwinds past that point. A stall reason outliving its run would tell the
+            // user a stopped terminal is still waiting for a launcher.
+            LauncherStatusMessage = null;
         }
     }
+
+    // The journal rather than the indicators: the orchestrator wrote it before returning, whereas
+    // the indicators are fed through Progress<T>, whose delivery this method does not control. A
+    // subtask run that stopped short leaves Implementation Active, so it never counts as finished.
+    private bool IsEveryPhaseCompleted(TaskPaths paths) =>
+        _stateStore.TryLoad(paths) is { } state && PhaseReconciliation.FirstIncomplete(state) is null;
 
     [RelayCommand]
     private void BrowseDirectory()
@@ -934,6 +1036,34 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             WorkflowDirectory = chosen;
         }
     }
+
+    // The property is the gate's only writer, so the buttons and the gate cannot disagree.
+    partial void OnIsPausedChanged(bool value)
+    {
+        if (value)
+        {
+            _pauseGate.Pause();
+        }
+        else
+        {
+            _pauseGate.Unpause();
+        }
+    }
+
+    private bool CanPause() => !IsPaused;
+
+    /// <remarks>
+    /// Deliberately independent of <see cref="IsRunning"/> and of the active phase, and it never
+    /// touches <c>_manualSignal</c>: pausing only withholds the NEXT phase, so it is as safe to press
+    /// before a run as during one (Workflow_LOAD_AND_PAUSE spec section 6.6).
+    /// </remarks>
+    [RelayCommand(CanExecute = nameof(CanPause))]
+    private void Pause() => IsPaused = true;
+
+    private bool CanUnpause() => IsPaused;
+
+    [RelayCommand(CanExecute = nameof(CanUnpause))]
+    private void Unpause() => IsPaused = false;
 
     private bool CanCompleteTask() => IsRunning && _activePhase == WorkflowPhase.Implementation;
 

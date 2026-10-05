@@ -1,0 +1,524 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 1000 700"
+     preserveAspectRatio="none">
+
+    <defs>
+        <!-- Main antique gold -->
+        <linearGradient id="goldHorizontal" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stop-color="#6F390D"/>
+            <stop offset="8%"   stop-color="#B66B19"/>
+            <stop offset="20%"  stop-color="#F7D36B"/>
+            <stop offset="34%"  stop-color="#A85D13"/>
+            <stop offset="53%"  stop-color="#E6AF42"/>
+            <stop offset="70%"  stop-color="#7F420D"/>
+            <stop offset="86%"  stop-color="#F0C65B"/>
+            <stop offset="100%" stop-color="#6E350B"/>
+        </linearGradient>
+
+        <linearGradient id="goldVertical" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%"   stop-color="#70380C"/>
+            <stop offset="12%"  stop-color="#D79731"/>
+            <stop offset="29%"  stop-color="#F8D773"/>
+            <stop offset="45%"  stop-color="#A65B13"/>
+            <stop offset="65%"  stop-color="#E7AE3F"/>
+            <stop offset="83%"  stop-color="#8A470E"/>
+            <stop offset="100%" stop-color="#E7B54C"/>
+        </linearGradient>
+
+        <radialGradient id="ornamentGold">
+            <stop offset="0%" stop-color="#FFF0A5"/>
+            <stop offset="28%" stop-color="#E4A83A"/>
+            <stop offset="62%" stop-color="#9B5210"/>
+            <stop offset="100%" stop-color="#542607"/>
+        </radialGradient>
+
+        <linearGradient id="innerGold" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#FFF1A4"/>
+            <stop offset="30%" stop-color="#C98120"/>
+            <stop offset="60%" stop-color="#7F400C"/>
+            <stop offset="100%" stop-color="#EFC457"/>
+        </linearGradient>
+    </defs>
+
+
+    <!-- ========================================================= -->
+    <!-- TOP FRAME                                                  -->
+    <!-- ========================================================= -->
+
+    <path
+        d="
+        M 75 25
+        C 190 5, 300 22, 395 24
+        C 430 24, 455 9, 500 4
+        C 545 9, 570 24, 605 24
+        C 700 22, 810 5, 925 25
+
+        L 905 118
+
+        C 790 104, 680 111, 600 108
+        C 555 106, 535 96, 500 95
+        C 465 96, 445 106, 400 108
+        C 320 111, 210 104, 95 118
+
+        Z"
+        fill="url(#goldHorizontal)"
+        stroke="#6A3309"
+        stroke-width="7"/>
+
+    <!-- top highlight -->
+    <path
+        d="M 96 47
+           C 210 27, 325 42, 405 43
+           C 450 44, 462 23, 500 18
+           C 538 23, 550 44, 595 43
+           C 675 42, 790 27, 904 47"
+        fill="none"
+        stroke="#FFE68B"
+        stroke-width="8"
+        opacity="0.75"/>
+
+    <path
+        d="M 100 87
+           C 220 75, 325 83, 405 82
+           C 450 82, 470 70, 500 69
+           C 530 70, 550 82, 595 82
+           C 675 83, 780 75, 900 87"
+        fill="none"
+        stroke="#78400F"
+        stroke-width="8"/>
+
+
+    <!-- ========================================================= -->
+    <!-- BOTTOM FRAME                                               -->
+    <!-- ========================================================= -->
+
+    <path
+        d="
+        M 95 582
+        C 210 596, 320 589, 400 592
+        C 445 594, 465 604, 500 605
+        C 535 604, 555 594, 600 592
+        C 680 589, 790 596, 905 582
+
+        L 925 675
+
+        C 810 695, 700 678, 605 676
+        C 570 676, 545 691, 500 696
+        C 455 691, 430 676, 395 676
+        C 300 678, 190 695, 75 675
+
+        Z"
+        fill="url(#goldHorizontal)"
+        stroke="#6A3309"
+        stroke-width="7"/>
+
+    <path
+        d="M 100 616
+           C 225 630, 330 620, 405 621
+           C 450 622, 468 637, 500 639
+           C 532 637, 550 622, 595 621
+           C 670 620, 775 630, 900 616"
+        fill="none"
+        stroke="#FFE68B"
+        stroke-width="8"
+        opacity="0.65"/>
+
+
+    <!-- ========================================================= -->
+    <!-- LEFT FRAME                                                 -->
+    <!-- ========================================================= -->
+
+    <path
+        d="
+        M 75 25
+
+        C 55 90, 64 160, 55 230
+        C 48 290, 29 330, 38 350
+        C 29 370, 48 410, 55 470
+        C 64 540, 55 610, 75 675
+
+        L 160 646
+
+        C 140 575, 145 520, 138 470
+        C 132 420, 115 380, 120 350
+        C 115 320, 132 280, 138 230
+        C 145 180, 140 125, 160 54
+
+        Z"
+        fill="url(#goldVertical)"
+        stroke="#6A3309"
+        stroke-width="7"/>
+
+    <path
+        d="M 92 65
+           C 78 135, 88 205, 78 265
+           C 69 315, 57 330, 60 350
+           C 57 370, 69 385, 78 435
+           C 88 495, 78 565, 92 635"
+        fill="none"
+        stroke="#FBE083"
+        stroke-width="9"
+        opacity="0.65"/>
+
+
+    <!-- ========================================================= -->
+    <!-- RIGHT FRAME                                                -->
+    <!-- ========================================================= -->
+
+    <path
+        d="
+        M 925 25
+
+        C 945 90, 936 160, 945 230
+        C 952 290, 971 330, 962 350
+        C 971 370, 952 410, 945 470
+        C 936 540, 945 610, 925 675
+
+        L 840 646
+
+        C 860 575, 855 520, 862 470
+        C 868 420, 885 380, 880 350
+        C 885 320, 868 280, 862 230
+        C 855 180, 860 125, 840 54
+
+        Z"
+        fill="url(#goldVertical)"
+        stroke="#6A3309"
+        stroke-width="7"/>
+
+    <path
+        d="M 908 65
+           C 922 135, 912 205, 922 265
+           C 931 315, 943 330, 940 350
+           C 943 370, 931 385, 922 435
+           C 912 495, 922 565, 908 635"
+        fill="none"
+        stroke="#FBE083"
+        stroke-width="9"
+        opacity="0.65"/>
+
+
+    <!-- ========================================================= -->
+    <!-- INNER RECTANGULAR BORDER                                   -->
+    <!-- CENTER IS TRANSPARENT                                      -->
+    <!-- ========================================================= -->
+
+    <rect x="145"
+          y="105"
+          width="710"
+          height="490"
+          rx="2"
+          fill="none"
+          stroke="#613007"
+          stroke-width="12"/>
+
+    <rect x="155"
+          y="115"
+          width="690"
+          height="470"
+          rx="2"
+          fill="none"
+          stroke="url(#innerGold)"
+          stroke-width="15"/>
+
+    <rect x="169"
+          y="129"
+          width="662"
+          height="442"
+          fill="none"
+          stroke="#FFE99B"
+          stroke-width="4"/>
+
+    <rect x="176"
+          y="136"
+          width="648"
+          height="428"
+          fill="none"
+          stroke="#70400F"
+          stroke-width="4"/>
+
+
+    <!-- ========================================================= -->
+    <!-- CORNER ORNAMENTS                                           -->
+    <!-- ========================================================= -->
+
+    <!-- TOP LEFT -->
+    <g transform="translate(100 73)">
+        <ellipse cx="0" cy="0" rx="55" ry="48"
+                 fill="url(#ornamentGold)"
+                 stroke="#5D2906"
+                 stroke-width="5"/>
+
+        <path d="M -43 -6
+                 C -65 -22 -62 -48 -38 -56
+                 C -17 -63 -12 -39 -21 -26
+                 C -7 -39 10 -45 22 -33
+                 C 35 -20 19 -5 5 1
+                 C 28 3 40 22 25 37
+                 C 11 51 -6 35 -11 20
+                 C -18 43 -42 48 -54 29
+                 C -65 12 -54 0 -43 -6 Z"
+              fill="url(#ornamentGold)"
+              stroke="#6C350A"
+              stroke-width="4"/>
+
+        <ellipse cx="-8" cy="-4"
+                 rx="18" ry="25"
+                 fill="#C27A1D"
+                 stroke="#603006"
+                 stroke-width="4"/>
+
+        <path d="M -19 -8
+                 C -9 -25 9 -25 15 -11
+                 C 19 3 7 17 -7 15
+                 C -23 12 -27 2 -19 -8"
+              fill="#E8B649"
+              stroke="#6C350A"
+              stroke-width="3"/>
+    </g>
+
+
+    <!-- TOP RIGHT -->
+    <g transform="translate(900 73) scale(-1 1)">
+        <ellipse cx="0" cy="0" rx="55" ry="48"
+                 fill="url(#ornamentGold)"
+                 stroke="#5D2906"
+                 stroke-width="5"/>
+
+        <path d="M -43 -6
+                 C -65 -22 -62 -48 -38 -56
+                 C -17 -63 -12 -39 -21 -26
+                 C -7 -39 10 -45 22 -33
+                 C 35 -20 19 -5 5 1
+                 C 28 3 40 22 25 37
+                 C 11 51 -6 35 -11 20
+                 C -18 43 -42 48 -54 29
+                 C -65 12 -54 0 -43 -6 Z"
+              fill="url(#ornamentGold)"
+              stroke="#6C350A"
+              stroke-width="4"/>
+
+        <ellipse cx="-8" cy="-4"
+                 rx="18" ry="25"
+                 fill="#C27A1D"
+                 stroke="#603006"
+                 stroke-width="4"/>
+
+        <path d="M -19 -8
+                 C -9 -25 9 -25 15 -11
+                 C 19 3 7 17 -7 15
+                 C -23 12 -27 2 -19 -8"
+              fill="#E8B649"
+              stroke="#6C350A"
+              stroke-width="3"/>
+    </g>
+
+
+    <!-- BOTTOM LEFT -->
+    <g transform="translate(100 627) scale(1 -1)">
+        <ellipse cx="0" cy="0" rx="55" ry="48"
+                 fill="url(#ornamentGold)"
+                 stroke="#5D2906"
+                 stroke-width="5"/>
+
+        <path d="M -43 -6
+                 C -65 -22 -62 -48 -38 -56
+                 C -17 -63 -12 -39 -21 -26
+                 C -7 -39 10 -45 22 -33
+                 C 35 -20 19 -5 5 1
+                 C 28 3 40 22 25 37
+                 C 11 51 -6 35 -11 20
+                 C -18 43 -42 48 -54 29
+                 C -65 12 -54 0 -43 -6 Z"
+              fill="url(#ornamentGold)"
+              stroke="#6C350A"
+              stroke-width="4"/>
+
+        <ellipse cx="-8" cy="-4"
+                 rx="18" ry="25"
+                 fill="#C27A1D"
+                 stroke="#603006"
+                 stroke-width="4"/>
+
+        <path d="M -19 -8
+                 C -9 -25 9 -25 15 -11
+                 C 19 3 7 17 -7 15
+                 C -23 12 -27 2 -19 -8"
+              fill="#E8B649"
+              stroke="#6C350A"
+              stroke-width="3"/>
+    </g>
+
+
+    <!-- BOTTOM RIGHT -->
+    <g transform="translate(900 627) scale(-1 -1)">
+        <ellipse cx="0" cy="0" rx="55" ry="48"
+                 fill="url(#ornamentGold)"
+                 stroke="#5D2906"
+                 stroke-width="5"/>
+
+        <path d="M -43 -6
+                 C -65 -22 -62 -48 -38 -56
+                 C -17 -63 -12 -39 -21 -26
+                 C -7 -39 10 -45 22 -33
+                 C 35 -20 19 -5 5 1
+                 C 28 3 40 22 25 37
+                 C 11 51 -6 35 -11 20
+                 C -18 43 -42 48 -54 29
+                 C -65 12 -54 0 -43 -6 Z"
+              fill="url(#ornamentGold)"
+              stroke="#6C350A"
+              stroke-width="4"/>
+
+        <ellipse cx="-8" cy="-4"
+                 rx="18" ry="25"
+                 fill="#C27A1D"
+                 stroke="#603006"
+                 stroke-width="4"/>
+
+        <path d="M -19 -8
+                 C -9 -25 9 -25 15 -11
+                 C 19 3 7 17 -7 15
+                 C -23 12 -27 2 -19 -8"
+              fill="#E8B649"
+              stroke="#6C350A"
+              stroke-width="3"/>
+    </g>
+
+
+    <!-- ========================================================= -->
+    <!-- TOP CENTER ORNAMENT                                        -->
+    <!-- ========================================================= -->
+
+    <g transform="translate(500 52)">
+        <path d="
+            M -82 10
+            C -65 -4 -57 -25 -35 -21
+            C -24 -38 -7 -39 0 -20
+            C 7 -39 24 -38 35 -21
+            C 57 -25 65 -4 82 10
+
+            C 64 20 49 18 37 14
+            C 27 35 10 35 0 20
+            C -10 35 -27 35 -37 14
+            C -49 18 -64 20 -82 10
+            Z"
+            fill="url(#ornamentGold)"
+            stroke="#673009"
+            stroke-width="5"/>
+
+        <ellipse cx="0" cy="0"
+                 rx="23"
+                 ry="18"
+                 fill="#D99A2F"
+                 stroke="#703A0B"
+                 stroke-width="4"/>
+
+        <path d="M -13 0
+                 C -4 -15 7 -15 15 -4
+                 C 19 6 8 15 -2 13
+                 C -14 12 -20 7 -13 0 Z"
+              fill="#F1C354"/>
+    </g>
+
+
+    <!-- ========================================================= -->
+    <!-- BOTTOM CENTER ORNAMENT                                     -->
+    <!-- ========================================================= -->
+
+    <g transform="translate(500 648) scale(1 -1)">
+        <path d="
+            M -82 10
+            C -65 -4 -57 -25 -35 -21
+            C -24 -38 -7 -39 0 -20
+            C 7 -39 24 -38 35 -21
+            C 57 -25 65 -4 82 10
+
+            C 64 20 49 18 37 14
+            C 27 35 10 35 0 20
+            C -10 35 -27 35 -37 14
+            C -49 18 -64 20 -82 10
+            Z"
+            fill="url(#ornamentGold)"
+            stroke="#673009"
+            stroke-width="5"/>
+
+        <ellipse cx="0" cy="0"
+                 rx="23"
+                 ry="18"
+                 fill="#D99A2F"
+                 stroke="#703A0B"
+                 stroke-width="4"/>
+
+        <path d="M -13 0
+                 C -4 -15 7 -15 15 -4
+                 C 19 6 8 15 -2 13
+                 C -14 12 -20 7 -13 0 Z"
+              fill="#F1C354"/>
+    </g>
+
+
+    <!-- ========================================================= -->
+    <!-- SIDE ORNAMENTS                                             -->
+    <!-- ========================================================= -->
+
+    <g transform="translate(82 350)">
+        <path d="
+            M 0 -70
+            C 27 -61 39 -43 28 -23
+            C 49 -14 48 11 30 23
+            C 40 46 22 65 0 70
+            C -22 65 -40 46 -30 23
+            C -48 11 -49 -14 -28 -23
+            C -39 -43 -27 -61 0 -70 Z"
+            fill="url(#ornamentGold)"
+            stroke="#632E07"
+            stroke-width="5"/>
+
+        <path d="M 0 -43
+                 C 23 -31 25 -12 9 -2
+                 C 24 9 18 29 0 40
+                 C -18 29 -24 9 -9 -2
+                 C -25 -12 -23 -31 0 -43"
+              fill="#D9972A"
+              stroke="#72380B"
+              stroke-width="4"/>
+    </g>
+
+    <g transform="translate(918 350) scale(-1 1)">
+        <path d="
+            M 0 -70
+            C 27 -61 39 -43 28 -23
+            C 49 -14 48 11 30 23
+            C 40 46 22 65 0 70
+            C -22 65 -40 46 -30 23
+            C -48 11 -49 -14 -28 -23
+            C -39 -43 -27 -61 0 -70 Z"
+            fill="url(#ornamentGold)"
+            stroke="#632E07"
+            stroke-width="5"/>
+
+        <path d="M 0 -43
+                 C 23 -31 25 -12 9 -2
+                 C 24 9 18 29 0 40
+                 C -18 29 -24 9 -9 -2
+                 C -25 -12 -23 -31 0 -43"
+              fill="#D9972A"
+              stroke="#72380B"
+              stroke-width="4"/>
+    </g>
+
+
+    <!-- ========================================================= -->
+    <!-- SMALL DECORATIVE LEAVES                                    -->
+    <!-- ========================================================= -->
+
+    <g fill="#A65D15" stroke="#683209" stroke-width="2">
+        <path d="M 183 68 C 208 49 233 50 250 65 C 223 64 206 75 183 68 Z"/>
+        <path d="M 817 68 C 792 49 767 50 750 65 C 777 64 794 75 817 68 Z"/>
+
+        <path d="M 183 632 C 208 651 233 650 250 635 C 223 636 206 625 183 632 Z"/>
+        <path d="M 817 632 C 792 651 767 650 750 635 C 777 636 794 625 817 632 Z"/>
+    </g>
+
+</svg>

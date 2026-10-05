@@ -29,10 +29,16 @@
       "description": "Trust dialog. Option 1 'Yes, proceed' is preselected, so Enter is correct."
     },
     {
+      "id": "codex-update-skip",
+      "pattern": "(?is)skip\\s+until\\s+next\\s+version",
+      "send": "2",
+      "description": "Codex CLI update picker ('Update available', then 'Update now (runs `npm install -g @openai/codex`)' / 'Skip' / 'Skip until next version'), shown before the composer whenever the installed CLI is behind the latest release. The answer is 'Skip'. In codex-rs/tui/src/update_prompt.rs at tag rust-v0.157.1 `highlighted` initialises to UpdateSelection::UpdateNow, so Enter alone would run the update, and Arrow-Down then Enter degrades to the same if the Arrow-Down is dropped. KeyCode::Char('2') selects NotNow directly, and a dropped '2' does nothing. 'Skip until next version' occurs only in this picker; it was verified against the shipped codex.exe on 2026-09-29. The rule must stay ahead of codex-yolo-warning: the picker's footer reads 'enter continue', and that rule answers with a bare Enter."
+    },
+    {
       "id": "codex-trust-directory",
-      "pattern": "(?is)do\\s+you\\s+trust\\s+the\\s+contents\\s+of\\s+this\\s+directory",
+      "pattern": "(?is)(trust\\s+this\\s+folder|trust\\s+and\\s+continue|do\\s+you\\s+trust\\s+the\\s+contents\\s+of\\s+this\\s+directory)",
       "send": "\\r",
-      "description": "Codex CLI startup gate, shown in every directory not yet listed under [projects.'...'] in ~/.codex/config.toml; '--yolo' does not skip it. Captured screen: '> 1. Yes, continue / 2. No, quit / Press enter to continue' - the affirmative row is preselected, so Enter is correct. The word gaps are \\s+ because the snapshot is a wrapped 120-column buffer and the sentence spans rows."
+      "description": "Codex CLI startup gate, shown in every directory not yet listed under [projects.'...'] in ~/.codex/config.toml; '--yolo' does not skip it. Codex 0.156.1 reworded it: the heading is now 'Trust this folder?' and the affirmative row is 'Trust and continue' - the 0.154 wording 'Do you trust the contents of this directory' no longer occurs in the binary at all, so both wordings are matched. Enter is correct: in codex-rs/tui/src/onboarding/trust_directory.rs at tag rust-v0.156.1 `highlighted` initialises to TrustDirectorySelection::Trust and KeyCode::Enter calls handle_trust(). Strings verified against the shipped codex.exe on 2026-09-25. The word gaps are \\s+ because the snapshot is a wrapped 120-column buffer and the sentence spans rows."
     },
     {
       "id": "codex-yolo-warning",

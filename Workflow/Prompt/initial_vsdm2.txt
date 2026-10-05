@@ -1,0 +1,228 @@
+Phase1
+
+We need to design and plan the following feature/task:
+
+please add vsdm2 functionality to qservice. qserviceui must get a checkbox that switches between
+vsdm1 and vsdm2. the switch is already stored in quincywin.ini vsdm2=0 by default. vsdm2 will be mandatory in a 
+few months. we implement most of functionality in qconnector, QZeta. get inspired by 
+the Quincy side within C:\Users\Quincy\Documents\QuincyNET\Quincy_App, not QService: Modul/PoppClientVB/ (PoppMaster, PoppAuthClient, IPoppProofProvider), Model/QuincyModelVB/ZetaDTOs/VSDMResponse.vb, Model/FHirStarter/Gematik/VSDM2/VSDM2_Poco.vb, NetCore10/ZetaHub + NetCore10/zeta-client-csharp (vendor SDK), and the gematik PDFs under Quincy_App/Dokumentation/Gematik/ (gemSysL_VSDM_2.0.0.pdf etc.).
+
+We already have implemented QZeta in "C:\Users\Quincy\Documents\Kontext\Telematik_infrastruktur"
+Extend the functionality if needed. If you need a bigger picture of epa 3 / vsdm do online research in gematik docs called gemspec.
+
+vsdm1 is the process during the card read process that the connector returns information. vsdm2 works without connector instead it uses popp client and zeta guard.
+you can find online documentation about epa3 vsdm and telematik infrastruktur on the gematik page gemspec:
+
+vsdm2: https://gemspec.gematik.de/downloads/gemAnbT/gemAnbT_VSDM_2_FD/gemAnbT_VSDM_2_FD_ATV_1.3.1-0_V1.0.0.html
+popp: https://gemspec.gematik.de/downloads/gemSpec/gemSpec_PoPP_Service/gemSpec_PoPP_Service_V1.1.0.html
+zeta: https://gemspec.gematik.de/docs/gemILF/gemILF_ZETA_API/latest/
+
+Use the Superpowers workflow for the planning phase.
+
+For this phase:
+
+1. Use Superpowers brainstorming to investigate the existing codebase, clarify the requirements, identify constraints, and evaluate reasonable implementation approaches.
+2. Produce the canonical design/specification using the Superpowers conventions.
+3. After the design is sufficiently resolved, use Superpowers writing-plans to produce the detailed implementation plan.
+4. Inspect the actual codebase before making architectural assumptions.
+5. Reference exact files, relevant symbols, existing patterns, tests, APIs, and architectural constraints wherever possible.
+6. Include explicit acceptance criteria and verification steps.
+7. Prefer existing project conventions over introducing new abstractions.
+9. Apply YAGNI and DRY; call out unnecessary complexity.
+10. Identify migrations, compatibility concerns, failure modes, edge cases, and likely regressions.
+11. Make each implementation task sufficiently self-contained that an engineer with no conversational context could execute it from the plan alone.
+
+
+Important workflow rules:
+
+* Do NOT implement the feature yet.
+* Do NOT initialize planning-with-files yet.
+* Do NOT create task_plan.md, findings.md, or progress.md yet.
+* The Superpowers specification and implementation plan are the canonical source of truth.
+* Do not rely on conversational context for information that belongs in the specification or implementation plan.
+* Stop after the specification and implementation plan are complete.
+
+At completion, tell me the paths of:
+
+* the canonical Superpowers specification/design
+* the canonical Superpowers implementation plan
+
+I dont need more output except these paths
+
+
+REVIEW
+
+/review Du bist ein adversarialer Reviewer.
+
+Bewerte ausschließlich Spezifikation, Implementierungsplan, Diff und vorliegende Evidenz.
+Gehe nicht davon aus, dass der Code korrekt ist.
+
+produce "C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\review\2026-09-24-fieldmapper-review.md" for following plan:
+
+- Spec: C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\specs\2026-09-24-fieldmapper-design.md
+- Plan: C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\plans\2026-09-24-fieldmapper.md
+
+
+Suche systematisch nach:
+1. Verletzungen der Anforderungen
+2. falschen Annahmen über die Codebasis
+3. fehlenden Fehler- und Randfallbehandlungen
+4. Sicherheits-, Datenschutz- und Kompatibilitätsrisiken
+5. fehlenden oder schwachen Tests
+6. unnötigem Scope
+7. schlechter Rückrollbarkeit
+
+Für jeden Befund:
+- Schweregrad: blocker / major / minor
+- konkrete Datei und Symbol
+- Begründung
+- reproduzierbares Beispiel oder Gegenbeispiel
+- konkrete Korrektur
+- Verifikationsschritt
+
+Beachte: Du kannst keine UI Tests machen, weil an dieser Maschine weiter gearbeitet wird.
+
+Urteile erst am Ende: approve, request changes oder block.
+
+Crucially, you shouldn't create another handoff document that attempts to summarize everything. 
+Please do not output the whole review. writing the file is sufficient.
+
+
+RESOLVE REVIEW
+ 
+- Spec: C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\specs\2026-09-24-fieldmapper-design.md
+- Plan: C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\plans\2026-09-24-fieldmapper.md
+
+Independent review:
+ "C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\review\2026-09-24-fieldmapper-review.md"
+
+Use the existing Superpowers planning methodology to resolve the review.
+
+For every review finding:
+
+1. Verify the finding against the actual repository.
+2. Determine whether the finding is valid, partially valid, or invalid.
+3. If valid, update the canonical specification and/or implementation plan directly.
+4. If partially valid, incorporate only the justified portion.
+5. If invalid, do not modify the plan merely to satisfy the reviewer.
+6. Resolve contradictions between the specification, implementation plan, and current codebase.
+7. Make acceptance criteria and verification steps explicit where the review exposes ambiguity.
+
+Important:
+
+* The Superpowers specification and implementation plan remain the canonical source of truth.
+* Do not create a second replacement plan.
+* Do not summarize the plan into a handoff.
+* Do not implement anything yet.
+* Do not initialize planning-with-files yet.
+* Preserve good decisions already made unless repository evidence or the review demonstrates a problem.
+
+When finished, report:
+
+* which were rejected
+* whether any unresolved human decisions remain
+
+If there are no unresolved decisions, consider the implementation plan frozen and ready for execution.
+
+Please do not output the whole review or plan changes. adapting the files is sufficient.
+
+
+IMPLEMENTATION
+
+Implement the approved feature using Superpowers together with planning-with-files.
+
+- Spec: C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\specs\2026-09-24-fieldmapper-design.md
+- Plan: C:\Users\Marco\Documents\repo\FieldMapper\docs\superpowers\plans\2026-09-24-fieldmapper.md
+
+
+The plans have already been reviewed and approved. Treat them as the canonical source of truth.
+
+## Responsibilities
+
+Use Superpowers for the implementation methodology:
+
+* follow the approved implementation plan
+* use subagent-driven development where appropriate
+* use test-driven development
+* use systematic debugging when failures occur
+* perform verification before declaring tasks complete
+* perform specification-compliance and code-quality review as required by the Superpowers workflow
+
+Use planning-with-files only as the persistent execution-state layer.
+
+Initialize/use:
+variable taskname = fieldmapper
+* `plans\{taskname}\task_plan.md` — execution phases and completion state
+* `plans\{taskname}\findings.md` — discoveries made while implementing
+* `plans\{taskname}\progress.md` — chronological work, changed files, tests, validation results and errors
+
+## Source-of-truth hierarchy
+
+When information conflicts, use this priority:
+
+1. Approved Superpowers specification
+2. Approved Superpowers implementation plan
+3. Current repository state
+4. `task_plan.md`
+5. `findings.md`
+6. `progress.md`
+7. Conversational context
+
+`task_plan.md` must track the canonical implementation plan rather than replace it.
+
+Do not independently redesign the feature inside `task_plan.md`.
+
+Create execution phases that reference the corresponding tasks or sections of the canonical Superpowers implementation plan.
+
+For example:
+
+Phase 1
+Canonical task: docs/superpowers/plans/{taskname}/...md#task-1
+
+Phase 2
+Canonical task: docs/superpowers/plans/{taskname}/...md#task-2
+
+## Plan deviations
+
+If implementation reveals that the approved plan cannot be followed:
+
+1. Do not silently change architecture.
+2. Record the discovery in `findings.md`.
+3. Record the blocked/deviation state in `task_plan.md`.
+4. Determine whether the deviation is:
+
+   * implementation detail
+   * minor plan correction
+   * architectural/specification change
+
+Implementation-detail deviations may proceed if they preserve the specification and architecture.
+
+Architectural or specification deviations must be explicitly surfaced before changing the canonical plan.
+
+## Execution
+
+Work through the approved plan task-by-task.
+
+For each task:
+
+1. Re-read the relevant canonical plan section.
+2. Update PWF execution state.
+3. Implement using the relevant Superpowers skills.
+4. Run the specified verification.
+5. Record validation results in `progress.md`.
+6. Record important discoveries in `findings.md`.
+7. Mark the execution phase complete only when the acceptance criteria and verification requirements are actually satisfied.
+
+Do not declare the overall feature complete merely because the code has been written.
+
+Completion requires:
+
+* all canonical plan tasks completed
+* acceptance criteria satisfied
+* required tests passing
+* appropriate eval gates has been added to qdocimporter/eval
+* type checking passing
+* lint/static analysis passing where applicable
+* no unresolved implementation blockers
+* final implementation reviewed against the canonical specification and plan
+* PWF execution state accurately reflecting completion

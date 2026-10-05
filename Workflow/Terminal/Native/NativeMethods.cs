@@ -18,6 +18,9 @@ internal static class NativeMethods
     /// <summary>CREATE_UNICODE_ENVIRONMENT.</summary>
     internal const uint CreateUnicodeEnvironment = 0x00000400;
 
+    /// <summary>STARTF_USESTDHANDLES.</summary>
+    internal const int StartfUseStdHandles = 0x00000100;
+
     /// <summary>E_NOTIMPL, returned by CreatePseudoConsole on Windows older than 10 1809.</summary>
     internal const int ENotImpl = unchecked((int)0x80004001);
 

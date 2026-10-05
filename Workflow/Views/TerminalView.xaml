@@ -7,16 +7,29 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d">
-    <Grid>
-        <wv2:WebView2 x:Name="TerminalWebView"
-                      Visibility="{Binding IsTerminalAvailable, Converter={StaticResource BooleanToVisibilityConverter}}" />
+    <UserControl.Resources>
+        <!-- Must match theme.background in Assets/Terminal/terminal.js, so the padding below reads
+             as part of the terminal rather than as a second surface around it. -->
+        <SolidColorBrush x:Key="TerminalBackgroundBrush" Color="#1E1E1E" />
+    </UserControl.Resources>
 
-        <TextBlock Margin="24"
-                   TextWrapping="Wrap"
-                   VerticalAlignment="Center"
-                   HorizontalAlignment="Center"
-                   Foreground="{DynamicResource MaterialDesignBody}"
-                   Text="{Binding TerminalErrorMessage}"
-                   Visibility="{Binding IsTerminalAvailable, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
-    </Grid>
+    <!-- The gold frame (TerminalFrameStyle, Styles/TerminalFrameStyles.xaml) is arranged around
+         the terminal and never drawn over it; its inner gold border replaces the old 1 px outline. -->
+    <ContentControl Style="{StaticResource TerminalFrameStyle}">
+        <!-- Square corners: WebView2 is an HwndHost, and its window would paint over rounded ones. -->
+        <Border Padding="8" Background="{StaticResource TerminalBackgroundBrush}">
+            <Grid>
+                <wv2:WebView2 x:Name="TerminalWebView"
+                              Visibility="{Binding IsTerminalAvailable, Converter={StaticResource BooleanToVisibilityConverter}}" />
+
+                <TextBlock Margin="24"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Center"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource MaterialDesignBody}"
+                           Text="{Binding TerminalErrorMessage}"
+                           Visibility="{Binding IsTerminalAvailable, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
+            </Grid>
+        </Border>
+    </ContentControl>
 </UserControl>

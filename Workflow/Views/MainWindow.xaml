@@ -1,4 +1,4 @@
-<mah:MetroWindow x:Class="Workflow.Views.MainWindow"
+﻿<mah:MetroWindow x:Class="Workflow.Views.MainWindow"
                  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                  xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -17,6 +17,16 @@
                  Background="{DynamicResource MaterialDesignPaper}"
                  TextElement.Foreground="{DynamicResource MaterialDesignBody}"
                  FontFamily="{DynamicResource MaterialDesignFont}">
+
+    <mah:MetroWindow.RightWindowCommands>
+        <mah:WindowCommands ShowSeparators="False">
+            <TextBlock Margin="0,0,12,0"
+                       VerticalAlignment="Center"
+                       Opacity="0.85"
+                       ToolTip="Build-Nummer dieser Installation"
+                       Text="{x:Static vm:MainWindowViewModel.VersionLabel}" />
+        </mah:WindowCommands>
+    </mah:MetroWindow.RightWindowCommands>
 
     <Grid Margin="12">
         <Grid.RowDefinitions>

@@ -11,6 +11,32 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
 {
     private const int SnapshotLines = 60;
 
+    /// <summary>Marker the shell prints immediately before the launcher is invoked.</summary>
+    /// <remarks>
+    /// Seeing it is the only proof that the shell actually executed the line we typed. Without it
+    /// an unrecognised screen is indistinguishable from a shell that never ran anything, and the
+    /// prompt would be pasted into the latter.
+    /// </remarks>
+    private const string RunMarkerPrefix = "WF-RUN-";
+
+    /// <summary>Marker the shell prints once the launcher has returned control to it.</summary>
+    /// <remarks>
+    /// Seeing it is proof that the launcher is gone and the shell owns stdin again. The rendered
+    /// prompt of a shell is deliberately NOT used for this: it varies with the user's profile
+    /// (the session runs pwsh without -NoProfile), wraps in a 120-column buffer, differs for UNC
+    /// paths, and has a continuation form - every one of which would read as "not a shell" and let
+    /// a multi-kilobyte markdown prompt be executed line by line as commands.
+    /// </remarks>
+    private const string ReturnMarkerPrefix = "WF-RET-";
+
+    /// <summary>How often the stalled wait re-reads the screen while the launcher is not running.</summary>
+    private static readonly TimeSpan StallPollInterval = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>Shown while a session refuses to paste because the launcher is not running.</summary>
+    private const string LauncherStalledMessage =
+        "Der Launcher läuft nicht - das Terminal wartet. Starte ihn von Hand; " +
+        "der Prompt wird dann automatisch gesendet.";
+
     /// <summary>Prompt file that turns the existing spec and plan into the ordered subtask index.</summary>
     /// <remarks>
     /// Named here rather than taken from <see cref="PhaseCatalog"/>: decomposition is not a phase,
@@ -135,6 +161,16 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         {
             foreach (var definition in PhaseCatalog.All.Skip((int)request.StartPhase))
             {
+                // The only place a pause acts (Workflow_LOAD_AND_PAUSE spec 6.3): between two phases.
+                // Never before the start phase - Start/Continue is the user asking for exactly that
+                // one - and never inside a phase. The journal already reads "N Completed, N+1
+                // Pending" here, so a crash or a close while held recovers at N+1, and the phase-N
+                // session stays live until RunPhaseAsync starts the next one.
+                if (definition.Phase != request.StartPhase && request.Pause is not null)
+                {
+                    await request.Pause.WaitWhilePausedAsync(cancellationToken);
+                }
+
                 await RunPhaseAsync(request, definition, cancellationToken);
             }
         }
@@ -216,6 +252,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             definition.Completion,
             request.Paths.TaskDirectory,
             WatchedPaths(request.Paths, definition),
+            request.LauncherStatus,
             cancellationToken);
 
         _state.RecordPhase(request.Paths, definition.Phase, PhaseStatus.Completed);
@@ -495,6 +532,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             CompletionRule.FilesExist,
             tracking.SubtaskDirectory(title),
             [tracking.SubtaskResultFile(title)],
+            request.LauncherStatus,
             cancellationToken);
     }
 
@@ -763,6 +801,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             CompletionRule.FilesExist,
             tracking.TaskDirectory,
             [tracking.ResultAbsolute],
+            request.LauncherStatus,
             cancellationToken);
     }
 
@@ -786,6 +825,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
     /// deriving it here would hard-code the phase case into the shared primitive.
     /// </param>
     /// <param name="watchedPaths">Artefact paths the completion rule applies to.</param>
+    /// <param name="launcherStatus">Receives the reason while this session waits for a launcher.</param>
     /// <param name="cancellationToken">Cancels the session.</param>
     /// <returns>
     /// True when the manual signal ended the session, false when the artefact watcher did. This
@@ -807,6 +847,7 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         CompletionRule completion,
         string watchDirectory,
         IReadOnlyList<string> watchedPaths,
+        IProgress<string?>? launcherStatus,
         CancellationToken cancellationToken)
     {
         // The baseline for AnyContentChanged must be captured before the CLI can touch anything.
@@ -830,14 +871,29 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
 
         // Always quoted: working directories contain spaces and umlauts.
         terminal.Send($"cd \"{workingDirectory}\"\r");
-        terminal.Send($"{launcher}\r");
 
-        await SettleAndAnswerAsync(terminal, cancellationToken);
+        // Unguessable per session, and never derived from anything the prompt or the working
+        // directory contains, so no rendered text can be mistaken for the launcher's own markers.
+        var nonce = Guid.NewGuid().ToString("N");
+        terminal.Send(ComposeLauncherCommand(launcher, nonce));
 
-        await SendPromptAsync(
+        var mayPaste = await SettleAndAnswerAsync(
             terminal,
-            _prompts.Render(promptFile, substitutions),
+            manualSignal,
+            nonce,
+            launcherStatus,
             cancellationToken);
+
+        // Asked again here rather than trusting the value alone: the settle loop may have returned
+        // a moment before the user pressed 'Task abschliessen', and starting an agent after the
+        // user has asked to stop is worse than skipping a prompt (design issue 6b).
+        if (mayPaste && !ManualCompletionRequested(manualSignal))
+        {
+            await SendPromptAsync(
+                terminal,
+                _prompts.Render(promptFile, substitutions),
+                cancellationToken);
+        }
 
         // Every phase now has an artefact condition; the manual signal is the escape hatch for
         // all four, not a completion rule of its own.
@@ -979,16 +1035,142 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
         // can press Enter, exactly as before this fix. Better than blocking.
     }
 
-    private async Task SettleAndAnswerAsync(ITerminalController terminal, CancellationToken cancellationToken)
+    /// <summary>Wraps the launcher so the shell reports when it starts and when it returns.</summary>
+    /// <remarks>
+    /// <c>try</c>/<c>finally</c> rather than <c>;</c> on purpose: the session runs pwsh without
+    /// <c>-NoProfile</c>, so a user profile may set <c>$ErrorActionPreference = 'Stop'</c>, and a
+    /// command-not-found would then abort the whole statement list before a trailing statement could
+    /// run - leaving the very case this exists to detect undetectable. The marker is emitted as a
+    /// concatenation so the command line the terminal echoes contains only
+    /// <c>'WF-RET-' + '...'</c>, never the joined literal that matching looks for.
+    /// </remarks>
+    private static string ComposeLauncherCommand(string launcher, string nonce) =>
+        $"Write-Host ('{RunMarkerPrefix}' + '{nonce}'); " +
+        $"try {{ {launcher} }} finally {{ Write-Host ('{ReturnMarkerPrefix}' + '{nonce}') }}\r";
+
+    /// <summary>Whether one of this session's markers stands at the start of a rendered line.</summary>
+    /// <remarks>
+    /// Anchored to the line start so the echoed command - which carries the quoted, unjoined halves
+    /// and is preceded by the shell's own prompt - can never be mistaken for the launcher's output,
+    /// however the 120-column buffer wraps it.
+    /// </remarks>
+    private static bool ContainsMarker(string screenText, string prefix, string nonce)
+    {
+        if (string.IsNullOrEmpty(screenText))
+        {
+            return false;
+        }
+
+        var marker = prefix + nonce;
+
+        foreach (var line in screenText.Split('\n'))
+        {
+            if (line.TrimStart().StartsWith(marker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The single definition of "the launcher's input is ready for the prompt", shared by the settle
+    /// loop and by the wait that follows a stall so the two can never drift apart.
+    /// </summary>
+    /// <remarks>
+    /// A bare ready-pattern hit is never enough: a footer fragment can be painted while the launcher
+    /// is still cold-starting and its composer is not yet listening. The output and quiet-period
+    /// conditions are as much a part of readiness as the pattern is.
+    /// </remarks>
+    private bool IsReadyToPaste(ITerminalController terminal, string screenText) =>
+        terminal.OutputCount > 0
+        && DateTimeOffset.UtcNow - terminal.LastOutputUtc >= TimeSpan.FromMilliseconds(_autoAnswer.RuleSet.QuietPeriodMs)
+        && !string.IsNullOrWhiteSpace(screenText)
+        && _autoAnswer.IsLauncherReady(screenText);
+
+    /// <summary>
+    /// Holds a session that has no running launcher, without a ceiling, until the user starts one by
+    /// hand or completes the phase. The terminal stays live throughout (requirements 2.8 and 5.2).
+    /// </summary>
+    /// <returns>True when the launcher came up and the prompt may now be pasted.</returns>
+    private async Task<bool> WaitForLauncherAsync(
+        ITerminalController terminal,
+        ManualPhaseSignal manualSignal,
+        string nonce,
+        IProgress<string?>? launcherStatus,
+        CancellationToken cancellationToken)
+    {
+        launcherStatus?.Report(LauncherStalledMessage);
+
+        try
+        {
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Asked before the screen is read, so a user who has given up is never overruled by
+                // whatever happens to be rendered at that moment.
+                if (ManualCompletionRequested(manualSignal))
+                {
+                    return false;
+                }
+
+                var screen = await terminal.SnapshotAsync(SnapshotLines, cancellationToken);
+
+                // The return marker must be gone as well as the launcher ready. A relaunched TUI
+                // takes the alternate screen buffer and clears it; a ready footer left over from
+                // the session that already exited does not, and pasting on that alone would put the
+                // prompt back into the shell this wait exists to keep it out of.
+                if (!ContainsMarker(screen, ReturnMarkerPrefix, nonce) && IsReadyToPaste(terminal, screen))
+                {
+                    return true;
+                }
+
+                await Task.Delay(StallPollInterval, cancellationToken);
+            }
+        }
+        finally
+        {
+            // Every exit - ready, manual, cancellation - clears this session's own status and
+            // nothing else, so an unrelated message on the tab survives the stall.
+            launcherStatus?.Report(null);
+        }
+    }
+
+    /// <summary>Answers the launcher's startup dialogs and decides whether the prompt may be pasted.</summary>
+    /// <returns>
+    /// True when there is positive evidence that a launcher is running and may receive the prompt;
+    /// false when the user completed the phase by hand, or when the launcher is provably not
+    /// running and the wait ended without one.
+    /// </returns>
+    private async Task<bool> SettleAndAnswerAsync(
+        ITerminalController terminal,
+        ManualPhaseSignal manualSignal,
+        string nonce,
+        IProgress<string?>? launcherStatus,
+        CancellationToken cancellationToken)
     {
         var configuration = _autoAnswer.RuleSet;
         var fired = new HashSet<string>(StringComparer.Ordinal);
         var quietPeriod = TimeSpan.FromMilliseconds(configuration.QuietPeriodMs);
         var overall = Stopwatch.StartNew();
 
+        // Latched: the run marker scrolls away the moment a full-screen TUI takes over, so "was it
+        // ever seen" is the question, not "is it on screen now".
+        var sawRunMarker = false;
+
         while (overall.Elapsed < TimeSpan.FromMilliseconds(configuration.SettleTimeoutMs))
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // The user's explicit override outranks every other consideration, and is observed from
+            // the first iteration - not only once the ceiling is reached, which would ignore a click
+            // for up to SettleTimeoutMs.
+            if (ManualCompletionRequested(manualSignal))
+            {
+                return false;
+            }
 
             // --- Gate A: the launcher must actually have rendered something. ----------------
             // Without this, the first iteration of a fresh session finds an "idle" terminal
@@ -1019,6 +1201,16 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
                 continue;
             }
 
+            sawRunMarker |= ContainsMarker(screen, RunMarkerPrefix, nonce);
+
+            // Checked on every wake-up, not only at the ceiling: a launcher that fails immediately
+            // returns to the shell within a second or two, and making the user wait out
+            // SettleTimeoutMs before being told so is needless.
+            if (ContainsMarker(screen, ReturnMarkerPrefix, nonce))
+            {
+                return await WaitForLauncherAsync(terminal, manualSignal, nonce, launcherStatus, cancellationToken);
+            }
+
             var rule = _autoAnswer.Match(screen, fired);
 
             if (rule is null || fired.Count >= configuration.MaxAnswersPerPhase)
@@ -1029,9 +1221,9 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
                 // sends it into the shell (or into Claude before its input is listening) and it is
                 // lost, so the Enter that follows has nothing to submit. Only proceed once the
                 // launcher's own input is on screen (spec section 7.3).
-                if (_autoAnswer.IsLauncherReady(screen))
+                if (IsReadyToPaste(terminal, screen))
                 {
-                    return;
+                    return true;
                 }
 
                 // Not ready yet: keep waiting for the ready marker (or the next dialog) rather
@@ -1054,7 +1246,27 @@ public sealed class WorkflowOrchestrator : IWorkflowOrchestrator
             await Task.Delay(quietPeriod, cancellationToken);
         }
 
-        // Ceiling reached: the launcher never rendered, or rules kept matching. The prompt is
-        // sent anyway and the user can intervene in the live terminal.
+        // Ceiling reached: readiness was never confirmed. What happens next is decided by evidence,
+        // never by the absence of it - this is the branch that used to paste unconditionally and so
+        // wrote a whole markdown prompt into a PowerShell prompt, line by line, as commands.
+        if (ManualCompletionRequested(manualSignal))
+        {
+            return false;
+        }
+
+        var final = await terminal.SnapshotAsync(SnapshotLines, cancellationToken);
+        sawRunMarker |= ContainsMarker(final, RunMarkerPrefix, nonce);
+
+        // Either the launcher has already returned, or the shell never even ran the line we typed.
+        // Neither state may receive the prompt.
+        if (ContainsMarker(final, ReturnMarkerPrefix, nonce) || !sawRunMarker)
+        {
+            return await WaitForLauncherAsync(terminal, manualSignal, nonce, launcherStatus, cancellationToken);
+        }
+
+        // The run marker was seen and no return marker followed it: a launcher is provably running
+        // and only its TUI is unrecognised - a wording change in a CLI we do not control. Pasting is
+        // correct here, and keeps a cosmetic drift from stalling every run.
+        return true;
     }
 }

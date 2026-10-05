@@ -7,6 +7,7 @@ Implementierungsplan:
 {plan_path}
 
 The plans have already been reviewed and approved. Treat them as the canonical source of truth.
+you may not create another branch in git or svn
 
 ## Responsibilities
 

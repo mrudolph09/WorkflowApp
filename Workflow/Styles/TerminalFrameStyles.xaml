@@ -1,0 +1,465 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- The gold frame drawn around every terminal. Everything up to TerminalFrameStyle is a
+         one-to-one translation of Assets/terminal-frame.svg (viewBox 0 0 1000 700): same element
+         order, same coordinates, same colours. Two SVG defaults WPF does not share are restated on
+         every element: fills use F1 (nonzero - WPF path markup defaults to even-odd) and every pen
+         has MiterLimit="4" (WPF defaults to 10, which grows spikes on the ornaments' sharp cusps).
+         SVG opacity on a single stroke is folded into the stroke colour's alpha. -->
+
+    <LinearGradientBrush x:Key="TerminalFrameGoldHorizontalBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Offset="0" Color="#6F390D" />
+        <GradientStop Offset="0.08" Color="#B66B19" />
+        <GradientStop Offset="0.20" Color="#F7D36B" />
+        <GradientStop Offset="0.34" Color="#A85D13" />
+        <GradientStop Offset="0.53" Color="#E6AF42" />
+        <GradientStop Offset="0.70" Color="#7F420D" />
+        <GradientStop Offset="0.86" Color="#F0C65B" />
+        <GradientStop Offset="1" Color="#6E350B" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="TerminalFrameGoldVerticalBrush" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Offset="0" Color="#70380C" />
+        <GradientStop Offset="0.12" Color="#D79731" />
+        <GradientStop Offset="0.29" Color="#F8D773" />
+        <GradientStop Offset="0.45" Color="#A65B13" />
+        <GradientStop Offset="0.65" Color="#E7AE3F" />
+        <GradientStop Offset="0.83" Color="#8A470E" />
+        <GradientStop Offset="1" Color="#E7B54C" />
+    </LinearGradientBrush>
+
+    <RadialGradientBrush x:Key="TerminalFrameOrnamentGoldBrush">
+        <GradientStop Offset="0" Color="#FFF0A5" />
+        <GradientStop Offset="0.28" Color="#E4A83A" />
+        <GradientStop Offset="0.62" Color="#9B5210" />
+        <GradientStop Offset="1" Color="#542607" />
+    </RadialGradientBrush>
+
+    <LinearGradientBrush x:Key="TerminalFrameInnerGoldBrush" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Offset="0" Color="#FFF1A4" />
+        <GradientStop Offset="0.30" Color="#C98120" />
+        <GradientStop Offset="0.60" Color="#7F400C" />
+        <GradientStop Offset="1" Color="#EFC457" />
+    </LinearGradientBrush>
+
+    <!-- The SVG repeats each ornament verbatim under a different transform; here each one is
+         drawn once and placed four or two times below. Each placement spells out
+         DrawingGroup.Children and DrawingCollection: a bare StaticResource element as the content
+         of a DrawingGroup is taken as the value of Children itself, not as one item in it, and the
+         dictionary then fails to load. -->
+    <DrawingGroup x:Key="TerminalFrameCornerOrnament">
+        <GeometryDrawing Brush="{StaticResource TerminalFrameOrnamentGoldBrush}">
+            <GeometryDrawing.Geometry>
+                <EllipseGeometry Center="0,0" RadiusX="55" RadiusY="48" />
+            </GeometryDrawing.Geometry>
+            <GeometryDrawing.Pen>
+                <Pen Brush="#5D2906" Thickness="5" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="{StaticResource TerminalFrameOrnamentGoldBrush}"
+                         Geometry="F1 M -43 -6 C -65 -22 -62 -48 -38 -56 C -17 -63 -12 -39 -21 -26 C -7 -39 10 -45 22 -33 C 35 -20 19 -5 5 1 C 28 3 40 22 25 37 C 11 51 -6 35 -11 20 C -18 43 -42 48 -54 29 C -65 12 -54 0 -43 -6 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#6C350A" Thickness="4" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#C27A1D">
+            <GeometryDrawing.Geometry>
+                <EllipseGeometry Center="-8,-4" RadiusX="18" RadiusY="25" />
+            </GeometryDrawing.Geometry>
+            <GeometryDrawing.Pen>
+                <Pen Brush="#603006" Thickness="4" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#E8B649"
+                         Geometry="F1 M -19 -8 C -9 -25 9 -25 15 -11 C 19 3 7 17 -7 15 C -23 12 -27 2 -19 -8">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#6C350A" Thickness="3" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+    </DrawingGroup>
+
+    <DrawingGroup x:Key="TerminalFrameCenterOrnament">
+        <GeometryDrawing Brush="{StaticResource TerminalFrameOrnamentGoldBrush}"
+                         Geometry="F1 M -82 10 C -65 -4 -57 -25 -35 -21 C -24 -38 -7 -39 0 -20 C 7 -39 24 -38 35 -21 C 57 -25 65 -4 82 10 C 64 20 49 18 37 14 C 27 35 10 35 0 20 C -10 35 -27 35 -37 14 C -49 18 -64 20 -82 10 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#673009" Thickness="5" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#D99A2F">
+            <GeometryDrawing.Geometry>
+                <EllipseGeometry Center="0,0" RadiusX="23" RadiusY="18" />
+            </GeometryDrawing.Geometry>
+            <GeometryDrawing.Pen>
+                <Pen Brush="#703A0B" Thickness="4" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#F1C354"
+                         Geometry="F1 M -13 0 C -4 -15 7 -15 15 -4 C 19 6 8 15 -2 13 C -14 12 -20 7 -13 0 Z" />
+    </DrawingGroup>
+
+    <DrawingGroup x:Key="TerminalFrameSideOrnament">
+        <GeometryDrawing Brush="{StaticResource TerminalFrameOrnamentGoldBrush}"
+                         Geometry="F1 M 0 -70 C 27 -61 39 -43 28 -23 C 49 -14 48 11 30 23 C 40 46 22 65 0 70 C -22 65 -40 46 -30 23 C -48 11 -49 -14 -28 -23 C -39 -43 -27 -61 0 -70 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#632E07" Thickness="5" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#D9972A"
+                         Geometry="F1 M 0 -43 C 23 -31 25 -12 9 -2 C 24 9 18 29 0 40 C -18 29 -24 9 -9 -2 C -25 -12 -23 -31 0 -43">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#72380B" Thickness="4" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+    </DrawingGroup>
+
+    <DrawingGroup x:Key="TerminalFrameDrawing">
+        <!-- Invisible backing rectangle: pins Bounds to exactly the SVG viewBox, so every slice's
+             Viewbox below is written in plain SVG coordinates. -->
+        <GeometryDrawing Brush="Transparent">
+            <GeometryDrawing.Geometry>
+                <RectangleGeometry Rect="0,0,1000,700" />
+            </GeometryDrawing.Geometry>
+        </GeometryDrawing>
+
+        <!-- Top frame -->
+        <GeometryDrawing Brush="{StaticResource TerminalFrameGoldHorizontalBrush}"
+                         Geometry="F1 M 75 25 C 190 5, 300 22, 395 24 C 430 24, 455 9, 500 4 C 545 9, 570 24, 605 24 C 700 22, 810 5, 925 25 L 905 118 C 790 104, 680 111, 600 108 C 555 106, 535 96, 500 95 C 465 96, 445 106, 400 108 C 320 111, 210 104, 95 118 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#6A3309" Thickness="7" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Geometry="M 96 47 C 210 27, 325 42, 405 43 C 450 44, 462 23, 500 18 C 538 23, 550 44, 595 43 C 675 42, 790 27, 904 47">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#BFFFE68B" Thickness="8" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Geometry="M 100 87 C 220 75, 325 83, 405 82 C 450 82, 470 70, 500 69 C 530 70, 550 82, 595 82 C 675 83, 780 75, 900 87">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#78400F" Thickness="8" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+
+        <!-- Bottom frame -->
+        <GeometryDrawing Brush="{StaticResource TerminalFrameGoldHorizontalBrush}"
+                         Geometry="F1 M 95 582 C 210 596, 320 589, 400 592 C 445 594, 465 604, 500 605 C 535 604, 555 594, 600 592 C 680 589, 790 596, 905 582 L 925 675 C 810 695, 700 678, 605 676 C 570 676, 545 691, 500 696 C 455 691, 430 676, 395 676 C 300 678, 190 695, 75 675 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#6A3309" Thickness="7" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Geometry="M 100 616 C 225 630, 330 620, 405 621 C 450 622, 468 637, 500 639 C 532 637, 550 622, 595 621 C 670 620, 775 630, 900 616">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#A6FFE68B" Thickness="8" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+
+        <!-- Left frame -->
+        <GeometryDrawing Brush="{StaticResource TerminalFrameGoldVerticalBrush}"
+                         Geometry="F1 M 75 25 C 55 90, 64 160, 55 230 C 48 290, 29 330, 38 350 C 29 370, 48 410, 55 470 C 64 540, 55 610, 75 675 L 160 646 C 140 575, 145 520, 138 470 C 132 420, 115 380, 120 350 C 115 320, 132 280, 138 230 C 145 180, 140 125, 160 54 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#6A3309" Thickness="7" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Geometry="M 92 65 C 78 135, 88 205, 78 265 C 69 315, 57 330, 60 350 C 57 370, 69 385, 78 435 C 88 495, 78 565, 92 635">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#A6FBE083" Thickness="9" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+
+        <!-- Right frame -->
+        <GeometryDrawing Brush="{StaticResource TerminalFrameGoldVerticalBrush}"
+                         Geometry="F1 M 925 25 C 945 90, 936 160, 945 230 C 952 290, 971 330, 962 350 C 971 370, 952 410, 945 470 C 936 540, 945 610, 925 675 L 840 646 C 860 575, 855 520, 862 470 C 868 420, 885 380, 880 350 C 885 320, 868 280, 862 230 C 855 180, 860 125, 840 54 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#6A3309" Thickness="7" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Geometry="M 908 65 C 922 135, 912 205, 922 265 C 931 315, 943 330, 940 350 C 943 370, 931 385, 922 435 C 912 495, 922 565, 908 635">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#A6FBE083" Thickness="9" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+
+        <!-- Inner rectangular border; the centre stays transparent -->
+        <GeometryDrawing>
+            <GeometryDrawing.Geometry>
+                <RectangleGeometry Rect="145,105,710,490" RadiusX="2" RadiusY="2" />
+            </GeometryDrawing.Geometry>
+            <GeometryDrawing.Pen>
+                <Pen Brush="#613007" Thickness="12" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing>
+            <GeometryDrawing.Geometry>
+                <RectangleGeometry Rect="155,115,690,470" RadiusX="2" RadiusY="2" />
+            </GeometryDrawing.Geometry>
+            <GeometryDrawing.Pen>
+                <Pen Brush="{StaticResource TerminalFrameInnerGoldBrush}" Thickness="15" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing>
+            <GeometryDrawing.Geometry>
+                <RectangleGeometry Rect="169,129,662,442" />
+            </GeometryDrawing.Geometry>
+            <GeometryDrawing.Pen>
+                <Pen Brush="#FFE99B" Thickness="4" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing>
+            <GeometryDrawing.Geometry>
+                <RectangleGeometry Rect="176,136,648,428" />
+            </GeometryDrawing.Geometry>
+            <GeometryDrawing.Pen>
+                <Pen Brush="#70400F" Thickness="4" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+
+        <!-- Corner ornaments: SVG translate(x y) scale(sx sy) is the matrix "sx,0,0,sy,x,y" -->
+        <DrawingGroup Transform="1,0,0,1,100,73">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameCornerOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+        <DrawingGroup Transform="-1,0,0,1,900,73">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameCornerOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+        <DrawingGroup Transform="1,0,0,-1,100,627">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameCornerOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+        <DrawingGroup Transform="-1,0,0,-1,900,627">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameCornerOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+
+        <!-- Top and bottom centre ornaments -->
+        <DrawingGroup Transform="1,0,0,1,500,52">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameCenterOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+        <DrawingGroup Transform="1,0,0,-1,500,648">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameCenterOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+
+        <!-- Side ornaments -->
+        <DrawingGroup Transform="1,0,0,1,82,350">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameSideOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+        <DrawingGroup Transform="-1,0,0,1,918,350">
+            <DrawingGroup.Children>
+                <DrawingCollection>
+                    <StaticResource ResourceKey="TerminalFrameSideOrnament" />
+                </DrawingCollection>
+            </DrawingGroup.Children>
+        </DrawingGroup>
+
+        <!-- Small decorative leaves -->
+        <GeometryDrawing Brush="#A65D15" Geometry="F1 M 183 68 C 208 49 233 50 250 65 C 223 64 206 75 183 68 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#683209" Thickness="2" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#A65D15" Geometry="F1 M 817 68 C 792 49 767 50 750 65 C 777 64 794 75 817 68 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#683209" Thickness="2" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#A65D15" Geometry="F1 M 183 632 C 208 651 233 650 250 635 C 223 636 206 625 183 632 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#683209" Thickness="2" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+        <GeometryDrawing Brush="#A65D15" Geometry="F1 M 817 632 C 792 651 767 650 750 635 C 777 636 794 625 817 632 Z">
+            <GeometryDrawing.Pen>
+                <Pen Brush="#683209" Thickness="2" MiterLimit="4" />
+            </GeometryDrawing.Pen>
+        </GeometryDrawing>
+    </DrawingGroup>
+
+    <!-- Nine-slice-style frame. The drawing is cut along the lines below and every piece is drawn
+         at a fixed scale of 1/4, so a 176 x 136 SVG corner is always 44 x 34 on screen and never
+         distorts; only the plain runs of moulding between the ornaments stretch, and only along
+         their own length. Cuts in x for the top and bottom bands: 0 | 260 | 380 | 620 | 740 | 1000
+         (the corners with their leaves, and the centre ornament, stay fixed). Cuts in y for the
+         side bands: 136 | 220 | 480 | 564 (the side ornament stays fixed). Every size below is the
+         SVG length times 1/4. The opening, 176..824 x 136..564, holds the content, which is
+         arranged beside the frame and never beneath it: the terminal is a WebView2, an HwndHost
+         whose window would cover any WPF element drawn over it.
+
+         SnapsToDevicePixels and UseLayoutRounding are load-bearing, not cosmetic, and a test
+         removes each one and fails (TerminalFrameStyleTests). Nothing above this frame rounds
+         layout, so the frame can land between device pixels: without SnapsToDevicePixels the edges
+         of adjacent pieces are then anti-aliased against each other and a faint line of the
+         background shows through at every cut. It is a setter on the ContentControl rather than an
+         attribute of the template's root so that the content inherits it too and meets the frame
+         without a seam. UseLayoutRounding keeps the pieces, and with them the opening, on whole
+         device pixels at fractional display scaling. -->
+    <Style x:Key="TerminalFrameStyle" TargetType="ContentControl">
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="IsTabStop" Value="False" />
+        <Setter Property="SnapsToDevicePixels" Value="True" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContentControl">
+                    <Grid UseLayoutRounding="True">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="44" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="44" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="34" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="34" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Top band -->
+                        <Grid Grid.Row="0" Grid.ColumnSpan="3" IsHitTestVisible="False">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="65" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="60" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="65" />
+                            </Grid.ColumnDefinitions>
+                            <Rectangle Grid.Column="0">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="0,0,260,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="1">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="260,0,120,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="2">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="380,0,240,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="3">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="620,0,120,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="4">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="740,0,260,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                        </Grid>
+
+                        <!-- Bottom band -->
+                        <Grid Grid.Row="2" Grid.ColumnSpan="3" IsHitTestVisible="False">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="65" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="60" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="65" />
+                            </Grid.ColumnDefinitions>
+                            <Rectangle Grid.Column="0">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="0,564,260,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="1">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="260,564,120,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="2">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="380,564,240,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="3">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="620,564,120,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Column="4">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="740,564,260,136" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                        </Grid>
+
+                        <!-- Left band -->
+                        <Grid Grid.Row="1" Grid.Column="0" IsHitTestVisible="False">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="65" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Rectangle Grid.Row="0">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="0,136,176,84" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Row="1">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="0,220,176,260" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Row="2">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="0,480,176,84" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                        </Grid>
+
+                        <!-- Right band -->
+                        <Grid Grid.Row="1" Grid.Column="2" IsHitTestVisible="False">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="65" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Rectangle Grid.Row="0">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="824,136,176,84" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Row="1">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="824,220,176,260" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                            <Rectangle Grid.Row="2">
+                                <Rectangle.Fill>
+                                    <DrawingBrush Drawing="{StaticResource TerminalFrameDrawing}" Viewbox="824,480,176,84" ViewboxUnits="Absolute" Stretch="Fill" />
+                                </Rectangle.Fill>
+                            </Rectangle>
+                        </Grid>
+
+                        <ContentPresenter Grid.Row="1" Grid.Column="1" />
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+</ResourceDictionary>

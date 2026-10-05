@@ -11,7 +11,11 @@ namespace Workflow.Terminal;
 public sealed class ConPtySession : ITerminalSession
 {
     private const int ReadBufferSize = 4096;
+    private static readonly TimeSpan TeardownTimeout = TimeSpan.FromSeconds(3);
 
+    // CA2213 cannot trace disposal into a Task.Run delegate - but Dispose() always runs
+    // ReleaseConsoleAndPipes(), which disposes every one of these, on a worker thread.
+#pragma warning disable CA2213
     private readonly CancellationTokenSource _lifetime = new();
 
     private SafePseudoConsoleHandle? _pseudoConsole;
@@ -20,6 +24,7 @@ public sealed class ConPtySession : ITerminalSession
     private SafeFileHandle? _appRead;
     private FileStream? _input;
     private FileStream? _output;
+#pragma warning restore CA2213
     private Task? _readLoop;
     private int _processId;
     private IntPtr _processHandle = IntPtr.Zero;
@@ -83,6 +88,10 @@ public sealed class ConPtySession : ITerminalSession
         var startupInfo = default(StartupInfoEx);
         startupInfo.StartupInfo.cb = Marshal.SizeOf<StartupInfoEx>();
         startupInfo.lpAttributeList = _attributes.DangerousGetHandle();
+        // Null std handles, explicitly. Without this flag Windows duplicates the host's redirected
+        // stdout/stdin into the shell (testhost, an agent's pwsh), the shell writes past the
+        // pseudo-console and the terminal stays blank. Null makes it take the pseudo-console's.
+        startupInfo.StartupInfo.dwFlags = NativeMethods.StartfUseStdHandles;
 
         var commandLine = $"\"{executable}\" {arguments}";
 
@@ -171,6 +180,15 @@ public sealed class ConPtySession : ITerminalSession
         // Order matters. ClosePseudoConsole can block until the attached client exits, so the
         // process tree is killed first; the pipes are closed last so the read loop sees EOF.
         KillProcessTree();
+
+        // ClosePseudoConsole waits on conhost without a timeout, and a wedged conhost never exits.
+        // Bounding the wait turns that into one orphaned conhost instead of a frozen caller - which
+        // is usually the UI thread. Normally the teardown finishes long before the bound.
+        _ = Task.Run(ReleaseConsoleAndPipes, CancellationToken.None).Wait(TeardownTimeout);
+    }
+
+    private void ReleaseConsoleAndPipes()
+    {
         _pseudoConsole?.Dispose();
         _attributes?.Dispose();
 
@@ -278,7 +296,10 @@ public sealed class ConPtySession : ITerminalSession
 
         var buffer = new byte[ReadBufferSize];
 
-        while (!cancellationToken.IsCancellationRequested)
+        // Only EOF ends this loop - never the token. ClosePseudoConsole waits for conhost to exit,
+        // and conhost cannot exit while its last frames sit in a full output pipe: stopping the
+        // drain on cancellation is what froze the UI thread overnight on 2026-10-01.
+        while (true)
         {
             int count;
             try
@@ -295,6 +316,12 @@ public sealed class ConPtySession : ITerminalSession
             if (count <= 0)
             {
                 return;
+            }
+
+            // Disposal has begun: keep draining, but nobody is listening any more.
+            if (cancellationToken.IsCancellationRequested)
+            {
+                continue;
             }
 
             // Raw bytes only. Decoding here would split multi-byte UTF-8 across reads.

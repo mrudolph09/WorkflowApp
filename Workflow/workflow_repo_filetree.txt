@@ -1,0 +1,35 @@
+workflow-repository/
+├── TASK-2026-001-user-import/
+│   ├── task.json
+│   ├── task_plan.md (planning-with-files)
+│   ├── spec.md
+│   ├── plan.md
+│   ├── review.md 
+│   ├── findings.md (planning-with-files)
+│   ├── progress.md (planning-with-files)
+│   │
+│   ├── subtasks/
+│     ├── ST-001-domain-model/
+│     │   ├── subtask.md
+│     │   ├── task_plan.md (planning-with-files)
+│     │   ├── findings.md (planning-with-files)
+│     │   ├── progress.md (planning-with-files)
+│     │   ├── result.json
+│     │   └── verification.json
+│     │
+│     ├── ST-002-import-validation/
+│     │   ├── subtask.md
+│     │   ├── task_plan.md
+│     │   ├── findings.md
+│     │   ├── progress.md
+│     │   ├── result.json
+│     │   └── verification.json
+│     │
+│     └── ST-003-import-service/
+│         ├── subtask.md
+│         ├── task_plan.md
+│         ├── findings.md
+│         ├── progress.md
+│         ├── result.json
+│         └── verification.json
+└── .gitignore

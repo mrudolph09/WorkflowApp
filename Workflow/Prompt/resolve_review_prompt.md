@@ -5,6 +5,10 @@
 
 Use the existing Superpowers planning methodology to resolve the review.
 
+you cannot do UI tests because on this machine works a human.
+be aware that other sessions could interfer database access.
+you may not create another branch in git or svn
+
 For every review finding:
 
 1. Verify the finding against the actual repository.

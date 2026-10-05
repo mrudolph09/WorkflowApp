@@ -4,144 +4,310 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
-             xmlns:behaviors="clr-namespace:Workflow.Behaviors"
              xmlns:views="clr-namespace:Workflow.Views"
              xmlns:vm="clr-namespace:Workflow.ViewModels"
              d:DataContext="{d:DesignInstance Type=vm:TaskTabViewModel}"
              mc:Ignorable="d">
+    <UserControl.Resources>
+        <!-- One message in the status line: cut off with an ellipsis and shown in full as its
+             tooltip, and collapsed while empty so it leaves no gap before its neighbour. -->
+        <Style x:Key="StatusMessageStyle" TargetType="TextBlock">
+            <Setter Property="Margin" Value="0,0,16,0" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}" />
+            <Style.Triggers>
+                <Trigger Property="Text" Value="">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </Trigger>
+                <Trigger Property="Text" Value="{x:Null}">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- An empty TextBlock still measures one line tall, which left a blank line under the
+             Workflow-Verzeichnis row. Its Visibility is bound locally (requirement 1.3), which a
+             trigger cannot override, so while it has no text it shrinks to nothing instead. -->
+        <Style x:Key="WorkflowDirectoryMessageStyle" TargetType="TextBlock">
+            <Setter Property="Margin" Value="4,4,0,0" />
+            <Style.Triggers>
+                <Trigger Property="Text" Value="">
+                    <Setter Property="Height" Value="0" />
+                    <Setter Property="Margin" Value="0" />
+                </Trigger>
+                <Trigger Property="Text" Value="{x:Null}">
+                    <Setter Property="Height" Value="0" />
+                    <Setter Property="Margin" Value="0" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <!-- The form takes the height its content needs and the terminal everything below it, so no
+         empty band opens between the two at any window size. The code-behind caps the form at
+         half the tab: beyond that its fields scroll and the terminal keeps at least 50 %. -->
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="0.6*" />
-            <RowDefinition Height="0.4*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" Padding="0,0,12,0">
-            <StackPanel>
+        <DockPanel x:Name="FormArea" Grid.Row="0">
 
-                <TextBox materialDesign:HintAssist.Hint="Task"
-                         Style="{StaticResource MaterialDesignOutlinedTextBox}"
-                         IsReadOnly="{Binding IsNameLocked}"
-                         Text="{Binding TaskName, UpdateSourceTrigger=PropertyChanged}" />
-
-                <TextBlock Margin="4,4,0,0"
-                           Foreground="{DynamicResource MaterialDesignValidationErrorBrush}"
-                           TextWrapping="Wrap"
-                           Text="{Binding ValidationMessage}" />
-
-                <TextBlock Margin="4,0,0,0"
-                           Opacity="0.75"
-                           TextWrapping="Wrap"
-                           Text="{Binding InfoMessage}" />
-
-                <TextBlock Margin="0,12,0,4" Text="Taskbeschreibung" />
-
-                <RichTextBox Height="100"
-                             VerticalScrollBarVisibility="Auto"
-                             AcceptsReturn="True"
-                             BorderThickness="1"
-                             BorderBrush="{DynamicResource MaterialDesignDivider}"
-                             behaviors:RichTextBoxAssist.PlainText="{Binding TaskDescription, Mode=TwoWay}" />
-
-                <DockPanel Margin="0,16,0,0" LastChildFill="True">
-                    <Button DockPanel.Dock="Right"
-                            Margin="8,0,0,0"
-                            ToolTip="Verzeichnis auswählen"
-                            Style="{StaticResource MaterialDesignIconButton}"
-                            Command="{Binding BrowseDirectoryCommand}">
-                        <materialDesign:PackIcon Kind="FolderOpen" />
+            <!-- Pinned above the terminal and outside the scroller, so Start, the phase state and
+                 Task abschliessen stay in view when the fields have to scroll. The right margin
+                 matches the scroller's padding, which keeps both right edges in line. -->
+            <Border DockPanel.Dock="Bottom"
+                    Margin="0,16,12,0"
+                    Padding="0,12,0,0"
+                    BorderThickness="0,1,0,0"
+                    BorderBrush="{DynamicResource MaterialDesignDivider}">
+                <DockPanel LastChildFill="True">
+                    <Button DockPanel.Dock="Left"
+                            VerticalAlignment="Center"
+                            Style="{StaticResource MaterialDesignRaisedButton}"
+                            Visibility="{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}"
+                            Command="{Binding StartWorkflowCommand}">
+                        <StackPanel Orientation="Horizontal">
+                            <materialDesign:PackIcon Kind="Play" VerticalAlignment="Center" />
+                            <TextBlock Margin="8,0,0,0" Text="{Binding StartButtonLabel}" />
+                        </StackPanel>
                     </Button>
 
-                    <ComboBox materialDesign:HintAssist.Hint="Arbeitsverzeichnis"
-                              IsEditable="False"
-                              ItemsSource="{Binding RecentDirectories}"
-                              SelectedItem="{Binding WorkingDirectory, Mode=TwoWay}" />
-                </DockPanel>
-
-                <!-- Requirement 1.2: structurally identical to the Arbeitsverzeichnis row above,
-                     so the two read as one family, and shown only while subtask mode is selected.
-                     Both controls sit in this DockPanel, so hiding it hides the whole row. -->
-                <DockPanel Margin="0,12,0,0"
-                           LastChildFill="True"
-                           Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
-                    <Button DockPanel.Dock="Right"
-                            Margin="8,0,0,0"
-                            ToolTip="Workflow-Verzeichnis auswählen"
-                            Style="{StaticResource MaterialDesignIconButton}"
-                            IsEnabled="{Binding IsSubtaskConfigurationEditable}"
-                            Command="{Binding BrowseWorkflowDirectoryCommand}">
-                        <materialDesign:PackIcon Kind="FolderOpen" />
+                    <!-- Takes the Start button's place once phase 4 has written its done file: there
+                         is nothing left to continue, so the one action left is to close the task. -->
+                    <Button DockPanel.Dock="Left"
+                            VerticalAlignment="Center"
+                            Style="{StaticResource MaterialDesignRaisedButton}"
+                            Visibility="{Binding IsTaskFinished, Converter={StaticResource BooleanToVisibilityConverter}}"
+                            Command="{Binding CloseCommand}">
+                        <StackPanel Orientation="Horizontal">
+                            <materialDesign:PackIcon Kind="Check" VerticalAlignment="Center" />
+                            <TextBlock Margin="8,0,0,0" Text="Task abschliessen" />
+                        </StackPanel>
                     </Button>
 
-                    <ComboBox materialDesign:HintAssist.Hint="Workflow-Verzeichnis"
-                              IsEditable="False"
-                              IsEnabled="{Binding IsSubtaskConfigurationEditable}"
-                              ItemsSource="{Binding RecentWorkflowDirectories}"
-                              SelectedItem="{Binding WorkflowDirectory, Mode=TwoWay}" />
+                    <!-- The manual override steps aside once the task is finished, so the bar never
+                         shows 'Task abschliessen' twice. -->
+                    <Button DockPanel.Dock="Right"
+                            VerticalAlignment="Center"
+                            Style="{StaticResource MaterialDesignRaisedButton}"
+                            Content="Task abschliessen"
+                            Visibility="{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}"
+                            Command="{Binding CompleteTaskCommand}" />
+
+                    <!-- Requirements 1.1 and 3.1: the checkbox and the subtask indicator sit beside
+                         the Implementierung indicator and wrap with it on a narrow window, so the
+                         phase indicators and the subtask controls share one outer panel. -->
+                    <WrapPanel Margin="24,0,16,0" VerticalAlignment="Center" Orientation="Horizontal">
+
+                        <ItemsControl VerticalAlignment="Center" ItemsSource="{Binding Phases}">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal" />
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <views:PhaseIndicatorView />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <CheckBox Margin="0,0,24,0"
+                                  VerticalAlignment="Center"
+                                  Content="Subtasks"
+                                  IsChecked="{Binding SubtasksEnabled, Mode=TwoWay}"
+                                  IsEnabled="{Binding IsSubtaskConfigurationEditable}"
+                                  ToolTip="Wenn die Aufgabe das Kontextfenster eines Agents übersteigt, aktiviere Subtasks" />
+
+                        <!-- Workflow_LOAD_AND_PAUSE spec 6.5: beside the Subtasks checkbox. Pause lets
+                             the running phase finish and holds the next one; Play, shown only while
+                             paused, lifts the hold. Neither touches the running phase, so neither is
+                             tied to IsRunning or to the phase-4 lock. -->
+                        <StackPanel Margin="0,0,24,0"
+                                    VerticalAlignment="Center"
+                                    Orientation="Horizontal">
+                            <Button Width="32"
+                                    Height="32"
+                                    Style="{StaticResource MaterialDesignIconButton}"
+                                    ToolTipService.ShowOnDisabled="True"
+                                    ToolTip="Pausieren: Die laufende Phase läuft zu Ende, die nächste startet erst nach Fortsetzen"
+                                    Command="{Binding PauseCommand}">
+                                <materialDesign:PackIcon Kind="Pause" Width="20" Height="20" />
+                            </Button>
+
+                            <Button Width="32"
+                                    Height="32"
+                                    Margin="4,0,0,0"
+                                    Style="{StaticResource MaterialDesignIconButton}"
+                                    ToolTip="Fortsetzen: Die nächste Phase startet wieder automatisch"
+                                    Visibility="{Binding IsPaused, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                    Command="{Binding UnpauseCommand}">
+                                <materialDesign:PackIcon Kind="Play" Width="20" Height="20" />
+                            </Button>
+                        </StackPanel>
+
+                        <!-- The wrapper keeps the tab's DataContext for the Visibility binding while
+                             the inner view receives the indicator view model; one element cannot do
+                             both. The indicator's contents belong to SubtaskIndicatorViewModel. -->
+                        <StackPanel Orientation="Horizontal"
+                                    VerticalAlignment="Center"
+                                    Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <views:SubtaskIndicatorView DataContext="{Binding SubtaskIndicator}" />
+                        </StackPanel>
+
+                    </WrapPanel>
                 </DockPanel>
+            </Border>
 
-                <!-- Requirement 1.3. Its own surface, not the working-directory message above:
-                     that one is rewritten on every keystroke by the folder synchronisation. -->
-                <TextBlock Margin="4,4,0,0"
-                           Foreground="{DynamicResource MaterialDesignValidationErrorBrush}"
-                           TextWrapping="Wrap"
-                           Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"
-                           Text="{Binding WorkflowDirectoryMessage}" />
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,12,0">
+                <!-- Top margin: an outlined box draws its floating hint above its border, and the
+                     scroller would otherwise clip the hint of the first row. -->
+                <Grid Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="16" />
+                        <ColumnDefinition Width="2*" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
 
-                <Button Margin="0,16,0,0"
-                        HorizontalAlignment="Left"
-                        Style="{StaticResource MaterialDesignRaisedButton}"
-                        Command="{Binding StartWorkflowCommand}">
-                    <StackPanel Orientation="Horizontal">
-                        <materialDesign:PackIcon Kind="Play" VerticalAlignment="Center" />
-                        <TextBlock Margin="8,0,0,0" Text="{Binding StartButtonLabel}" />
-                    </StackPanel>
-                </Button>
+                    <TextBox Grid.Row="0"
+                             Grid.Column="0"
+                             materialDesign:HintAssist.Hint="Task"
+                             Style="{StaticResource MaterialDesignOutlinedTextBox}"
+                             FontSize="14"
+                             IsReadOnly="{Binding IsNameLocked}"
+                             Text="{Binding TaskName, UpdateSourceTrigger=PropertyChanged}" />
 
-                <!-- Requirements 1.1 and 3.1: the checkbox and the subtask indicator sit beside
-                     the Implementierung indicator and wrap with it on a narrow window, so the
-                     phase indicators and the subtask controls share one outer panel. -->
-                <WrapPanel Margin="0,20,0,0" Orientation="Horizontal">
+                    <DockPanel Grid.Row="0" Grid.Column="2" LastChildFill="True">
+                        <Button DockPanel.Dock="Right"
+                                Margin="8,0,0,0"
+                                VerticalAlignment="Center"
+                                ToolTip="Verzeichnis auswählen"
+                                Style="{StaticResource MaterialDesignIconButton}"
+                                Command="{Binding BrowseDirectoryCommand}">
+                            <materialDesign:PackIcon Kind="FolderOpen" />
+                        </Button>
 
-                    <ItemsControl ItemsSource="{Binding Phases}">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate>
-                                <WrapPanel Orientation="Horizontal" />
-                            </ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <views:PhaseIndicatorView />
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+                        <ComboBox materialDesign:HintAssist.Hint="Arbeitsverzeichnis"
+                                  Style="{StaticResource MaterialDesignOutlinedComboBox}"
+                                  FontSize="14"
+                                  IsEditable="False"
+                                  ItemsSource="{Binding RecentDirectories}"
+                                  SelectedItem="{Binding WorkingDirectory, Mode=TwoWay}" />
+                    </DockPanel>
 
-                    <CheckBox Margin="0,0,24,0"
-                              VerticalAlignment="Top"
-                              Content="Subtasks"
-                              IsChecked="{Binding SubtasksEnabled, Mode=TwoWay}"
-                              IsEnabled="{Binding IsSubtaskConfigurationEditable}"
-                              ToolTip="Wenn die Aufgabe das Kontextfenster eines Agents übersteigt, aktiviere Subtasks" />
+                    <!-- Requirement 1.2: structurally identical to the Arbeitsverzeichnis row and in
+                         the same column directly beneath it, so the two read as one family, and
+                         shown only while subtask mode is selected. Both controls sit in this
+                         DockPanel, so hiding it hides the whole row. -->
+                    <DockPanel Grid.Row="1"
+                               Grid.Column="2"
+                               Margin="0,12,0,0"
+                               LastChildFill="True"
+                               Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <Button DockPanel.Dock="Right"
+                                Margin="8,0,0,0"
+                                VerticalAlignment="Center"
+                                ToolTip="Workflow-Verzeichnis auswählen"
+                                Style="{StaticResource MaterialDesignIconButton}"
+                                IsEnabled="{Binding IsSubtaskConfigurationEditable}"
+                                Command="{Binding BrowseWorkflowDirectoryCommand}">
+                            <materialDesign:PackIcon Kind="FolderOpen" />
+                        </Button>
 
-                    <!-- The wrapper keeps the tab's DataContext for the Visibility binding while
-                         the inner view receives the indicator view model; one element cannot do
-                         both. The indicator's contents belong to SubtaskIndicatorViewModel. -->
-                    <StackPanel Orientation="Horizontal"
+                        <ComboBox materialDesign:HintAssist.Hint="Workflow-Verzeichnis"
+                                  Style="{StaticResource MaterialDesignOutlinedComboBox}"
+                                  FontSize="14"
+                                  IsEditable="False"
+                                  IsEnabled="{Binding IsSubtaskConfigurationEditable}"
+                                  ItemsSource="{Binding RecentWorkflowDirectories}"
+                                  SelectedItem="{Binding WorkflowDirectory, Mode=TwoWay}" />
+                    </DockPanel>
+
+                    <!-- Requirement 1.3. Its own surface, not the status line below: that one is
+                         rewritten on every keystroke by the folder synchronisation. -->
+                    <TextBlock Grid.Row="2"
+                               Grid.Column="2"
+                               Style="{StaticResource WorkflowDirectoryMessageStyle}"
+                               Foreground="{DynamicResource MaterialDesignValidationErrorBrush}"
+                               TextWrapping="Wrap"
+                               Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"
+                               Text="{Binding WorkflowDirectoryMessage}" />
+
+                    <!-- A fixed height of one line, whatever it shows: the launcher status arrives
+                         while a session is starting and the folder info stays up for the whole
+                         run, and a line that grew or shrank would resize the terminal - and with
+                         it the pty - just as the agent draws its screen. -->
+                    <DockPanel Grid.Row="3"
+                               Grid.Column="0"
+                               Grid.ColumnSpan="3"
+                               Height="20"
+                               Margin="4,4,0,0"
+                               LastChildFill="True">
+                        <TextBlock DockPanel.Dock="Left"
+                                   Style="{StaticResource StatusMessageStyle}"
+                                   Foreground="{DynamicResource MaterialDesignValidationErrorBrush}"
+                                   Text="{Binding ValidationMessage}" />
+
+                        <TextBlock DockPanel.Dock="Left"
+                                   Style="{StaticResource StatusMessageStyle}"
+                                   Opacity="0.75"
+                                   Text="{Binding InfoMessage}" />
+
+                        <TextBlock Style="{StaticResource StatusMessageStyle}"
+                                   FontWeight="SemiBold"
+                                   Text="{Binding LauncherStatusMessage}" />
+                    </DockPanel>
+
+                    <!-- No Height: MinLines/MaxLines only apply without one, so the box grows by one
+                         line per line of text and scrolls from the eleventh line on. -->
+                    <DockPanel Grid.Row="4"
+                               Grid.Column="0"
+                               Grid.ColumnSpan="3"
+                               Margin="0,8,0,0"
+                               LastChildFill="True">
+                        <Button DockPanel.Dock="Right"
+                                Margin="8,4,0,0"
                                 VerticalAlignment="Top"
-                                Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <views:SubtaskIndicatorView DataContext="{Binding SubtaskIndicator}" />
-                    </StackPanel>
+                                ToolTip="Taskbeschreibung kopieren"
+                                Click="CopyTaskDescription_Click">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource MaterialDesignIconButton}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Text.Length, ElementName=TaskDescriptionBox}" Value="0">
+                                            <Setter Property="IsEnabled" Value="False" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                            <materialDesign:PackIcon x:Name="CopyIcon" Kind="ContentCopy" />
+                        </Button>
 
-                </WrapPanel>
+                        <TextBox x:Name="TaskDescriptionBox"
+                                 materialDesign:HintAssist.Hint="Taskbeschreibung"
+                                 Style="{StaticResource MaterialDesignOutlinedTextBox}"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 MinLines="1"
+                                 MaxLines="10"
+                                 VerticalScrollBarVisibility="Auto"
+                                 FontSize="14"
+                                 CaretBrush="{DynamicResource MaterialDesignBody}"
+                                 Text="{Binding TaskDescription, UpdateSourceTrigger=PropertyChanged}" />
+                    </DockPanel>
+                </Grid>
+            </ScrollViewer>
+        </DockPanel>
 
-                <Button Margin="0,16,0,8"
-                        HorizontalAlignment="Left"
-                        Style="{StaticResource MaterialDesignRaisedButton}"
-                        Content="Task abschliessen"
-                        Command="{Binding CompleteTaskCommand}" />
-
-            </StackPanel>
-        </ScrollViewer>
-
-        <views:TerminalView Grid.Row="1" Margin="0,8,0,0" DataContext="{Binding Terminal}" />
+        <views:TerminalView Grid.Row="1" Margin="0,12,0,0" DataContext="{Binding Terminal}" />
     </Grid>
 </UserControl>

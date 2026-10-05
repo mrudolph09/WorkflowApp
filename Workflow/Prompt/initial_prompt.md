@@ -4,6 +4,9 @@ We need to design and plan the following feature/task:
 
 Use the Superpowers workflow for the planning phase.
 
+you cannot do UI tests because on this machine works a human.
+be aware that other sessions could interfer database access.
+
 For this phase:
 
 1. Use Superpowers brainstorming to investigate the existing codebase, clarify the requirements, identify constraints, and evaluate reasonable implementation approaches.
@@ -13,6 +16,7 @@ For this phase:
 5. Reference exact files, relevant symbols, existing patterns, tests, APIs, and architectural constraints wherever possible.
 6. Include explicit acceptance criteria and verification steps.
 7. Prefer existing project conventions over introducing new abstractions.
+8. Estimate your needed context. outsource tasks to sub-agents if necessary.
 9. Apply YAGNI and DRY; call out unnecessary complexity.
 10. Identify migrations, compatibility concerns, failure modes, edge cases, and likely regressions.
 11. Make each implementation task sufficiently self-contained that an engineer with no conversational context could execute it from the plan alone.

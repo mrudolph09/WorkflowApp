@@ -44,6 +44,10 @@ public partial class App : Application
         // makes, so Start stays disabled even on tabs opened after the dialog is dismissed.
         var startupErrors = prompts.ValidateAll();
 
+        // One picker for the whole application: the tabs use it for their directories and the shell
+        // for 'Task laden'. It holds no state.
+        var picker = new DirectoryPickerService();
+
         // CA2000: WebViewEnvironmentProvider is a deliberate app-wide singleton (spec 5.3/6.4 -
         // "one CoreWebView2Environment for the whole application") that lives for the process
         // lifetime; nothing in this composition root disposes any of its long-lived services.
@@ -53,7 +57,7 @@ public partial class App : Application
             orchestrator,
             settings,
             stateStore,
-            new DirectoryPickerService(),
+            picker,
             new WebViewEnvironmentProvider(),
             new ConPtySessionFactory(),
             Dispatcher,
@@ -68,7 +72,7 @@ public partial class App : Application
             maxSubdirectoriesPerRoot: 2000,
             scanTimeout: TimeSpan.FromSeconds(5));
 
-        _shell = new MainWindowViewModel(factory, scanner, startupErrors);
+        _shell = new MainWindowViewModel(factory, scanner, picker, new MessageDialogService(), startupErrors);
 
         var window = new MainWindow { DataContext = _shell };
         window.Closing += (_, _) => _shell.ShutdownAll();

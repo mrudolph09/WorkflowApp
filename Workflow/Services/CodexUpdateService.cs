@@ -5,7 +5,8 @@ namespace Workflow.Services;
 
 /// <summary>
 /// Brings the Codex CLI up to date by running the vendor's install one-liner. The review phase
-/// shells out to <c>codex --yolo</c>, so the app is only ever as current as the CLI on the box;
+/// starts the <c>codex.exe</c> this installer maintains by its full path (see
+/// <see cref="Models.PhaseCatalog" />), so the app is only ever as current as that binary;
 /// refreshing it once per start keeps that dependency from silently ageing.
 /// </summary>
 public sealed class CodexUpdateService

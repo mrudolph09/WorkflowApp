@@ -26,6 +26,7 @@
 
                 <!-- Application styles -->
                 <ResourceDictionary Source="pack://application:,,,/Workflow;component/Styles/TabControlStyles.xaml" />
+                <ResourceDictionary Source="pack://application:,,,/Workflow;component/Styles/TerminalFrameStyles.xaml" />
 
             </ResourceDictionary.MergedDictionaries>
 

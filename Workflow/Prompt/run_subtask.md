@@ -3,7 +3,7 @@ Implement the approved feature using Superpowers together with planning-with-fil
 {subtask}
 
 The plans have already been reviewed and approved. Treat them as the canonical source of truth.
-
+you may not create another branch in git or svn
 ## Directories
 
 The application substitutes these values. All three paths are **absolute** and complete — do not put

@@ -4,7 +4,7 @@
     Acceptance gate for the Workflow application.
 .DESCRIPTION
     Automates criteria A1-A6, V1-V4 and the subtask checks V4a/V4b of the specification. Manual
-    steps V5-V21 are listed at the end and are not automated: they need a human watching a live
+    steps V5-V27 are listed at the end and are not automated: they need a human watching a live
     terminal.
 
     This script requires PowerShell 7 (pwsh), not Windows PowerShell 5.1 (powershell).
@@ -331,7 +331,7 @@ else {
     Write-Host 'All automated checks passed.' -ForegroundColor Green
 }
 Write-Host ''
-Write-Host 'Remaining manual steps (V5-V21) - see specification section 15.3:'
+Write-Host 'Remaining manual steps (V5-V27) - see specification section 15.3 (V22: workflow_border\workflow_border_spec.md section 11.2; V23-V27: Workflow_LOAD_AND_PAUSE\Workflow_LOAD_AND_PAUSE_spec.md section 11.2):'
 Write-Host '  V5  Run the full four-phase pipeline against a scratch directory.'
 Write-Host '  V6  Kill claude.exe mid-phase-1; the app must stay responsive and must not advance.'
 Write-Host '  V7  Break the auto-answer pattern in %APPDATA%\Workflow\autoanswer.rules.json;'
@@ -363,4 +363,24 @@ Write-Host '  V20 Type a finished task name into a fresh tab: all four indicator
 Write-Host '      button reading "Start workflow".'
 Write-Host '  V21 Re-run that finished task and kill Workflow.exe during phase 1: the recovered'
 Write-Host '      tab must show all four indicators grey, not phases 2-4 green.'
+Write-Host '  V22 Every tab''s terminal sits inside the gold frame: corners and ornaments keep their'
+Write-Host '      shape from minimum to maximised size, no hairline shows at any cut or along the'
+Write-Host '      opening at this monitor''s scaling, no grey outline inside the gold, and typing,'
+Write-Host '      selection, scrolling and the auto-answers work as before.'
+Write-Host '  V23 Click "Task laden" (top right, under the version number) and pick <repo>\workflow_border:'
+Write-Host '      a new tab opens with phases 1-3 green, phase 4 grey, "Continue workflow" and a read-only'
+Write-Host '      name. Pick it again: no second tab, the open one is selected. Load a finished task (four'
+Write-Host '      green, info line) and a subtask task (checkbox, directory, counts). "Neuer Task" looks as'
+Write-Host '      before. Overflow: at the minimum width (1100) open tabs until the headers no longer fit -'
+Write-Host '      the "Task laden" chip stays fully visible, uncovered and clickable; then maximise and'
+Write-Host '      check again.'
+Write-Host '  V24 "Task laden" on the repository root and on C:\: one error dialog each, no tab added.'
+Write-Host '  V25 Press Pause during phase 1: Play appears; phase 1 turns green, phase 2 does not start,'
+Write-Host '      the terminal stays usable. Press Play: phase 2 starts at once. Pause then Play while'
+Write-Host '      phase 2 runs: phase 3 follows without a hold.'
+Write-Host '  V26 (tab) Hold a scratch task''s run after phase 1, then close its tab: no error message;'
+Write-Host '      Task Manager shows no pwsh/node/claude/codex left from that tab.'
+Write-Host '  V27 (application) Hold a run after phase 1, then close the application: no orphan'
+Write-Host '      pwsh/node/claude/codex; after a restart the task is offered with "Continue workflow"'
+Write-Host '      at phase 2.'
 exit 0

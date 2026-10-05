@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -34,5 +34,51 @@
     </Content>
     <Resource Include="Assets\workflow.ico" />
   </ItemGroup>
+
+  <!-- Build counter. Every build of this project bumps Workflow\build.number and generates
+       BuildInfo.g.cs from it, so the version shown top-right in the window identifies the exact
+       build that is running (there is no installer; the app is deployed by file copy). -->
+  <PropertyGroup>
+    <BuildNumberFile>$(MSBuildProjectDirectory)\build.number</BuildNumberFile>
+  </PropertyGroup>
+
+  <Target Name="IncrementBuildNumber"
+          BeforeTargets="BeforeBuild;GetAssemblyVersion;GenerateAssemblyInfo"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <ReadLinesFromFile File="$(BuildNumberFile)" Condition="Exists('$(BuildNumberFile)')">
+      <Output TaskParameter="Lines" ItemName="_BuildNumberLine" />
+    </ReadLinesFromFile>
+
+    <PropertyGroup>
+      <_PreviousBuildNumber>@(_BuildNumberLine)</_PreviousBuildNumber>
+      <_PreviousBuildNumber Condition="'$(_PreviousBuildNumber)' == ''">0</_PreviousBuildNumber>
+      <!-- WPF compiles XAML through a temporary "<name>_wpftmp" copy of this project, which runs
+           this target a second time inside the same build: it must reuse the number, not bump it. -->
+      <_IsWpfTempProject>$(MSBuildProjectName.EndsWith('_wpftmp'))</_IsWpfTempProject>
+      <BuildNumber Condition="'$(_IsWpfTempProject)' != 'true'">$([MSBuild]::Add($(_PreviousBuildNumber), 1))</BuildNumber>
+      <BuildNumber Condition="'$(_IsWpfTempProject)' == 'true'">$(_PreviousBuildNumber)</BuildNumber>
+      <Version>1.0.$(BuildNumber)</Version>
+      <FileVersion>1.0.$(BuildNumber).0</FileVersion>
+      <InformationalVersion>1.0.$(BuildNumber)</InformationalVersion>
+      <BuildInfoFile>$(IntermediateOutputPath)BuildInfo.g.cs</BuildInfoFile>
+    </PropertyGroup>
+
+    <WriteLinesToFile File="$(BuildNumberFile)" Lines="$(BuildNumber)" Overwrite="true" Condition="'$(_IsWpfTempProject)' != 'true'" />
+
+    <!-- Semicolons are item separators in Lines, hence %3B. -->
+    <WriteLinesToFile File="$(BuildInfoFile)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true"
+                      Lines="// &lt;auto-generated /&gt; by the IncrementBuildNumber target in Workflow.csproj.;namespace Workflow%3B;;/// &lt;summary&gt;Build identity of this assembly.&lt;/summary&gt;;public static class BuildInfo;{;    /// &lt;summary&gt;Version as shown in the window title bar, 1.0.N.&lt;/summary&gt;;    public const string Version = &quot;$(Version)&quot;%3B;}" />
+
+    <!-- The stock assembly-info target is only re-run when the project file changes; force it so
+         FileVersion/InformationalVersion pick up the new number too. -->
+    <Delete Files="$(GeneratedAssemblyInfoFile)" />
+
+    <ItemGroup>
+      <Compile Include="$(BuildInfoFile)" />
+      <FileWrites Include="$(BuildInfoFile)" />
+    </ItemGroup>
+  </Target>
 
 </Project>

@@ -8,8 +8,19 @@ public static class PhaseCatalog
     [
         new PhaseDefinition(
             WorkflowPhase.Specification, "Spezifikation", "yo", "initial_prompt.md", CompletionRule.FilesExist),
+        // Full path: this is where CodexUpdateService's standalone installer puts the CLI, so the
+        // review runs the binary the app keeps current - not whichever `codex` (npm, bun) is first
+        // on PATH.
+        // --no-daemon: the background server is a detached process without a console, so every
+        // PowerShell it spawns flashes its own window; its pid file also outlives a reboot, and once
+        // Windows hands that pid to a protected process (lsass) `codex` dies with "failed to open
+        // daemon process: Zugriff verweigert (os error 5)" before the review ever starts.
         new PhaseDefinition(
-            WorkflowPhase.Review, "Review", "codex --yolo", "review_prompt.md", CompletionRule.FilesExist),
+            WorkflowPhase.Review,
+            "Review",
+            @"& ""$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin\codex.exe"" --yolo --no-daemon",
+            "review_prompt.md",
+            CompletionRule.FilesExist),
         new PhaseDefinition(
             WorkflowPhase.ResolveReview, "Review umsetzen", "yo", "resolve_review_prompt.md", CompletionRule.AllContentChanged),
         new PhaseDefinition(

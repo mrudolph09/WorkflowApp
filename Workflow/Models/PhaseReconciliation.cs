@@ -37,40 +37,61 @@ public enum SubtaskEvidence
 }
 
 /// <summary>
-/// The demote-never-promote rule that reconciles a workflow journal against the artefacts actually
-/// on disk, plus the resume-phase lookup that depends on it.
+/// The rule that reconciles a workflow journal against the artefacts actually on disk - demote
+/// what the disk no longer backs, promote what the disk already proves - plus the resume-phase
+/// lookup that depends on it.
 /// </summary>
 /// <remarks>
 /// One shared helper rather than a private method on the scanner: the rule is needed by the
 /// startup scan AND by the re-arm path in <c>TaskTabViewModel.SyncFolder</c>, and two copies would
 /// be free to disagree. An unreconciled re-arm would resume straight into a phase whose inputs
-/// have been deleted, which is precisely what this rule exists to prevent (SPEC sections 6.3
-/// and 6.3.2).
+/// have been deleted, or re-run one whose outputs already exist (SPEC sections 6.3 and 6.3.2).
+/// Both callers reconcile only a journal that exists: a folder without one was never run by this
+/// application and stays a fresh start.
 /// </remarks>
 public static class PhaseReconciliation
 {
     /// <summary>
     /// Demotes every phase whose recorded completion is no longer backed by its artefacts - and
-    /// every phase after it - to <see cref="PhaseStatus.Pending"/>.
+    /// every phase after it - to <see cref="PhaseStatus.Pending"/>, then promotes, in catalogue
+    /// order, every phase whose completion condition already holds on disk.
     /// </summary>
     /// <param name="paths">The task's path set, used to locate the artefacts.</param>
     /// <param name="state">The journal, reconciled in place.</param>
     /// <returns>
-    /// True when at least one phase was demoted, so the caller can persist the corrected array
-    /// through <c>ITaskStateStore.ReplacePhases</c>. False means the journal already agreed with
-    /// the disk and nothing needs writing.
+    /// True when at least one phase was demoted or promoted, so the caller can persist the
+    /// corrected array through <c>ITaskStateStore.ReplacePhases</c>. False means the journal
+    /// already agreed with the disk and nothing needs writing.
     /// </returns>
     /// <remarks>
-    /// Disk evidence may DEMOTE a phase; it may never promote one. Promotion would resurrect the
-    /// hazard where a folder that merely happens to hold a spec and a plan is reported as
-    /// "phase 1 done" for a task that never ran. Demotion is safe: it can only ever cause more
-    /// work to be re-run, never less.
+    /// <para>
+    /// Demotion is safe: it can only ever cause more work to be re-run, never less, and it keeps a
+    /// resume out of a phase whose inputs have been deleted.
+    /// </para>
+    /// <para>
+    /// Promotion closes the crash window the journal cannot see. The orchestrator records
+    /// <c>Completed</c> only when the running process observes its watcher fire, so an application
+    /// that hangs or is killed after the CLI wrote a phase's artefacts leaves that phase
+    /// <c>Active</c>. Resuming it would start a <c>FilesExist</c> phase whose watcher is already
+    /// satisfied: the prompt is pasted, the phase "completes" at once and the next one starts
+    /// while the agent is still working. A phase is promoted only when its evidence is not older
+    /// than the previous phase's completion, so a leftover from an earlier cycle - a review of a
+    /// specification that has since been rewritten - is never mistaken for this cycle's output.
+    /// </para>
     /// </remarks>
     public static bool Reconcile(TaskPaths paths, TaskState state)
     {
         ArgumentNullException.ThrowIfNull(paths);
         ArgumentNullException.ThrowIfNull(state);
 
+        var demoted = Demote(paths, state);
+        var promoted = Promote(paths, state);
+
+        return demoted || promoted;
+    }
+
+    private static bool Demote(TaskPaths paths, TaskState state)
+    {
         var demoteFromHere = false;
 
         for (var i = 0; i < state.Phases.Count; i++)
@@ -93,6 +114,138 @@ public static class PhaseReconciliation
         // The flag can only have been set by a phase that WAS Completed, so it is exactly
         // "something was demoted".
         return demoteFromHere;
+    }
+
+    /// <summary>
+    /// Walks the phases in catalogue order and promotes each one that is not completed but whose
+    /// completion condition holds on disk, stopping at the first that cannot be proven.
+    /// </summary>
+    /// <param name="paths">The task's path set.</param>
+    /// <param name="state">The journal, already demoted where the disk demands it.</param>
+    /// <returns>True when at least one phase was promoted.</returns>
+    /// <remarks>
+    /// The phase the walk stops at is the resume point; it and every phase after it keep their
+    /// recorded status. A phase demoted a moment ago can never be re-promoted here: it was demoted
+    /// because its artefacts are absent, and promotion needs them present.
+    /// </remarks>
+    private static bool Promote(TaskPaths paths, TaskState state)
+    {
+        var promoted = false;
+        DateTimeOffset? baseline = null;
+
+        for (var i = 0; i < state.Phases.Count; i++)
+        {
+            var entry = state.Phases[i];
+
+            if (entry.Status == PhaseStatus.Completed)
+            {
+                baseline = entry.CompletedUtc;
+                continue;
+            }
+
+            if (!TrySatisfiedSince(paths, state, entry.Phase, baseline, out var since))
+            {
+                return promoted;
+            }
+
+            state.Phases[i] = new TaskPhaseState(entry.Phase, PhaseStatus.Completed, since);
+            baseline = since;
+            promoted = true;
+        }
+
+        return promoted;
+    }
+
+    /// <summary>
+    /// Decides whether one phase's completion condition holds on disk and is not older than the
+    /// previous phase's completion.
+    /// </summary>
+    /// <param name="paths">The task's path set.</param>
+    /// <param name="state">The journal, read for the subtask rule.</param>
+    /// <param name="phase">The phase to judge.</param>
+    /// <param name="baseline">When the previous phase completed, or null when that is unknown.</param>
+    /// <param name="since">When the evidence was written; becomes the promoted entry's completion time.</param>
+    /// <returns>True when the phase may be promoted.</returns>
+    /// <remarks>
+    /// Each rule is the one the phase's live watcher applies, so a resume and a live run agree on
+    /// what "done" means. Phase 3 leaves no artefact of its own; its AllContentChanged rule becomes
+    /// "spec and plan both rewritten after the review". The subtask rule has no single timestamp,
+    /// so <paramref name="since"/> stays null there - nothing uses implementation as a baseline.
+    /// </remarks>
+    private static bool TrySatisfiedSince(
+        TaskPaths paths,
+        TaskState state,
+        WorkflowPhase phase,
+        DateTimeOffset? baseline,
+        out DateTimeOffset? since)
+    {
+        if (phase == WorkflowPhase.Implementation && state.SubtasksEnabled)
+        {
+            since = null;
+            return Evaluate(paths, state) is SubtaskEvidence.AllComplete or SubtaskEvidence.CompletedManually;
+        }
+
+        since = phase switch
+        {
+            WorkflowPhase.Specification => NotBefore(Latest(WrittenUtc(paths.SpecAbsolute), WrittenUtc(paths.PlanAbsolute)), baseline),
+            WorkflowPhase.Review => NotBefore(WrittenUtc(paths.ReviewAbsolute), baseline),
+            WorkflowPhase.ResolveReview => RevisedAfterReview(paths, baseline),
+            WorkflowPhase.Implementation => NotBefore(WrittenUtc(paths.DoneAbsolute), baseline),
+            _ => null,
+        };
+
+        return since is not null;
+    }
+
+    /// <summary>Applies phase 3's rule: spec and plan were both written after the review.</summary>
+    /// <param name="paths">The task's path set.</param>
+    /// <param name="baseline">When the review phase completed, or null when that is unknown.</param>
+    /// <returns>The later of the two rewrites, or null when either one predates the review.</returns>
+    private static DateTimeOffset? RevisedAfterReview(TaskPaths paths, DateTimeOffset? baseline)
+    {
+        var review = WrittenUtc(paths.ReviewAbsolute);
+        if (review is null)
+        {
+            return null;
+        }
+
+        var reviewed = baseline is { } completed && completed > review.Value ? completed : review.Value;
+        var spec = WrittenUtc(paths.SpecAbsolute);
+        var plan = WrittenUtc(paths.PlanAbsolute);
+
+        return spec > reviewed && plan > reviewed ? Latest(spec, plan) : null;
+    }
+
+    private static DateTimeOffset? NotBefore(DateTimeOffset? written, DateTimeOffset? baseline) =>
+        written is { } value && (baseline is null || value >= baseline.Value) ? value : null;
+
+    private static DateTimeOffset? Latest(DateTimeOffset? first, DateTimeOffset? second) =>
+        first is { } a && second is { } b ? (a > b ? a : b) : null;
+
+    /// <summary>When a non-empty artefact was last written.</summary>
+    /// <param name="path">The artefact.</param>
+    /// <returns>
+    /// Its last-write time, or null when it is missing, empty or unreadable. Unreadable is null
+    /// on purpose - the opposite of <see cref="NonEmpty"/>: unknown evidence may stop a demotion,
+    /// and it may never cause a promotion.
+    /// </returns>
+    private static DateTimeOffset? WrittenUtc(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists && info.Length > 0
+                ? new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero)
+                : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     /// <summary>The first phase in catalogue order that is not completed.</summary>
