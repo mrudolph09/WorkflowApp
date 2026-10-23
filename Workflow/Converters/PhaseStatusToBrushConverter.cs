@@ -5,12 +5,16 @@ using Workflow.Models;
 
 namespace Workflow.Converters;
 
-/// <summary>Maps a phase status to its indicator colour: grey, yellow, green.</summary>
+/// <summary>Maps a phase status to its indicator colour: grey, yellow, green, and blue-grey when skipped.</summary>
 public sealed class PhaseStatusToBrushConverter : IValueConverter
 {
     private static readonly SolidColorBrush Pending = Freeze(Color.FromRgb(0x9E, 0x9E, 0x9E));
     private static readonly SolidColorBrush Active = Freeze(Color.FromRgb(0xFB, 0xC0, 0x2D));
     private static readonly SolidColorBrush Completed = Freeze(Color.FromRgb(0x43, 0xA0, 0x47));
+
+    // Material Blue Grey 500: visibly not the Pending grey and never the Completed green, because a
+    // skipped review did not happen (Workflow_LoadFix spec 7.2).
+    private static readonly SolidColorBrush Skipped = Freeze(Color.FromRgb(0x60, 0x7D, 0x8B));
 
     /// <inheritdoc />
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture) =>
@@ -18,6 +22,7 @@ public sealed class PhaseStatusToBrushConverter : IValueConverter
         {
             PhaseStatus.Active => Active,
             PhaseStatus.Completed => Completed,
+            PhaseStatus.Skipped => Skipped,
             _ => Pending,
         };
 

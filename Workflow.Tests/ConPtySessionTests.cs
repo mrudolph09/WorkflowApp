@@ -7,6 +7,14 @@ namespace Workflow.Tests;
 
 public sealed class ConPtySessionTests
 {
+    // cmd's echo loop keeps conhost repainting a full screen until the shell is killed - the shape
+    // of an agent that is still rendering when the watcher declares its phase complete.
+    private const string FloodArguments =
+        "/c \"for /L %i in (1,1,1000000) do @echo %i xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"";
+
+    private static string FloodShell =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+
     private static async Task<string> RunAndCaptureAsync(string command, TimeSpan timeout)
     {
         using var session = new ConPtySession();
@@ -140,6 +148,26 @@ public sealed class ConPtySessionTests
     }
 
     [Fact]
+    public async Task StopAsync_ConfirmsTheShellIsGone()
+    {
+        using var session = new ConPtySession();
+        session.Start(FloodShell, FloodArguments, Path.GetTempPath(), columns: 120, rows: 30);
+
+        var stopped = await session.StopAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
+
+        Assert.True(stopped);
+        Assert.False(session.IsRunning);
+    }
+
+    [Fact]
+    public async Task StopAsync_WithoutAStartedShell_IsConfirmedAtOnce()
+    {
+        using var session = new ConPtySession();
+
+        Assert.True(await session.StopAsync(TimeSpan.FromSeconds(1), CancellationToken.None));
+    }
+
+    [Fact]
     public void Dispose_CompletesPromptlyAndIsIdempotent()
     {
         var session = new ConPtySession();
@@ -151,6 +179,78 @@ public sealed class ConPtySessionTests
 
         Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(10), "Dispose took too long.");
         Assert.False(session.IsRunning);
+    }
+
+    // Regression for the overnight freeze of 2026-10-01. Dispose cancelled the read loop, the loop
+    // stopped draining, conhost blocked writing into the full output pipe while holding its console
+    // lock, and ClosePseudoConsole waited on conhost forever - on the UI thread. An idle shell never
+    // reproduces it; output has to be in flight when Dispose starts.
+    [Fact]
+    public async Task Dispose_CompletesPromptlyWhileThePseudoConsoleIsStillWriting()
+    {
+        using var session = new ConPtySession();
+        var bytes = 0L;
+        session.OutputReceived += (_, chunk) => Interlocked.Add(ref bytes, chunk.Length);
+
+        // A frame this large is many times the ~8 KiB the pipe and one last read can absorb, so
+        // the bug reproduces every run; at the app's 231x36 it was a race that mostly lost.
+        session.Start(FloodShell, FloodArguments, Path.GetTempPath(), columns: 400, rows: 100);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (DateTime.UtcNow < deadline && Interlocked.Read(ref bytes) < 64 * 1024)
+        {
+            await Task.Delay(50);
+        }
+
+        Assert.True(
+            Interlocked.Read(ref bytes) >= 64 * 1024,
+            "The flood never reached the pseudo-console, so this test would prove nothing.");
+
+        // 2 s, not more: a drained teardown takes ~0.2 s, while Dispose's safety bound gives up on a
+        // wedged conhost after 3 s. Only a real drain passes; the bound alone must not.
+        var dispose = Task.Run(session.Dispose);
+        var completed = await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(2))) == dispose;
+
+        Assert.True(
+            completed,
+            "Dispose did not finish on its own while conhost was still writing: the output pipe "
+            + "stopped being drained before ClosePseudoConsole returned.");
+    }
+
+    // Defence in depth for the same freeze. A subscriber that never returns stops the drain just as
+    // the cancelled loop did, and the inbox conhost can also wedge on its own once a write fails. In
+    // every such case Dispose must still hand control back - its caller is usually the UI thread.
+    [Fact]
+    public async Task Dispose_ReturnsEvenWhenAStalledSubscriberStopsTheDrain()
+    {
+        var stalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var released = 0;
+        using var session = new ConPtySession();
+        session.OutputReceived += (_, _) =>
+        {
+            stalled.TrySetResult();
+            SpinWait.SpinUntil(() => Volatile.Read(ref released) == 1);
+        };
+
+        session.Start(FloodShell, FloodArguments, Path.GetTempPath(), columns: 400, rows: 100);
+
+        try
+        {
+            await stalled.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // Let conhost fill the pipe behind the stalled read loop before Dispose starts.
+            await Task.Delay(500);
+
+            var dispose = Task.Run(session.Dispose);
+            var completed = await Task.WhenAny(dispose, Task.Delay(TimeSpan.FromSeconds(20))) == dispose;
+
+            Assert.True(completed, "Dispose waited on a wedged conhost without any bound.");
+        }
+        finally
+        {
+            // The read loop resumes, drains to EOF, and the abandoned teardown completes behind us.
+            Interlocked.Exchange(ref released, 1);
+        }
     }
 
     [Fact]

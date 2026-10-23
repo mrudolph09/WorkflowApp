@@ -12,13 +12,13 @@ namespace Workflow.Views;
 /// </summary>
 public partial class TaskTabView : UserControl
 {
-    private readonly DispatcherTimer _copiedFeedback = new() { Interval = TimeSpan.FromSeconds(1.5) };
+    // One timer per copy icon, so the feedback of one button never resets the other's icon.
+    private readonly Dictionary<PackIcon, DispatcherTimer> _copiedFeedback = [];
 
     /// <summary>Creates the view.</summary>
     public TaskTabView()
     {
         InitializeComponent();
-        _copiedFeedback.Tick += OnCopiedFeedbackElapsed;
         SizeChanged += OnSizeChanged;
     }
 
@@ -29,11 +29,17 @@ public partial class TaskTabView : UserControl
         FormArea.MaxHeight = e.NewSize.Height / 2;
     }
 
-    private void CopyTaskDescription_Click(object sender, RoutedEventArgs e)
+    private void CopyTaskDescription_Click(object sender, RoutedEventArgs e) =>
+        CopyWithFeedback(TaskDescriptionBox.Text, CopyIcon);
+
+    private void CopyOpenGateItems_Click(object sender, RoutedEventArgs e) =>
+        CopyWithFeedback(OpenGateItemsBox.Text, OpenGateItemsCopyIcon);
+
+    private void CopyWithFeedback(string text, PackIcon icon)
     {
         try
         {
-            Clipboard.SetText(TaskDescriptionBox.Text);
+            Clipboard.SetText(text);
         }
         catch (ExternalException)
         {
@@ -42,14 +48,21 @@ public partial class TaskTabView : UserControl
             return;
         }
 
-        CopyIcon.Kind = PackIconKind.Check;
-        _copiedFeedback.Stop();
-        _copiedFeedback.Start();
-    }
+        if (!_copiedFeedback.TryGetValue(icon, out var timer))
+        {
+            // Created on the first click, while the icon still shows its resting kind.
+            var resting = icon.Kind;
+            timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+            timer.Tick += (_, _) =>
+            {
+                _copiedFeedback[icon].Stop();
+                icon.Kind = resting;
+            };
+            _copiedFeedback[icon] = timer;
+        }
 
-    private void OnCopiedFeedbackElapsed(object? sender, EventArgs e)
-    {
-        _copiedFeedback.Stop();
-        CopyIcon.Kind = PackIconKind.ContentCopy;
+        icon.Kind = PackIconKind.Check;
+        timer.Stop();
+        timer.Start();
     }
 }

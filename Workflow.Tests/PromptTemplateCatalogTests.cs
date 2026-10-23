@@ -44,6 +44,7 @@ public sealed class PromptTemplateCatalogTests : IDisposable
     private static Dictionary<string, string> DefaultContents() => new(StringComparer.Ordinal)
     {
         ["initial_prompt.md"] = "Phase eins {" + BaseToken + "}",
+        ["simplifier_prompt.md"] = "Phase vereinfachen {" + BaseToken + "} {simplified_path}",
         ["review_prompt.md"] = "Phase zwei {" + BaseToken + "}",
         ["resolve_review_prompt.md"] = "Phase drei {" + BaseToken + "}",
         ["implementation_prompt.md"] = "Phase vier {" + BaseToken + "}",
@@ -51,6 +52,10 @@ public sealed class PromptTemplateCatalogTests : IDisposable
         ["counter_prompt.md"] = "Zaehler {" + CreationToken + "}",
         ["evidence_gate.md"] = "Nachweis {" + CreationToken + "}",
         ["run_subtask.md"] = "Ausfuehrung {" + RunToken + "} {subtask}",
+        // B7 and B6: the decision pre-flight shares the decomposition layer; the appended system
+        // prompt is never rendered, so it admits no token at all.
+        ["create_decisions.md"] = "Entscheidungen {" + CreationToken + "} {task_path} {subtask_path}",
+        ["no_human.md"] = "Niemand an der Tastatur.",
     };
 
     private void Write(string name, string content) =>
@@ -97,8 +102,9 @@ public sealed class PromptTemplateCatalogTests : IDisposable
     /// not in the file that carries it, so a union of all known names would accept every row.
     /// </summary>
     [Theory]
-    // Run-set and creation-set tokens in the four base-layer phase prompts.
+    // Run-set and creation-set tokens in the five base-layer phase prompts.
     [InlineData("initial_prompt.md", "subtask")]
+    [InlineData("simplifier_prompt.md", CreationToken)]
     [InlineData("review_prompt.md", CreationToken)]
     [InlineData("resolve_review_prompt.md", RunToken)]
     [InlineData("implementation_prompt.md", "workflow_path")]
@@ -108,6 +114,9 @@ public sealed class PromptTemplateCatalogTests : IDisposable
     [InlineData("evidence_gate.md", "subtask")]
     // The execution prompt is the widest layer, so only a name in no set at all is illegal there.
     [InlineData("run_subtask.md", "kein_bekannter_name")]
+    // The pre-flight prompt is decomposition-layer; the appended system prompt admits nothing.
+    [InlineData("create_decisions.md", RunToken)]
+    [InlineData("no_human.md", BaseToken)]
     public void ValidateAll_ReportsATokenThatIsNotInThatFilesOwnSet(string fileName, string illegalToken)
     {
         WriteAllEight();
@@ -149,7 +158,7 @@ public sealed class PromptTemplateCatalogTests : IDisposable
     {
         foreach (var name in new[]
                  {
-                     "initial_prompt.md", "review_prompt.md",
+                     "initial_prompt.md", "simplifier_prompt.md", "review_prompt.md",
                      "resolve_review_prompt.md", "implementation_prompt.md",
                  })
         {
@@ -167,6 +176,8 @@ public sealed class PromptTemplateCatalogTests : IDisposable
     [InlineData("counter_prompt.md")]
     [InlineData("evidence_gate.md")]
     [InlineData("run_subtask.md")]
+    [InlineData("create_decisions.md")]
+    [InlineData("no_human.md")]
     public void ValidateAll_ReportsAnEmptyFileAmongTheNewlyCoveredTemplates(string fileName)
     {
         WriteAllEight();
@@ -222,6 +233,7 @@ public sealed class PromptTemplateCatalogTests : IDisposable
     /// </summary>
     [Theory]
     [InlineData("initial_prompt.md", "base")]
+    [InlineData("simplifier_prompt.md", "base")]
     [InlineData("review_prompt.md", "base")]
     [InlineData("resolve_review_prompt.md", "base")]
     [InlineData("implementation_prompt.md", "base")]
@@ -229,10 +241,13 @@ public sealed class PromptTemplateCatalogTests : IDisposable
     [InlineData("counter_prompt.md", "creation")]
     [InlineData("evidence_gate.md", "creation")]
     [InlineData("run_subtask.md", "run")]
+    [InlineData("create_decisions.md", "creation")]
+    [InlineData("no_human.md", "none")]
     public void AllowedTokens_MapsEachShippedFileToItsOwnLayer(string fileName, string layer)
     {
         var expected = layer switch
         {
+            "none" => [],
             "base" => PromptVariables.KnownNames,
             "creation" => PromptVariables.SubtaskCreationNames,
             "run" => PromptVariables.SubtaskRunNames,

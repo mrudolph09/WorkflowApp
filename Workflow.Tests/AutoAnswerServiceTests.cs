@@ -226,6 +226,74 @@ public sealed class AutoAnswerServiceTests : IDisposable
     }
 
     [Fact]
+    public void ShippedRules_AnswerTheCodex0156TrustDialogWithEnter()
+    {
+        // Codex CLI 0.156.1 reworded this gate: "Do you trust the contents of this directory"
+        // no longer occurs anywhere in the shipped binary, so the rule written for 0.154 never
+        // fires and the settle loop pastes the review prompt straight into the modal. The
+        // strings below were verified against the shipped
+        // vendor/x86_64-pc-windows-msvc/bin/codex.exe on 2026-09-25; in
+        // codex-rs/tui/src/onboarding/trust_directory.rs at tag rust-v0.156.1 `highlighted`
+        // initialises to TrustDirectorySelection::Trust and Enter calls handle_trust(), so a
+        // bare carriage return is the affirmative answer.
+        var shipped = Path.Combine(AppContext.BaseDirectory, "Assets", "autoanswer.rules.json");
+        var service = new AutoAnswerService(shipped, overridePath: null);
+
+        const string screen = """
+            › Ask Codex to do anything
+              ? for shortcuts
+            > You are in C:\Users\Marco\Documents\repo\MTG_TOOL
+            Trust this folder?
+            Trusting the folder allows project-local config, hooks, and exec policies to load.
+            › Trust and continue
+              Quit
+            """;
+
+        var rule = service.Match(screen, new HashSet<string>(StringComparer.Ordinal));
+
+        Assert.NotNull(rule);
+        Assert.Equal("codex-trust-directory", rule!.Id);
+        Assert.Equal("\r", rule.Send);
+    }
+
+    [Fact]
+    public void ShippedRules_SkipTheCodexUpdatePromptWithTheDigitTwo()
+    {
+        // `codex --yolo` shows this picker before its composer whenever the installed CLI is older
+        // than the latest release. No rule matched it, so the settle loop ran into its ceiling,
+        // pasted the review prompt into the picker and then pressed Enter - which confirms the
+        // preselected "Update now". The screen is the update_prompt_modal insta snapshot of
+        // codex-rs/tui/src/update_prompt.rs at tag rust-v0.157.1; its strings were verified
+        // against the shipped vendor/x86_64-pc-windows-msvc/bin/codex.exe on 2026-09-29. There
+        // `highlighted` initialises to UpdateSelection::UpdateNow and KeyCode::Char('2') selects
+        // NotNow directly, so the digit is the one answer a dropped key cannot turn into an update.
+        var shipped = Path.Combine(AppContext.BaseDirectory, "Assets", "autoanswer.rules.json");
+        var service = new AutoAnswerService(shipped, overridePath: null);
+
+        const string screen = """
+              Update available · 0.157.1 → 0.159.0
+              Release notes: https://github.com/openai/codex/releases/latest
+
+            › 1. Update now (runs `npm install -g @openai/codex`)
+              2. Skip
+              3. Skip until next version
+
+              enter continue · esc skip
+            """;
+
+        var rule = service.Match(screen, new HashSet<string>(StringComparer.Ordinal));
+
+        Assert.NotNull(rule);
+        Assert.Equal("codex-update-skip", rule!.Id);
+        Assert.Equal("2", rule.Send);
+
+        // The footer carries "continue", which codex-yolo-warning answers with a bare Enter - that
+        // is "Update now" here. The first matching rule wins, so the skip must be listed ahead.
+        var ids = service.RuleSet.Rules.Select(r => r.Id).ToList();
+        Assert.True(ids.IndexOf("codex-update-skip") < ids.IndexOf("codex-yolo-warning"));
+    }
+
+    [Fact]
     public void ShippedRules_TreatTheIdleCodexComposerAsLauncherReady()
     {
         // Captured from a live pseudo-console on 2026-09-16, Codex CLI 0.154.0, after startup has
@@ -348,5 +416,155 @@ public sealed class AutoAnswerServiceTests : IDisposable
 
         Assert.True(service.IsLauncherReady("anything at all"));
         Assert.False(service.IsPastePending("anything at all"));
+    }
+
+    [Fact]
+    public void IsSubmitted_ScreenMatchesTheConfiguredPattern_IsTrueOnlyThen()
+    {
+        // Arrange
+        var path = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "submittedPattern": "(?is)esc to interrupt",
+          "rules": []
+        }
+        """);
+        var service = new AutoAnswerService(path, overridePath: null);
+
+        // Act
+        var working = service.IsSubmitted("✻ Pondering… (esc to interrupt)");
+        var idle = service.IsSubmitted("? for shortcuts");
+
+        // Assert
+        Assert.True(working);
+        Assert.False(idle);
+    }
+
+    [Fact]
+    public void IsSubmitted_MalformedPattern_IsFalseInsteadOfThrowing()
+    {
+        // Arrange
+        var path = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "submittedPattern": "([unclosed",
+          "rules": []
+        }
+        """);
+
+        // Act
+        var service = new AutoAnswerService(path, overridePath: null);
+
+        // Assert - the pattern is kept as configured, so the orchestrator still takes the
+        // fail-safe evidence path; it simply never sees evidence.
+        Assert.Equal("([unclosed", service.RuleSet.SubmittedPattern);
+        Assert.False(service.IsSubmitted("([unclosed esc to interrupt"));
+    }
+
+    [Fact]
+    public void IsSubmitted_WithoutAPattern_IsFalse()
+    {
+        // Arrange
+        var path = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "rules": []
+        }
+        """);
+
+        // Act
+        var service = new AutoAnswerService(path, overridePath: null);
+
+        // Assert
+        Assert.Equal(string.Empty, service.RuleSet.SubmittedPattern);
+        Assert.False(service.IsSubmitted("esc to interrupt"));
+    }
+
+    [Fact]
+    public void RuleSet_EvidenceTimingsPresent_AreReadFromJson()
+    {
+        // Arrange
+        var path = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "submitAfterPasteLandedMs": 1234, "submittedVerifyTimeoutMs": 5678,
+          "rules": []
+        }
+        """);
+
+        // Act
+        var set = new AutoAnswerService(path, overridePath: null).RuleSet;
+
+        // Assert
+        Assert.Equal(1234, set.SubmitAfterPasteLandedMs);
+        Assert.Equal(5678, set.SubmittedVerifyTimeoutMs);
+    }
+
+    [Fact]
+    public void RuleSet_EvidenceTimingsAbsentOrNotPositive_FallBackToTheShippedDefaults()
+    {
+        // Arrange
+        var absent = WriteRules("""
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "rules": []
+        }
+        """);
+        var absentSet = new AutoAnswerService(absent, overridePath: null).RuleSet;
+
+        var zeroPath = Path.Combine(_dir, "zero.json");
+        File.WriteAllText(zeroPath, """
+        {
+          "version": 2, "quietPeriodMs": 1500, "settleTimeoutMs": 60000, "maxAnswersPerPhase": 5,
+          "submitAfterPasteLandedMs": 0, "submittedVerifyTimeoutMs": -1,
+          "rules": []
+        }
+        """);
+
+        // Act
+        var zeroSet = new AutoAnswerService(zeroPath, overridePath: null).RuleSet;
+
+        // Assert
+        Assert.Equal(8000, absentSet.SubmitAfterPasteLandedMs);
+        Assert.Equal(10000, absentSet.SubmittedVerifyTimeoutMs);
+        Assert.Equal(8000, zeroSet.SubmitAfterPasteLandedMs);
+        Assert.Equal(10000, zeroSet.SubmittedVerifyTimeoutMs);
+    }
+
+    [Fact]
+    public void ShippedRules_ProveSubmissionByTheWorkingFooterAndLandingByTheChipAlone()
+    {
+        // Arrange
+        var shipped = Path.Combine(AppContext.BaseDirectory, "Assets", "autoanswer.rules.json");
+
+        // Act
+        var service = new AutoAnswerService(shipped, overridePath: null);
+
+        // Assert - Claude Code 2.1.x renders "esc to interrupt" only while a query runs.
+        Assert.True(service.IsSubmitted("✻ Pondering… (esc to interrupt)"));
+        Assert.False(service.IsSubmitted("? for shortcuts"));
+
+        // The collapsed chip itself is landing evidence; the footer hint is not, because it
+        // disappears whenever the input changes and so proves nothing.
+        Assert.True(service.IsPastePending("[Pasted text #1 +578 lines]"));
+        Assert.True(service.IsPastePending("[...Truncated text #2 +900 lines...]"));
+        Assert.False(service.IsPastePending("paste again to expand"));
+    }
+
+    [Fact]
+    public void ShippedRules_RecogniseCodexPastePlaceholderAndWorkingFooter()
+    {
+        // Arrange
+        var shipped = Path.Combine(AppContext.BaseDirectory, "Assets", "autoanswer.rules.json");
+
+        // Act
+        var service = new AutoAnswerService(shipped, overridePath: null);
+
+        // Assert - Codex 0.163 collapses a paste over 1000 characters to this placeholder and
+        // removes it from the screen on submit; while a turn runs it renders this footer.
+        Assert.True(service.IsPastePending("› [Pasted Content 1170 chars]"));
+        Assert.True(service.IsSubmitted("• Working (0s • esc to interrupt)"));
+        Assert.False(service.IsPastePending("› Ask Codex to do anything"));
+        Assert.False(service.IsSubmitted("? for shortcuts · 100% context left"));
     }
 }

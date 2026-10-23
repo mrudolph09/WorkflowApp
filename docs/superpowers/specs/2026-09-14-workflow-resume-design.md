@@ -1,6 +1,6 @@
 ---
 description: "Canonical Superpowers design specification for workflow-level run tracking, crash recovery ('Continue workflow'), phase-4 completion detection and the prompt auto-submit fix in the Workflow WPF app"
-summary: "Adds a per-task journal file W\\T\\.workflow-state.json (atomic write, stores taskDescription + per-phase status + dismissed; deliberately NOT taskName/workingDirectory, which are derived from the folder and its parent). WorkflowOrchestrator becomes the single journal writer and gains a StartPhase so a run can resume mid-pipeline. At startup TaskRecoveryScanner walks RecentDirectories one level deep, offers at most 5 non-dismissed, incomplete tasks newer than 14 days as prefilled tabs whose button reads 'Continue workflow'; closing such a tab sets dismissed. Journal is authoritative for phase 3 only - missing FilesExist artefacts DEMOTE a phase (and everything after it), never promote. Phase 4 stops being CompletionRule.Manual: implementation_prompt.md must write a non-empty {done_path} = W\\T\\T-done.md as its final action, detected by the existing ArtifactWatcher; the orchestrator deletes a stale marker before arming that watcher, and CompletionRule.Manual is removed as dead. Phase 3 becomes CompletionRule.AllContentChanged (BOTH spec and plan), matching resolve_review_prompt.md. Root cause of 'the prompt does not auto-submit': TerminalViewModel.SendPasteAsync waits a fixed 150 ms before the CR, which Ink coalesces into the paste; fix moves the submit dance into WorkflowOrchestrator behind a quiet-gate with an OutputCount-based verify and one retry, tunables in autoanswer.rules.json (version 2). Out of scope, unchanged: the pre-existing §8.3 hazard where a fresh run in a fully populated folder satisfies phase 1 instantly. Revised 2026-09-14 after independent review: the journal is READ through a tolerant DTO (an unknown phase/status name drops that entry, not the file); reconciled demotions are WRITTEN BACK via a new ITaskStateStore.ReplacePhases so they survive a second crash; the demote-never-promote rule is one shared PhaseReconciliation helper used by both the startup scan and the SyncFolder re-arm; the re-arm resets ResumePhase AND all four indicators when the journal is absent or complete; the paste quiet-gate's baseline starts at SendPaste (LastOutputUtc alone is already stale when SettleAndAnswerAsync returns); the 5 s scan ceiling is enforced on the awaiting side over a thread-safe accumulator because Directory.* blocks past any token; the MRU is snapshotted on the UI thread; and the four submit tunables must be added to AutoAnswerService's private RuleSetDto, not only to AutoAnswerRuleSet."
+summary: "Adds a per-task journal file W\\T\\.workflow-state.json (atomic write, stores taskDescription + per-phase status + dismissed; deliberately NOT taskName/workingDirectory, which are derived from the folder and its parent). WorkflowOrchestrator becomes the single journal writer and gains a StartPhase so a run can resume mid-pipeline. At startup TaskRecoveryScanner walks RecentDirectories one level deep, offers at most 5 non-dismissed, incomplete tasks newer than 14 days as prefilled tabs whose button reads 'Continue workflow'; closing such a tab sets dismissed. Reconciliation against disk (§6.3, revised 2026-10-02): missing FilesExist artefacts DEMOTE a phase (and everything after it); for a task WITH a journal, a non-completed phase is PROMOTED in catalogue order when its watcher's condition already holds on disk and its evidence is not older than the previous phase's completion (phase 3: spec AND plan both written after the review). This closes the crash window between the CLI writing artefacts and RecordPhase(Completed); in the Telematik_HTML AppHang of 2026-10-02 that window re-ran Specification. A folder without a journal is never promoted (BASE §8.3). Phase 4 stops being CompletionRule.Manual: implementation_prompt.md must write a non-empty {done_path} = W\\T\\T-done.md as its final action, detected by the existing ArtifactWatcher; the orchestrator deletes a stale marker before arming that watcher, and CompletionRule.Manual is removed as dead. Phase 3 becomes CompletionRule.AllContentChanged (BOTH spec and plan), matching resolve_review_prompt.md. Root cause of 'the prompt does not auto-submit': TerminalViewModel.SendPasteAsync waits a fixed 150 ms before the CR, which Ink coalesces into the paste; fix moves the submit dance into WorkflowOrchestrator behind a quiet-gate with an OutputCount-based verify and one retry, tunables in autoanswer.rules.json (version 2). Out of scope, unchanged: the pre-existing §8.3 hazard where a fresh run in a fully populated folder satisfies phase 1 instantly. Revised 2026-09-14 after independent review: the journal is READ through a tolerant DTO (an unknown phase/status name drops that entry, not the file); reconciled demotions (and, since 2026-10-02, promotions) are WRITTEN BACK via a new ITaskStateStore.ReplacePhases so they survive a second crash; the reconciliation rule is one shared PhaseReconciliation helper used by both the startup scan and the SyncFolder re-arm; the re-arm resets ResumePhase AND all four indicators when the journal is absent or complete; the paste quiet-gate's baseline starts at SendPaste (LastOutputUtc alone is already stale when SettleAndAnswerAsync returns); the 5 s scan ceiling is enforced on the awaiting side over a thread-safe accumulator because Directory.* blocks past any token; the MRU is snapshotted on the UI thread; and the four submit tunables must be added to AutoAnswerService's private RuleSetDto, not only to AutoAnswerRuleSet."
 paths:
   - "../plans/2026-09-14-workflow-resume-plan.md"
   - "./specification.md"
@@ -154,7 +154,7 @@ Three new units, each with one purpose, plus changes to four existing ones.
 |---|---|
 | `Workflow/Models/TaskState.cs` | `TaskState`, `TaskPhaseState` — the journal's shape. |
 | `Workflow/Models/RecoverableTask.cs` | `RecoverableTask` — one scan hit: paths + state + resume phase. |
-| `Workflow/Models/PhaseReconciliation.cs` | The demote-never-promote rule (§6.3) and the resume-phase lookup, shared by the scanner and the tab's re-arm path (§6.3.2). |
+| `Workflow/Models/PhaseReconciliation.cs` | The reconciliation rule (§6.3: demote, and since 2026-10-02 promote) and the resume-phase lookup, shared by the scanner and the tab's re-arm path (§6.3.2). |
 | `Workflow/Services/ITaskStateStore.cs` | Journal read/write contract. |
 | `Workflow/Services/TaskStateStore.cs` | Implementation. |
 | `Workflow/Services/ITaskRecoveryScanner.cs` | Startup scan contract. |
@@ -336,7 +336,7 @@ public sealed record RecoverableTask(TaskPaths Paths, TaskState State, WorkflowP
    **This filter runs before reconciliation**, so a journal old enough to be ignored is never
    written to.
 5. Reconcile against disk and compute `ResumePhase` (§6.3), persisting the reconciliation when it
-   demoted anything (§6.3.1). Drop any task where every phase is `Completed`.
+   changed anything (§6.3.1). Drop any task where every phase is `Completed`.
 6. Order by `UpdatedUtc` descending, `Take(5)`. Ordering and capping happen on the *snapshot*
    returned at the deadline, not inside the worker, so a partial result is still the most recently
    updated five of what was found.
@@ -377,12 +377,14 @@ They are **not** user settings — YAGNI until asked for.
 
 `ResumePhase` is the first phase in `PhaseCatalog.All` order whose status is not `Completed`.
 
-Before that is computed, the journal is reconciled against disk. The rule is asymmetric and
-deliberately so:
+Before that is computed, the journal is reconciled against disk. The rule runs in two passes:
 
-> **Disk evidence may demote a phase. It may never promote one.**
+> **Disk evidence demotes a phase whose artefacts are gone. It promotes a phase whose completion
+> condition already holds on disk and is not older than the previous phase's completion.**
 
-Concretely, for each phase whose completion rule is `FilesExist`:
+*Revised 2026-10-02. The original rule was demotion-only; see "Why promotion was added" below.*
+
+Demotion, for each phase whose completion rule is `FilesExist`:
 
 | Phase | Required artefacts |
 |---|---|
@@ -395,16 +397,57 @@ If the journal says `Completed` but the artefacts are gone, that phase is demote
 its completion is baseline-relative and leaves no disk trace, so the journal is the only
 evidence there is.
 
-Why demotion-only: promoting from disk would resurrect the BASE §8.3 hazard inside recovery — a
-folder that happens to contain a spec and a plan would be reported as "phase 1 done" for a task
-that never ran. Demotion is safe because it can only ever cause *more* work to be re-run, never
-less, and it prevents resuming into a phase whose inputs have been deleted.
+Demotion is safe because it can only ever cause *more* work to be re-run, never less, and it
+prevents resuming into a phase whose inputs have been deleted.
 
-**Consequence, and it is load-bearing:** because a phase is only `Completed` when its artefacts
-are present, a resume never starts a `FilesExist` phase whose watcher is already satisfied. Resume
-into phase 1 happens only when spec *or* plan is missing; into phase 2 only when the review is
-missing; into phase 4 only when the done marker is missing. The §8.3 instant-completion hazard is
-therefore unreachable on the recovery path, which is why §2.2 can leave it out of scope.
+Promotion walks the phases in catalogue order. At the first phase that is not `Completed`, it
+checks that phase's completion condition. If the condition holds, the phase is promoted and the
+walk moves on to the next phase. The walk stops at the first phase it cannot prove, and that phase
+is the resume point. The **baseline** is the previous phase's `CompletedUtc`, or for a promoted
+phase its evidence time. The evidence time becomes the promoted entry's `CompletedUtc`.
+
+| Phase                    | Promoted when                                                                    | Evidence time    |
+|--------------------------|----------------------------------------------------------------------------------|------------------|
+| Specification            | spec and plan exist and are non-empty                                            | later of the two |
+| Review                   | review exists, is non-empty, written at or after the baseline                    | review           |
+| ResolveReview            | spec **and** plan both written after the later of baseline and review            | later of the two |
+| Implementation           | done marker exists, is non-empty, written at or after the baseline               | done marker      |
+| Implementation (subtask) | `Evaluate` is `AllComplete` or `CompletedManually`; `Unavailable` never promotes | none (null)      |
+
+Unreadable evidence never promotes. This is the mirror image of demotion, where unreadable
+evidence never demotes. Each rule is the one that phase's live watcher applies, so a resume and a
+live run agree on what "done" means. Phase 3 has no artefact of its own, so its `AllContentChanged`
+rule is turned into file timestamps.
+
+**Why promotion was added (2026-10-02).** The orchestrator records `Completed` only when the
+running process sees its watcher fire. If the application dies after the CLI has written a phase's
+artefacts but before `RecordPhase(Completed)`, the journal shows that phase as `Active`. A
+demote-only rule cannot repair this. Recovery then resumes into a `FilesExist` phase whose watcher
+is already satisfied: the prompt is pasted, the phase "completes" at once, and the next phase
+starts while the agent is still working.
+
+This happened for real. Task `Telematik_HTML` had its spec and plan on disk since 2026-10-01 18:44.
+On 2026-10-02 at 08:08:17, WER killed the app with `AppHangXProcB1` (the app was waiting on
+conhost.exe). The restarted app re-ran Specification, and that phase "completed" 0.1 s after the
+prompt was pasted.
+
+The baseline check keeps leftovers from an earlier cycle out. For example, a review written before
+the specification it supposedly reviews does not count, and neither does a done marker older than
+the review resolution. R13 (§6.3.1) still holds.
+
+**Scope: only tasks that have a journal.** Both callers reconcile only a journal that exists. The
+original objection to promotion still applies to a folder *without* one: it would resurrect the
+BASE §8.3 hazard, because a folder that merely holds a spec and a plan would count as "phase 1
+done" for a task this application never ran. Such a folder stays a fresh start.
+
+**Consequence, and it is load-bearing:** a resume never starts a `FilesExist` phase whose watcher
+is satisfied by *this cycle's* output. Resume into phase 1 happens only when spec *or* plan is
+missing. Resume into phase 2 happens only when the review is missing or older than the
+specification's completion. Resume into phase 4 happens only when the done marker is missing or
+stale. Before promotion existed, this claim was false in the crash window described above.
+
+One gap remains and is still out of scope (§2.2, BASE §8.3): resuming into phase 2 because the
+review is *stale*. The stale file still satisfies the live watcher instantly.
 
 #### 6.3.1 The demotion must be persisted
 
@@ -420,11 +463,13 @@ whose phase-2 artefact (`T-review.md`) is present, finds nothing to demote, and 
 — silently skipping phases 2 and 3. The rule the design calls load-bearing has been lost across
 one restart.
 
-Therefore: **when reconciliation demotes anything, the reconciled array is written back
-immediately**, through `ITaskStateStore.ReplacePhases` (§5.4). The write happens once, at scan
-time, before the task is offered; it is idempotent (a second scan finds nothing left to demote and
-writes nothing) and it leaves `UpdatedUtc` alone so a deleted artefact cannot extend the 14-day
-window. Like every other journal write it is best-effort: a failure degrades recovery and never
+Therefore: **when reconciliation changes anything, the reconciled array is written back
+immediately**, through `ITaskStateStore.ReplacePhases` (§5.4). Since 2026-10-02 a change can be a
+demotion or a promotion. A promotion has to be written back for the same reason: the resumed run
+starts *after* the promoted phase, so nothing else would ever record it. The write happens once,
+at scan time, before the task is offered. It is idempotent: a second scan finds nothing left to
+change and writes nothing. It also leaves `UpdatedUtc` alone, so neither a deleted artefact nor a
+promotion can extend the 14-day window. Like every other journal write it is best-effort: a failure degrades recovery and never
 takes down the app (§10.2 W1).
 
 #### 6.3.2 One reconciliation, two callers
@@ -435,9 +480,10 @@ unreconciled §6.6 would resume straight into a phase whose inputs are missing, 
 what §6.3 exists to prevent.
 
 It is therefore **one shared, pure helper** over `(TaskPaths, TaskState)` —
-`PhaseReconciliation.Reconcile`, returning whether anything was demoted, plus
+`PhaseReconciliation.Reconcile`, returning whether anything was demoted or promoted, plus
 `PhaseReconciliation.FirstIncomplete` for the resume phase — used by both callers, each of which
-persists via `ReplacePhases` when the helper reports a demotion. It lives next to the models
+persists via `ReplacePhases` when the helper reports a change. Both callers reconcile only a
+journal that exists; a folder without one stays a fresh start (§6.3, scope). It lives next to the models
 because it is a rule about the journal and the artefacts, not about scanning.
 
 ### 6.4 Startup wiring
@@ -499,7 +545,7 @@ would duplicate `CanStartWorkflow` and the `IsRunning` interlock for no gain.
 `SyncFolder()` — which already runs, debounced, whenever the name or directory changes and
 already calls `_folders.DirectoryAlreadyExisted(paths)` — additionally calls
 `_stateStore.TryLoad(paths)` after the folder has been resolved, then reconciles it against disk
-with the shared helper of §6.3.2 and persists the result if anything was demoted. One of exactly
+with the shared helper of §6.3.2 and persists the result if anything changed. One of exactly
 two outcomes follows:
 
 | Journal | `ResumePhase` | The four indicators |
@@ -1138,7 +1184,7 @@ Manual, against the real CLIs (extends BASE §15.3's V5–V11):
 | D2 | A journal at all. | Derive phase state from artefacts on disk. | Phase 3's completion is baseline-relative and leaves no disk trace, and the Taskbeschreibung is nowhere on disk (F3). Derivation cannot work. |
 | D3 | The orchestrator writes the journal. | `TaskTabViewModel.ApplyProgress` writes it (F14). | Ties durability to the UI layer and is uncoverable by `WorkflowOrchestratorTests`. |
 | D4 | Task name and working directory are derived, not stored. | Store them. | A second source of truth that breaks on rename/move. |
-| D5 | Disk evidence may demote a phase, never promote it. | Trust disk for phases 1/2/4. | Promotion resurrects the BASE §8.3 hazard inside recovery; demotion can only cause more work, never less. |
+| D5 | Disk evidence may demote a phase, never promote it. **Superseded 2026-10-02:** a journalled task also promotes a phase whose completion condition holds on disk and is not older than the previous phase's completion (§6.3). | Trust disk for phases 1/2/4. | Promotion resurrects the BASE §8.3 hazard inside recovery; demotion can only cause more work, never less. The hazard still rules out promotion for a folder *without* a journal. With a journal, demotion-only left the crash window between artefact and `RecordPhase` unrepairable, and recovery re-ran a phase whose watcher was already satisfied. |
 | D6 | A prefilled tab per recovered task, newest 5, 14-day window. | A recovery dialog with checkboxes; or unlimited tabs. | The dialog adds a window and a view model for a choice the user rarely needs; unlimited tabs means a wall of tabs on every launch. |
 | D7 | Closing a recovered tab sets `dismissed`, re-armable by typing the name. | Never dismiss; or ask on close. | Never dismissing nags for two weeks; a modal on an ordinary close is disproportionate. Re-arming keeps it non-destructive. |
 | D8 | Phase 4 detected by a marker file. | A sentinel string in the terminal output. | A sentinel is ephemeral — a crash immediately after it is printed leaves recovery unable to know phase 4 finished, defeating the feature. The file also reuses `ArtifactWatcher` unchanged. |

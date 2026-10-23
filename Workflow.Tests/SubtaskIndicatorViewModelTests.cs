@@ -46,7 +46,8 @@ public class SubtaskIndicatorViewModelTests
     private static SubtaskProgress Progress(
         SubtaskStage stage,
         IReadOnlyList<SubtaskState> states,
-        string? currentTitle = null)
+        string? currentTitle = null,
+        string? blockedReason = null)
     {
         var snapshot = new SubtaskSnapshot(states);
         return new SubtaskProgress(
@@ -55,8 +56,21 @@ public class SubtaskIndicatorViewModelTests
             snapshot.Total,
             snapshot.Failed,
             currentTitle,
-            snapshot.States);
+            snapshot.States,
+            snapshot.Waiting,
+            snapshot.Deferred,
+            blockedReason);
     }
+
+    // Two waiting entries (one Blocked, one WaitingForHuman), one deferred, one failed.
+    private static readonly SubtaskState[] WaitingRun =
+    [
+        new("ST-001-parse", SubtaskStatus.Complete),
+        new("ST-002-render", SubtaskStatus.WaitingForHuman, "Freigabe fehlt"),
+        new("ST-003-persist", SubtaskStatus.Blocked),
+        new("ST-004-verify", SubtaskStatus.Deferred, "Desktop-Fenster offen"),
+        new("ST-005-ship", SubtaskStatus.Failed, "rot"),
+    ];
 
     // Implementation Note 1.2 made structural: the ignored dimension (pending) is pinned by
     // Total == Completed + Failed + pending, and all four numbers differ from one another.
@@ -369,6 +383,80 @@ public class SubtaskIndicatorViewModelTests
         Assert.Equal("0 von 0", indicator.ProgressText);
         Assert.Equal(string.Empty, indicator.FailedText);
         Assert.False(indicator.HasFailures);
+        Assert.Null(indicator.FailureTooltip);
+    }
+
+    // Waiting work is shown beside the counts: '{W} wartend · {D} Desktop-Job'.
+    [Fact]
+    public void Apply_WithWaitingAndDeferredEntries_ShowsTheWaitingText()
+    {
+        var indicator = new SubtaskIndicatorViewModel();
+
+        indicator.Apply(Progress(SubtaskStage.Running, WaitingRun));
+
+        Assert.True(indicator.HasWaiting);
+        Assert.Equal("2 wartend · 1 Desktop-Job", indicator.WaitingText);
+        Assert.Equal("1 von 5", indicator.ProgressText);
+        Assert.Equal("1 fehlgeschlagen", indicator.FailedText);
+    }
+
+    [Fact]
+    public void Apply_WithOnlyWaitingEntries_ShowsOnlyTheWaitingCount()
+    {
+        var indicator = new SubtaskIndicatorViewModel();
+
+        indicator.Apply(Progress(
+            SubtaskStage.Running,
+            [new SubtaskState("ST-001-parse", SubtaskStatus.Blocked)]));
+
+        Assert.Equal("1 wartend", indicator.WaitingText);
+    }
+
+    // The normal case keeps its existing texts: no waiting line at all.
+    [Fact]
+    public void Apply_WithoutWaitingEntries_ShowsNoWaitingText()
+    {
+        var indicator = new SubtaskIndicatorViewModel();
+
+        indicator.Apply(Progress(SubtaskStage.Running, MixedRun));
+
+        Assert.False(indicator.HasWaiting);
+        Assert.Equal(string.Empty, indicator.WaitingText);
+    }
+
+    // Failed entries first, as before; then every waiting entry with its reason; then the reason
+    // the run stopped, when it stopped blocked.
+    [Fact]
+    public void Apply_ListsWaitingReasonsAndTheBlockedReasonInTheTooltip()
+    {
+        var indicator = new SubtaskIndicatorViewModel();
+
+        indicator.Apply(Progress(
+            SubtaskStage.Finished,
+            WaitingRun,
+            blockedReason: "ST-003-persist wartet auf ST-002-render (waiting_for_human: Freigabe fehlt)"));
+
+        Assert.Equal(
+            string.Join(
+                Environment.NewLine,
+                "ST-005-ship: rot",
+                "ST-002-render (wartet auf Eingabe): Freigabe fehlt",
+                "ST-003-persist (blockiert)",
+                "ST-004-verify (Desktop-Job): Desktop-Fenster offen",
+                "ST-003-persist wartet auf ST-002-render (waiting_for_human: Freigabe fehlt)"),
+            indicator.FailureTooltip);
+    }
+
+    [Fact]
+    public void Reset_ClearsTheWaitingText()
+    {
+        var indicator = new SubtaskIndicatorViewModel();
+        indicator.Apply(Progress(SubtaskStage.Running, WaitingRun));
+
+        indicator.Reset();
+
+        Assert.False(indicator.HasWaiting);
+        Assert.Equal(string.Empty, indicator.WaitingText);
         Assert.Null(indicator.FailureTooltip);
     }
 

@@ -25,6 +25,7 @@ public sealed class ShippedPromptContractTests
 {
     private const string CreateSubtasks = "create_subtasks.md";
     private const string RunSubtask = "run_subtask.md";
+    private const string Simplifier = "simplifier_prompt.md";
 
     /// <summary>
     /// The token pattern of <see cref="PromptTemplateService"/>, restated here on purpose: a test that
@@ -52,6 +53,13 @@ public sealed class ShippedPromptContractTests
 
     private static string ReadWithForwardSlashes(string fileName) =>
         Read(fileName).Replace('\\', '/');
+
+    /// <summary>
+    /// The file with every whitespace run collapsed to one space, so a clause asserted here survives
+    /// the prompt being re-wrapped at a different column.
+    /// </summary>
+    private static string ReadFlattened(string fileName) =>
+        Regex.Replace(Read(fileName), @"\s+", " ", RegexOptions.CultureInvariant);
 
     private static List<string> TokensIn(string fileName) =>
         Regex
@@ -356,5 +364,260 @@ public sealed class ShippedPromptContractTests
     {
         // Design P12: correcting the file protocol must not cost the verification gate.
         Assert.Contains("verify.ps1", Read(RunSubtask), StringComparison.Ordinal);
+    }
+
+    // --- Gate results and open items: a gate step that cannot run here no longer holds back the
+    // done file or "complete", while a red one still does and is never relabelled. ---------------
+
+    private const string Implementation = "implementation_prompt.md";
+
+    [Theory]
+    [InlineData(Implementation)]
+    [InlineData(RunSubtask)]
+    public void GatePrompts_ShippedFile_StateTheStepResultsAndTheClosedListOfReasons(string fileName)
+    {
+        // Arrange
+        var text = ReadFlattened(fileName);
+
+        // Act
+        var section = text.IndexOf("## Gate results and open items", StringComparison.Ordinal);
+
+        // Assert
+        Assert.InRange(section, 0, int.MaxValue);
+        Assert.Contains("`passed`", text, StringComparison.Ordinal);
+        Assert.Contains("`failed`", text, StringComparison.Ordinal);
+        Assert.Contains("`not_run`", text, StringComparison.Ordinal);
+        Assert.Contains("this list is exhaustive", text, StringComparison.Ordinal);
+        Assert.Contains("the gate itself lists the step as manual or as a human checkpoint", text, StringComparison.Ordinal);
+        Assert.Contains("the step needs the interactive desktop or UI interaction", text, StringComparison.Ordinal);
+        Assert.Contains("required hardware, an external system or an approval is not available", text, StringComparison.Ordinal);
+        Assert.Contains("the named gate script does not exist in the target repository", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(Implementation)]
+    [InlineData(RunSubtask)]
+    public void GatePrompts_ShippedFile_LetAFailedStepBlockAndNeverRelabelIt(string fileName)
+    {
+        // Arrange
+        var text = ReadFlattened(fileName);
+
+        // Act
+        var blocks = text.Contains("A `failed` step blocks completion", StringComparison.Ordinal);
+
+        // Assert
+        Assert.True(blocks);
+        Assert.Contains("it is never relabelled `not_run`", text, StringComparison.Ordinal);
+        Assert.Contains("A `not_run` step does not block completion", text, StringComparison.Ordinal);
+        Assert.Contains("every skipped check is `not_run` and an open item", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("`Workflow\\verify.ps1` exits 0", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ImplementationPrompt_ShippedFile_PrescribesTheDoneFileSectionsTheApplicationReads()
+    {
+        // Arrange
+        var text = Read(Implementation);
+
+        // Act
+        var heading = text.IndexOf("## Offene Punkte", StringComparison.Ordinal);
+
+        // Assert
+        Assert.InRange(heading, 0, int.MaxValue);
+        Assert.Contains("{done_path}", text, StringComparison.Ordinal);
+        Assert.Contains("## Gate-Ergebnis", text, StringComparison.Ordinal);
+        Assert.Contains("`- keine`", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_ShippedFile_AddsTheOpenGateItemsArrayToTheStatusPayload()
+    {
+        // Arrange
+        var text = Read(RunSubtask);
+
+        // Act
+        var example = text.IndexOf("\"openGateItems\": []", StringComparison.Ordinal);
+
+        // Assert
+        Assert.InRange(example, 0, int.MaxValue);
+        Assert.Contains("`status`, `failreason` and `openGateItems`", text, StringComparison.Ordinal);
+        Assert.Contains("A subtask with open items is still `complete`", ReadFlattened(RunSubtask), StringComparison.Ordinal);
+    }
+
+    // --- Unattended runs (B6-B8) ---------------------------------------------------------------
+
+    private const string CreateDecisions = "create_decisions.md";
+    private const string NoHuman = "no_human.md";
+
+    [Fact]
+    public void CreateDecisionsPrompt_RendersWithTheDecompositionSet()
+    {
+        var rendered = new PromptTemplateService(ShippedPromptDirectory).Render(
+            CreateDecisions,
+            PromptVariables.ForSubtaskCreation(
+                new TaskPaths(WorkingDirectory, TaskName),
+                TaskDescription,
+                new SubtaskPaths(TrackingRoot, TaskName)));
+
+        Assert.Contains(@"D:\tracking\workflows\repo\alpha-task/decisions.md", rendered, StringComparison.Ordinal);
+        Assert.Empty(Regex.Matches(rendered, TokenPattern, RegexOptions.CultureInvariant));
+    }
+
+    [Fact]
+    public void CreateDecisionsPrompt_LeavesTheApprovalToTheApplication()
+    {
+        var text = Read(CreateDecisions);
+
+        Assert.Contains("{task_path}/decisions.md", text, StringComparison.Ordinal);
+        Assert.Contains("Schreibe keine `decisions.approved.json`", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NoHumanPrompt_IsPlainTextThatPointsAtTheDecisions()
+    {
+        // Appended verbatim by the CLI, never rendered: a token would reach the agent unreplaced.
+        Assert.Empty(TokensIn(NoHuman));
+        Assert.Contains("AskUserQuestion", Read(NoHuman), StringComparison.Ordinal);
+        Assert.Contains("decisions.md", Read(NoHuman), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RunSubtaskPrompt_StatesTheUnattendedRulesBeforeTheCompletionProtocol()
+    {
+        var text = Read(RunSubtask);
+
+        var unattended = text.IndexOf("## Unattended run", StringComparison.Ordinal);
+        var desktopJobs = text.IndexOf("## Desktop jobs", StringComparison.Ordinal);
+        var signalling = text.IndexOf("## Signalling completion", StringComparison.Ordinal);
+
+        Assert.InRange(unattended, 0, int.MaxValue);
+        Assert.InRange(desktopJobs, unattended + 1, int.MaxValue);
+        Assert.InRange(signalling, desktopJobs + 1, int.MaxValue);
+        Assert.Contains("{task_path}/decisions.md", text, StringComparison.Ordinal);
+        Assert.Contains("{subtask_path}/{subtask_title}/", text, StringComparison.Ordinal);
+        Assert.Contains("\"deferred\"", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CreateSubtasksPrompt_PlacesTheUnattendedSectionBeforeTheSubtaskFormat()
+    {
+        var text = Read(CreateSubtasks);
+
+        var requirements = text.IndexOf("## Anforderungen an eine Subtask", StringComparison.Ordinal);
+        var unattended = text.IndexOf("## Unbeaufsichtigter Lauf", StringComparison.Ordinal);
+        var format = text.IndexOf("Verwende dieses Format", StringComparison.Ordinal);
+
+        Assert.InRange(requirements, 0, int.MaxValue);
+        Assert.InRange(unattended, requirements + 1, int.MaxValue);
+        Assert.InRange(format, unattended + 1, int.MaxValue);
+        Assert.Contains("{task_path}/decisions.md", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CreateSubtasksPrompt_DescribesTheVersionTwoIndexWithDependencies()
+    {
+        var text = Read(CreateSubtasks);
+
+        Assert.Contains("\"version\": 2", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"version\": 1", text, StringComparison.Ordinal);
+        Assert.Contains("\"dependsOn\": [\"ST-001-erster-titel\"]", text, StringComparison.Ordinal);
+        Assert.Contains("dependsOn: []", text, StringComparison.Ordinal);
+    }
+
+    // --- simplifier_prompt.md: the Vereinfachen phase between Spezifikation and Review. ---------
+
+    [Fact]
+    public void SimplifierPrompt_ShippedFile_NamesSpecPlanTaskAndReportTokens()
+    {
+        // Arrange
+        var tokens = TokensIn(Simplifier);
+
+        // Act
+        var missing = new[] { "spec_path", "plan_path", "taskbeschreibung", "simplified_path" }
+            .Where(t => !tokens.Contains(t, StringComparer.Ordinal))
+            .ToList();
+
+        // Assert
+        Assert.Empty(missing);
+    }
+
+    [Fact]
+    public void SimplifierPrompt_ShippedFile_UsesOnlyTokensOfTheBaseSet()
+    {
+        // Arrange
+        var tokens = TokensIn(Simplifier);
+
+        // Act
+        var unsupported = tokens.Where(t => !PromptVariables.KnownNames.Contains(t)).ToList();
+
+        // Assert
+        Assert.Empty(unsupported);
+    }
+
+    [Fact]
+    public void SimplifierPrompt_ShippedFile_WritesTheReportAsTheVeryLastAction()
+    {
+        // Arrange
+        var text = ReadFlattened(Simplifier);
+
+        // Act
+        var finish = text.IndexOf("## Finish", StringComparison.Ordinal);
+
+        // Assert - the report is the phase's completion marker, so writing it early ends the session
+        // while the spec and plan are still being edited.
+        Assert.InRange(finish, 0, int.MaxValue);
+        Assert.Contains(
+            "write the simplification report to {simplified_path} as the very last action of this session",
+            text,
+            StringComparison.Ordinal);
+        Assert.Contains("never write it before your edits are finished", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SimplifierPrompt_ShippedFile_ForbidsImplementingAndTouchingOtherFiles()
+    {
+        // Arrange
+        var text = ReadFlattened(Simplifier);
+
+        // Act
+        var editsInPlace = text.Contains("Edit both files in place.", StringComparison.Ordinal);
+
+        // Assert
+        Assert.True(editsInPlace);
+        Assert.Contains("Do not implement anything.", text, StringComparison.Ordinal);
+        Assert.Contains(
+            "Do not create or change any file other than the specification, the plan and the simplification report.",
+            text,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SimplifierPrompt_ShippedFile_ForbidsDroppingARequirementOfTheOriginalTask()
+    {
+        // Arrange
+        var text = ReadFlattened(Simplifier);
+
+        // Act
+        var guardrails = text.IndexOf("## Guardrails", StringComparison.Ordinal);
+
+        // Assert
+        Assert.InRange(guardrails, 0, int.MaxValue);
+        Assert.Contains("Never drop a requirement of the original task", text, StringComparison.Ordinal);
+        Assert.Contains("A simpler plan that does not solve the task is a failure.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SimplifierPrompt_RenderedWithTheBaseSet_LeavesNoPlaceholder()
+    {
+        // Arrange
+        var service = new PromptTemplateService(ShippedPromptDirectory);
+        var variables = PromptVariables.For(new TaskPaths(WorkingDirectory, TaskName), TaskDescription);
+
+        // Act
+        var rendered = service.Render(Simplifier, variables);
+
+        // Assert
+        Assert.Empty(Regex.Matches(rendered, TokenPattern, RegexOptions.CultureInvariant));
+        Assert.Contains("./alpha-task/alpha-task-simplified.md", rendered, StringComparison.Ordinal);
     }
 }

@@ -34,6 +34,9 @@ public sealed class TaskTabCompletionTests : IDisposable
 {
     private const string TaskName = "alpha";
 
+    private const string OpenSubtasksQuestion =
+        "Task als abgeschlossen markieren? 3 von 4 Subtasks sind nicht complete. Zum Anhalten Pause verwenden oder den Tab schließen.";
+
     private readonly string _root;
     private readonly string _workspace;
     private readonly string _tracking;
@@ -119,11 +122,16 @@ public sealed class TaskTabCompletionTests : IDisposable
 
         public TaskState? TryLoad(TaskPaths paths) => _inner.TryLoad(paths);
 
+        public bool TryCreate(TaskPaths paths) => _inner.TryCreate(paths);
+
         public void SaveDescription(TaskPaths paths, string taskDescription) =>
             _inner.SaveDescription(paths, taskDescription);
 
         public void RecordPhase(TaskPaths paths, WorkflowPhase phase, PhaseStatus status) =>
             _inner.RecordPhase(paths, phase, status);
+
+        public TaskState? TrySkipPhases(TaskPaths paths, IReadOnlyCollection<WorkflowPhase> phases) =>
+            _inner.TrySkipPhases(paths, phases);
 
         public void ReplacePhases(TaskPaths paths, IReadOnlyList<TaskPhaseState> phases) =>
             _inner.ReplacePhases(paths, phases);
@@ -148,7 +156,10 @@ public sealed class TaskTabCompletionTests : IDisposable
     // CA2000 cannot trace the disposal: TerminalViewModel's ownership passes into the returned
     // TaskTabViewModel, whose own Dispose() disposes it, and every call site uses `using var`.
 #pragma warning disable CA2000
-    private TaskTabViewModel Create(IWorkflowOrchestrator orchestrator, ITaskStateStore stateStore)
+    private TaskTabViewModel Create(
+        IWorkflowOrchestrator orchestrator,
+        ITaskStateStore stateStore,
+        IMessageDialogService? messages = null)
     {
         var terminal = new TerminalViewModel(
             new WebViewEnvironmentProvider(),
@@ -163,16 +174,34 @@ public sealed class TaskTabCompletionTests : IDisposable
             new StubDirectoryPicker(),
             terminal,
             folderDebounce: TimeSpan.Zero,
-            startupErrors: []);
+            startupErrors: [],
+            messages: messages);
     }
 #pragma warning restore CA2000
+
+    private sealed class RecordingMessages(params bool[] answers) : IMessageDialogService
+    {
+        private readonly Queue<bool> _answers = new(answers);
+
+        public List<string> Questions { get; } = [];
+
+        public void ShowError(string message) => throw new InvalidOperationException(message);
+
+        /// <summary>Returns the queued answers in order, then false ("Nein").</summary>
+        public bool Confirm(string message)
+        {
+            Questions.Add(message);
+            return _answers.Count > 0 && _answers.Dequeue();
+        }
+    }
 
     /// <summary>Starts a subtask-mode run and puts it into the implementation phase.</summary>
     private TaskTabViewModel StartAnImplementationRun(
         IWorkflowOrchestrator orchestrator,
-        ITaskStateStore stateStore)
+        ITaskStateStore stateStore,
+        IMessageDialogService? messages = null)
     {
-        var vm = Create(orchestrator, stateStore);
+        var vm = Create(orchestrator, stateStore, messages);
         vm.WorkingDirectory = _workspace;
         vm.TaskName = TaskName;
         vm.SubtasksEnabled = true;
@@ -220,6 +249,41 @@ public sealed class TaskTabCompletionTests : IDisposable
         Assert.True(runHadEnded, "the close was requested while the run was still going");
         Assert.Equal(1, closes);
         Assert.False(vm.IsRunning);
+    }
+
+    // WF_QUEUE spec Q7 (b) and Q12: 'Task abschliessen' counts as finished and says so before the tab
+    // closes, so the tabs queued after this one have started before the shell removes it.
+    [WpfFact]
+    public async Task CompleteTask_RaisesFinishedOnceBeforeTheClose()
+    {
+        var orchestrator = new WindingDownOrchestrator();
+        using var vm = StartAnImplementationRun(orchestrator, new FakeTaskStateStore());
+        var events = new List<string>();
+        vm.Finished += (_, _) => events.Add("finished");
+        vm.CloseRequested += (_, _) => events.Add("close");
+
+        vm.CompleteTaskCommand.Execute(null);
+
+        await Settle(() => events.Contains("close"), "the task completion never requested the tab close");
+
+        Assert.Equal(new[] { "finished", "close" }, events);
+    }
+
+    // WF_QUEUE spec Q15: the journal writes are durable, so a failing successor never keeps the completed
+    // task's tab open - and the failure still surfaces through the command.
+    [WpfFact]
+    public async Task CompleteTask_AFinishedHandlerThatThrows_StillRequestsTheClose()
+    {
+        var orchestrator = new WindingDownOrchestrator();
+        using var vm = StartAnImplementationRun(orchestrator, new FakeTaskStateStore());
+        var closes = 0;
+        vm.Finished += (_, _) => throw new InvalidOperationException("successor failed");
+        vm.CloseRequested += (_, _) => closes++;
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(() => vm.CompleteTaskCommand.ExecuteAsync(null));
+
+        Assert.Equal("successor failed", failure.Message);
+        Assert.Equal(1, closes);
     }
 
     [WpfFact]
@@ -408,6 +472,7 @@ public sealed class TaskTabCompletionTests : IDisposable
         // all-complete (WorkflowOrchestrator.CompleteImplementationIfEveryEntryIsComplete).
         store.SaveSubtaskSettings(paths, enabled: true, _tracking);
         store.RecordPhase(paths, WorkflowPhase.Specification, PhaseStatus.Completed);
+        store.RecordPhase(paths, WorkflowPhase.Simplifier, PhaseStatus.Completed);
         store.RecordPhase(paths, WorkflowPhase.Review, PhaseStatus.Completed);
         store.RecordPhase(paths, WorkflowPhase.ResolveReview, PhaseStatus.Completed);
         store.RecordPhase(paths, WorkflowPhase.Implementation, PhaseStatus.Active);
@@ -494,11 +559,95 @@ public sealed class TaskTabCompletionTests : IDisposable
         Directory.CreateDirectory(paths.TaskDirectory);
         File.WriteAllText(paths.SpecAbsolute, "Spezifikation");
         File.WriteAllText(paths.PlanAbsolute, "Plan");
+        File.WriteAllText(paths.SimplifiedAbsolute, "Vereinfacht");
         File.WriteAllText(paths.ReviewAbsolute, "Review");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // Completing with open subtasks asks first
+    // -----------------------------------------------------------------------------------------
+
+    [WpfFact]
+    public async Task CompleteTask_OpenSubtasksAndTheAnswerIsNo_DoesNothing()
+    {
+        WriteIncompleteLedger();
+        var orchestrator = new WindingDownOrchestrator();
+        var store = new FakeTaskStateStore();
+        var messages = new RecordingMessages(false);
+        using var vm = StartAnImplementationRun(orchestrator, store, messages);
+
+        var closes = 0;
+        vm.CloseRequested += (_, _) => closes++;
+
+        await vm.CompleteTaskCommand.ExecuteAsync(null);
+
+        Assert.Equal(OpenSubtasksQuestion, Assert.Single(messages.Questions));
+        Assert.NotNull(orchestrator.Request);
+        Assert.False(orchestrator.Request.ManualSignal.WaitAsync(CancellationToken.None).IsCompleted, "the run was signalled");
+        Assert.Empty(store.ManualCompletions);
+        Assert.DoesNotContain(store.Recorded, r => r.Phase == WorkflowPhase.Implementation);
+        Assert.Equal(0, closes);
+        Assert.True(vm.IsRunning);
+    }
+
+    [WpfFact]
+    public async Task CompleteTask_OpenSubtasksAndTheAnswerIsYes_CompletesAndCloses()
+    {
+        WriteIncompleteLedger();
+        var orchestrator = new WindingDownOrchestrator();
+        var store = new FakeTaskStateStore();
+        var messages = new RecordingMessages(true);
+        using var vm = StartAnImplementationRun(orchestrator, store, messages);
+
+        var closes = 0;
+        vm.CloseRequested += (_, _) => closes++;
+
+        await vm.CompleteTaskCommand.ExecuteAsync(null);
+
+        Assert.Equal(OpenSubtasksQuestion, Assert.Single(messages.Questions));
+        Assert.True(orchestrator.SignalObserved);
+        Assert.True(Assert.Single(store.ManualCompletions).CompletedManually);
+        Assert.Equal(1, closes);
+    }
+
+    [WpfFact]
+    public async Task CompleteTask_AllSubtasksComplete_DoesNotAsk()
+    {
+        WriteLedger(complete: 4);
+        var orchestrator = new WindingDownOrchestrator();
+        var messages = new RecordingMessages();
+        using var vm = StartAnImplementationRun(orchestrator, new FakeTaskStateStore(), messages);
+
+        var closes = 0;
+        vm.CloseRequested += (_, _) => closes++;
+
+        await vm.CompleteTaskCommand.ExecuteAsync(null);
+
+        Assert.Empty(messages.Questions);
+        Assert.Equal(1, closes);
+    }
+
+    [WpfFact]
+    public async Task CompleteTask_WithoutAReadableIndex_DoesNotAsk()
+    {
+        var orchestrator = new WindingDownOrchestrator();
+        var messages = new RecordingMessages();
+        using var vm = StartAnImplementationRun(orchestrator, new FakeTaskStateStore(), messages);
+
+        var closes = 0;
+        vm.CloseRequested += (_, _) => closes++;
+
+        await vm.CompleteTaskCommand.ExecuteAsync(null);
+
+        Assert.Empty(messages.Questions);
+        Assert.Equal(1, closes);
+    }
+
     /// <summary>Stages an ordered index whose entries are not all complete.</summary>
-    private SubtaskPaths WriteIncompleteLedger()
+    private SubtaskPaths WriteIncompleteLedger() => WriteLedger(complete: 1);
+
+    /// <summary>Stages a four-entry ordered index whose first <paramref name="complete"/> entries are complete.</summary>
+    private SubtaskPaths WriteLedger(int complete)
     {
         var tracking = new SubtaskPaths(_tracking, TaskName);
         Directory.CreateDirectory(tracking.TaskDirectory);
@@ -514,7 +663,7 @@ public sealed class TaskTabCompletionTests : IDisposable
             Directory.CreateDirectory(tracking.SubtaskDirectory(title));
             File.WriteAllText(tracking.SubtaskMarkdown(title), $"Beschreibung von {title}");
 
-            if (i == 0)
+            if (i < complete)
             {
                 File.WriteAllText(tracking.SubtaskStatusFile(title), """{ "status": "complete" }""");
             }

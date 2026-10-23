@@ -15,6 +15,7 @@ public class ConverterTests
     [InlineData(PhaseStatus.Pending, "#FF9E9E9E")]
     [InlineData(PhaseStatus.Active, "#FFFBC02D")]
     [InlineData(PhaseStatus.Completed, "#FF43A047")]
+    [InlineData(PhaseStatus.Skipped, "#FF607D8B")]
     public void PhaseStatusToBrush_MapsEveryStatus(PhaseStatus status, string expected)
     {
         var converter = new PhaseStatusToBrushConverter();
@@ -41,6 +42,7 @@ public class ConverterTests
     [InlineData(PhaseStatus.Pending, PackIconKind.CircleOutline)]
     [InlineData(PhaseStatus.Active, PackIconKind.ProgressClock)]
     [InlineData(PhaseStatus.Completed, PackIconKind.CheckCircle)]
+    [InlineData(PhaseStatus.Skipped, PackIconKind.SkipNextCircle)]
     public void PhaseStatusToIconKind_MapsEveryStatus(PhaseStatus status, PackIconKind expected)
     {
         var converter = new PhaseStatusToIconKindConverter();

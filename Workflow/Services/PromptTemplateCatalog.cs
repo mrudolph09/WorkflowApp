@@ -21,10 +21,10 @@ namespace Workflow.Services;
 /// and both use <c>{tasktitel}</c> - a decomposition-set token. They are mapped to
 /// <see cref="PromptVariables.SubtaskCreationNames"/>, the narrowest layer that admits that token;
 /// widening the base set to accommodate them would silently legalise <c>{tasktitel}</c> in the
-/// four phase prompts as well.
+/// phase prompts as well.
 /// </para>
 /// <para>
-/// The four phase entries are derived from <see cref="PhaseCatalog.All"/> rather than repeated, so
+/// The phase entries are derived from <see cref="PhaseCatalog.All"/> rather than repeated, so
 /// a newly added phase cannot ship an uncatalogued prompt file.
 /// </para>
 /// </remarks>
@@ -51,6 +51,13 @@ public static class PromptTemplateCatalog
         catalog["counter_prompt.md"] = PromptVariables.SubtaskCreationNames;
         catalog["evidence_gate.md"] = PromptVariables.SubtaskCreationNames;
         catalog["run_subtask.md"] = PromptVariables.SubtaskRunNames;
+
+        // The decision pre-flight renders with the decomposition dictionary, so it gets that set.
+        catalog["create_decisions.md"] = PromptVariables.SubtaskCreationNames;
+
+        // Appended to the unattended sessions' system prompt by the CLI itself, never rendered: a
+        // token in it would reach the agent unreplaced, so the set is empty rather than absent.
+        catalog["no_human.md"] = new HashSet<string>(StringComparer.Ordinal);
 
         return catalog;
     }

@@ -30,4 +30,13 @@ public interface IAutoAnswerService
     /// <param name="screenText">The last rendered rows of the terminal.</param>
     /// <returns>Whether an unsubmitted paste is still in the input.</returns>
     public bool IsPastePending(string screenText);
+
+    /// <summary>
+    /// True when the rendered screen shows the launcher actively working on a prompt - the positive
+    /// evidence that a submit took effect. When no pattern is configured, or it is malformed, this
+    /// returns false.
+    /// </summary>
+    /// <param name="screenText">The last rendered rows of the terminal.</param>
+    /// <returns>Whether the launcher is working on a submitted prompt.</returns>
+    public bool IsSubmitted(string screenText);
 }

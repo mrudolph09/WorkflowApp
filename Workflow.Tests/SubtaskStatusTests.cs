@@ -23,14 +23,87 @@ public class SubtaskStatusTests
     ];
 
     // Design, Data Models / Tracking Files (issue 1 resolved): the vocabulary is closed on the two
-    // decisive values; everything else is Pending, so Pending must be the default value.
+    // decisive values plus the three non-terminal waiting values; everything else is Pending, so
+    // Pending must be the default value.
     [Fact]
-    public void SubtaskStatus_IsClosedOnTheThreeStatesWithPendingAsTheDefault()
+    public void SubtaskStatus_IsClosedOnTheSixStatesWithPendingAsTheDefault()
     {
         Assert.Equal(
-            [SubtaskStatus.Pending, SubtaskStatus.Complete, SubtaskStatus.Failed],
+            [
+                SubtaskStatus.Pending,
+                SubtaskStatus.Complete,
+                SubtaskStatus.Failed,
+                SubtaskStatus.Blocked,
+                SubtaskStatus.WaitingForHuman,
+                SubtaskStatus.Deferred,
+            ],
             Enum.GetValues<SubtaskStatus>());
         Assert.Equal(SubtaskStatus.Pending, default(SubtaskStatus));
+    }
+
+    // dependsOn: an entry built without one depends on every previous entry, which is null - an
+    // empty list is the explicit "independent" and must stay distinguishable from it.
+    [Fact]
+    public void SubtaskState_DependsOnAllPreviousEntriesByDefault()
+    {
+        Assert.Null(new SubtaskState("ST-001-parse", SubtaskStatus.Pending).DependsOn);
+        Assert.Empty(new SubtaskState("ST-001-parse", SubtaskStatus.Pending, null, []).DependsOn!);
+    }
+
+    // Waiting is Blocked + WaitingForHuman, Deferred is its own count, and neither ever leaks into
+    // Failed or Completed. 8 entries: 2 Complete, 1 Failed, 1 Pending, 3 Waiting, 1 Deferred -
+    // Completed, Failed, Waiting and Deferred are pinned as distinct from each other where it matters.
+    [Fact]
+    public void SubtaskSnapshot_CountsWaitingAndDeferredButNeverAsFailedOrComplete()
+    {
+        var snapshot = new SubtaskSnapshot(
+        [
+            new SubtaskState("ST-001-parse", SubtaskStatus.Complete),
+            new SubtaskState("ST-002-render", SubtaskStatus.Blocked, "Build-Server down"),
+            new SubtaskState("ST-003-persist", SubtaskStatus.WaitingForHuman, "Freigabe fehlt"),
+            new SubtaskState("ST-004-verify", SubtaskStatus.Failed, "rot"),
+            new SubtaskState("ST-005-ship", SubtaskStatus.Deferred),
+            new SubtaskState("ST-006-polish", SubtaskStatus.WaitingForHuman),
+            new SubtaskState("ST-007-pending", SubtaskStatus.Pending),
+            new SubtaskState("ST-008-done", SubtaskStatus.Complete),
+        ]);
+
+        Assert.Equal(8, snapshot.Total);
+        Assert.Equal(2, snapshot.Completed);
+        Assert.Equal(1, snapshot.Failed);
+        Assert.Equal(3, snapshot.Waiting);
+        Assert.Equal(1, snapshot.Deferred);
+    }
+
+    // AllComplete keeps its exact meaning: a waiting or deferred entry is not complete.
+    [Theory]
+    [InlineData(SubtaskStatus.Blocked)]
+    [InlineData(SubtaskStatus.WaitingForHuman)]
+    [InlineData(SubtaskStatus.Deferred)]
+    public void SubtaskSnapshot_NeverCountsAWaitingEntryAsComplete(SubtaskStatus status)
+    {
+        var snapshot = new SubtaskSnapshot(
+        [
+            new SubtaskState("ST-001-parse", SubtaskStatus.Complete),
+            new SubtaskState("ST-002-render", status),
+        ]);
+
+        Assert.Equal(2, snapshot.Total);
+        Assert.Equal(1, snapshot.Completed);
+        Assert.Equal(0, snapshot.Failed);
+        Assert.NotEqual(snapshot.Total, snapshot.Completed);
+    }
+
+    // The new progress fields are optional trailing ones: existing construction sites report no
+    // waiting work and no blocked reason.
+    [Fact]
+    public void SubtaskProgress_DefaultsTheWaitingFieldsToNothing()
+    {
+        var progress = new SubtaskProgress(SubtaskStage.Running, 0, 1, 0, "ST-001-parse", []);
+
+        Assert.Equal(0, progress.Waiting);
+        Assert.Equal(0, progress.Deferred);
+        Assert.Null(progress.BlockedReason);
     }
 
     // Design, Presentation and Recovery: "stages are Idle, Decomposing, Running, Finished".

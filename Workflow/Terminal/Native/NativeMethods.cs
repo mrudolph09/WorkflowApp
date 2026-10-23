@@ -80,4 +80,10 @@ internal static class NativeMethods
 
     [DllImport("kernel32.dll", SetLastError = true)]
     internal static extern bool CloseHandle(IntPtr hObject);
+
+    /// <summary>WAIT_OBJECT_0: the waited-on process has exited.</summary>
+    internal const uint WaitObject0 = 0;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    internal static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
 }

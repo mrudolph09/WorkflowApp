@@ -22,8 +22,11 @@ namespace Workflow.Models;
 /// </remarks>
 public static class SubtaskLedger
 {
-    /// <summary>Highest index schema version this build understands. The field is optional on disk.</summary>
-    private const int SupportedIndexVersion = 1;
+    /// <summary>
+    /// Highest index schema version this build understands. The field is optional on disk. Version 2
+    /// adds object entries carrying <c>dependsOn</c>; a version 1 index is read exactly as before.
+    /// </summary>
+    private const int SupportedIndexVersion = 2;
 
     /// <summary>Reason carried by an entry whose title is blank, whitespace-only or not a JSON string.</summary>
     private const string BlankTitleReason = "Der Index enthält einen leeren Subtask-Namen.";
@@ -33,6 +36,18 @@ public static class SubtaskLedger
 
     /// <summary>The only status value that fails a subtask on its own. Compared case-insensitively.</summary>
     private const string FailedValue = "failed";
+
+    /// <summary>Non-terminal: something outside the subtask stops it. Compared case-insensitively.</summary>
+    private const string BlockedValue = "blocked";
+
+    /// <summary>Non-terminal: the subtask needs a human. Compared case-insensitively.</summary>
+    private const string WaitingForHumanValue = "waiting_for_human";
+
+    /// <summary>Synonym of <see cref="WaitingForHumanValue"/> that agents also write.</summary>
+    private const string WaitingForUserValue = "waiting_for_user";
+
+    /// <summary>Non-terminal: the work waits for a desktop job. Compared case-insensitively.</summary>
+    private const string DeferredValue = "deferred";
 
     /// <summary>Reason used when a subtask reports <c>failed</c> without a <c>failreason</c>.</summary>
     private const string UnexplainedFailureReason = "Der Subtask meldet einen Fehlschlag ohne Begründung.";
@@ -82,7 +97,9 @@ public static class SubtaskLedger
     /// every other parsed value - including <c>pending</c> and anything unrecognised - and an absent
     /// payload leave the entry unfinished (design issue 1), and an unfinished entry then needs a
     /// usable description: a missing, empty or unreadable <c>subtask.md</c> fails that entry and only
-    /// that entry (requirement 2.10, design issue 5).
+    /// that entry (requirement 2.10, design issue 5). <c>blocked</c>, <c>waiting_for_human</c>,
+    /// <c>waiting_for_user</c> and <c>deferred</c> are unfinished too, but say why, and keep their
+    /// <c>failreason</c>; everything else unfinished is <see cref="SubtaskStatus.Pending"/>.
     /// </description></item>
     /// </list>
     /// <para>
@@ -104,9 +121,9 @@ public static class SubtaskLedger
         var states = new List<SubtaskState>(index.Count);
         foreach (var entry in index)
         {
-            // An entry the index itself failed carries a title that must never compose a path, so it
-            // is passed through untouched - reason and all.
-            states.Add(entry.Status == SubtaskStatus.Failed ? entry : Derive(paths, entry.Title));
+            // An entry the index itself failed carries a title that must never compose a path, or a
+            // dependency that can never be met, so it is passed through untouched - reason and all.
+            states.Add(entry.Status == SubtaskStatus.Failed ? entry : Derive(paths, entry));
         }
 
         return new SubtaskSnapshot(states);
@@ -259,15 +276,12 @@ public static class SubtaskLedger
         }
 
         var entries = new List<SubtaskState>();
+        var dependencies = new List<JsonElement>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var element in subtasks.EnumerateArray())
         {
-            // A JSON null or a non-string element is an entry-level defect, not a schema defect:
-            // it costs its own entry and nothing else, like a blank title.
-            var title = element.ValueKind == JsonValueKind.String
-                ? (element.GetString() ?? string.Empty).Trim()
-                : string.Empty;
+            var (title, dependsOn) = ReadEntry(element);
 
             if (!seen.Add(title))
             {
@@ -275,9 +289,150 @@ public static class SubtaskLedger
             }
 
             entries.Add(Classify(title));
+            dependencies.Add(dependsOn);
+        }
+
+        // A second pass, because "only an earlier entry" needs every surviving title and its
+        // position first. Titles are unique by now, so each maps to exactly one position.
+        var positions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var position = 0; position < entries.Count; position++)
+        {
+            positions[entries[position].Title] = position;
+        }
+
+        for (var position = 0; position < entries.Count; position++)
+        {
+            entries[position] = ResolveDependencies(entries, positions, position, dependencies[position]);
         }
 
         return entries;
+    }
+
+    /// <summary>Reads one element of the <c>subtasks</c> array: a plain title or a version 2 object.</summary>
+    /// <param name="element">The array element.</param>
+    /// <returns>
+    /// The trimmed title - empty when there is none - and the raw <c>dependsOn</c> value, which is an
+    /// undefined element for a plain string entry or an object without the property.
+    /// </returns>
+    /// <remarks>
+    /// A JSON null, a number or an object without a string <c>title</c> is an entry-level defect, not
+    /// a schema defect: it costs its own entry and nothing else, like a blank title.
+    /// </remarks>
+    private static (string Title, JsonElement DependsOn) ReadEntry(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            return ((element.GetString() ?? string.Empty).Trim(), default);
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return (string.Empty, default);
+        }
+
+        JsonElement title = default;
+        JsonElement dependsOn = default;
+        foreach (var property in element.EnumerateObject())
+        {
+            // Matched case-insensitively, like every other property name in the tracking files.
+            if (string.Equals(property.Name, "title", StringComparison.OrdinalIgnoreCase))
+            {
+                title = property.Value;
+            }
+            else if (string.Equals(property.Name, "dependsOn", StringComparison.OrdinalIgnoreCase))
+            {
+                dependsOn = property.Value;
+            }
+        }
+
+        var text = title.ValueKind == JsonValueKind.String
+            ? (title.GetString() ?? string.Empty).Trim()
+            : string.Empty;
+
+        return (text, dependsOn);
+    }
+
+    /// <summary>Attaches one entry's dependencies, or fails the entry over an invalid one.</summary>
+    /// <param name="entries">Every surviving entry, in index order.</param>
+    /// <param name="positions">The position of each surviving title, compared case-insensitively.</param>
+    /// <param name="position">The position of the entry being resolved.</param>
+    /// <param name="dependsOn">The raw <c>dependsOn</c> value of that entry.</param>
+    /// <returns>
+    /// The entry with <see cref="SubtaskState.DependsOn"/> set: null when the value is absent or JSON
+    /// null (every previous entry), otherwise the trimmed, de-duplicated titles in the referenced
+    /// entries' own spelling.
+    /// </returns>
+    /// <remarks>
+    /// A dependency may only name an <em>earlier</em> entry, which is what keeps the graph free of
+    /// cycles without a cycle check. An unknown name, a later entry or the entry itself fails that
+    /// entry and only that entry, like an unsafe title (requirement 2.10). The offending name is kept
+    /// in <see cref="SubtaskState.DependsOn"/> so the scheduler, which applies the same "earlier only"
+    /// rule, can never consider the failed entry runnable.
+    /// </remarks>
+    private static SubtaskState ResolveDependencies(
+        List<SubtaskState> entries,
+        Dictionary<string, int> positions,
+        int position,
+        JsonElement dependsOn)
+    {
+        var entry = entries[position];
+
+        if (dependsOn.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            return entry;
+        }
+
+        if (dependsOn.ValueKind != JsonValueKind.Array)
+        {
+            var raw = dependsOn.GetRawText();
+            return Invalid(entry, raw, [raw]);
+        }
+
+        var resolved = new List<string>();
+        var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? invalid = null;
+
+        foreach (var item in dependsOn.EnumerateArray())
+        {
+            var name = item.ValueKind == JsonValueKind.String
+                ? (item.GetString() ?? string.Empty).Trim()
+                : item.GetRawText();
+
+            // The length test keeps a blank name from matching a blank-titled entry.
+            if (name.Length > 0 && positions.TryGetValue(name, out var target) && target < position)
+            {
+                name = entries[target].Title;
+            }
+            else
+            {
+                invalid ??= name;
+            }
+
+            if (unique.Add(name))
+            {
+                resolved.Add(name);
+            }
+        }
+
+        return invalid is null ? entry with { DependsOn = resolved } : Invalid(entry, invalid, resolved);
+    }
+
+    /// <summary>Fails an entry over an invalid dependency, unless its title already failed it.</summary>
+    /// <param name="entry">The entry as the title check classified it.</param>
+    /// <param name="dependency">The first offending dependency, named in the German reason.</param>
+    /// <param name="dependsOn">The dependencies to keep on the entry, the offending one included.</param>
+    /// <returns>The failed entry.</returns>
+    private static SubtaskState Invalid(SubtaskState entry, string dependency, IReadOnlyList<string> dependsOn)
+    {
+        // An unsafe title is the more fundamental defect, so its reason is the one that stays.
+        return entry.Status == SubtaskStatus.Failed
+            ? entry with { DependsOn = dependsOn }
+            : entry with
+            {
+                Status = SubtaskStatus.Failed,
+                FailReason = $"Ungültige Abhängigkeit '{dependency}'.",
+                DependsOn = dependsOn,
+            };
     }
 
     /// <summary>Reports whether an optional <c>version</c> value is one this build accepts.</summary>
@@ -316,10 +471,14 @@ public static class SubtaskLedger
 
     /// <summary>Derives one safely titled entry's state from its status payload and description.</summary>
     /// <param name="paths">The tracking paths of the task.</param>
-    /// <param name="title">A title that already satisfies <see cref="SubtaskPaths.IsValidTitle"/>.</param>
+    /// <param name="entry">
+    /// The index entry, whose title already satisfies <see cref="SubtaskPaths.IsValidTitle"/>. The
+    /// derived state is a copy of it, so its <see cref="SubtaskState.DependsOn"/> survives.
+    /// </param>
     /// <returns>The state the evidence on disk establishes for that entry.</returns>
-    private static SubtaskState Derive(SubtaskPaths paths, string title)
+    private static SubtaskState Derive(SubtaskPaths paths, SubtaskState entry)
     {
+        var title = entry.Title;
         var (evidence, reason) = ReadStatus(paths.SubtaskStatusFile(title));
 
         switch (evidence)
@@ -327,25 +486,59 @@ public static class SubtaskLedger
             case StatusEvidence.Complete:
                 // The precedence rule lives here: nothing below this line can undo a completion, so a
                 // description deleted afterwards or a flag never published cannot demote it (4.4).
-                return new SubtaskState(title, SubtaskStatus.Complete);
+                return entry with { Status = SubtaskStatus.Complete, FailReason = null };
 
             case StatusEvidence.Failed:
-                return new SubtaskState(
-                    title,
-                    SubtaskStatus.Failed,
-                    string.IsNullOrWhiteSpace(reason) ? UnexplainedFailureReason : reason);
+                return entry with
+                {
+                    Status = SubtaskStatus.Failed,
+                    FailReason = string.IsNullOrWhiteSpace(reason) ? UnexplainedFailureReason : reason,
+                };
 
             case StatusEvidence.Unusable:
-                return new SubtaskState(title, SubtaskStatus.Failed, UnusableStatusReason);
+                return entry with { Status = SubtaskStatus.Failed, FailReason = UnusableStatusReason };
 
             default:
-                // Absent or undecided: the entry is unfinished, and an unfinished entry is only
-                // attemptable if it still has something to attempt.
-                return HasDescription(paths, title)
-                    ? new SubtaskState(title, SubtaskStatus.Pending)
-                    : new SubtaskState(title, SubtaskStatus.Failed, $"Keine Beschreibung für '{title}'.");
+                // Absent, undecided or waiting: the entry is unfinished, and an unfinished entry is
+                // only attemptable if it still has something to attempt.
+                if (!HasDescription(paths, title))
+                {
+                    return entry with
+                    {
+                        Status = SubtaskStatus.Failed,
+                        FailReason = $"Keine Beschreibung für '{title}'.",
+                    };
+                }
+
+                var status = Unfinished(evidence);
+
+                // The job verdict is read here, with the rest of the evidence, so the scheduler stays
+                // pure: it only ever sees whether the deferred entry's job delivered or ran and
+                // failed for the current request, never the job files themselves.
+                var job = status == SubtaskStatus.Deferred
+                    ? DesktopJobFiles.Readiness(paths.SubtaskDirectory(title))
+                    : DesktopJobReadiness.Waiting;
+
+                return entry with
+                {
+                    Status = status,
+                    FailReason = reason,
+                    JobResultReady = job == DesktopJobReadiness.Delivered,
+                    JobNeedsRepair = job == DesktopJobReadiness.NeedsRepair,
+                };
         }
     }
+
+    /// <summary>Maps the evidence of an unfinished entry to its status.</summary>
+    /// <param name="evidence">Absent, undecided or one of the waiting kinds.</param>
+    /// <returns>The waiting status the payload named, or <see cref="SubtaskStatus.Pending"/>.</returns>
+    private static SubtaskStatus Unfinished(StatusEvidence evidence) => evidence switch
+    {
+        StatusEvidence.Blocked => SubtaskStatus.Blocked,
+        StatusEvidence.WaitingForHuman => SubtaskStatus.WaitingForHuman,
+        StatusEvidence.Deferred => SubtaskStatus.Deferred,
+        _ => SubtaskStatus.Pending,
+    };
 
     /// <summary>Reads one subtask's status payload.</summary>
     /// <param name="path">Absolute path of that subtask's <c>status.json</c>.</param>
@@ -390,7 +583,10 @@ public static class SubtaskLedger
     /// Only <c>status</c> and the optional <c>failreason</c> are read, case-insensitively, and every
     /// other property is ignored. A root that is not an object is not a status payload and counts as
     /// malformed. A <c>status</c> that is absent, JSON null or not a string simply is not one of the
-    /// two decisive values, which by design issue 1 means "not done yet" rather than "broken".
+    /// two decisive values, which by design issue 1 means "not done yet" rather than "broken". The
+    /// waiting values are not decisive either; they only say why the entry is not done yet, so they
+    /// carry the <c>failreason</c> as an explanation (null when it is blank), while every other
+    /// undecided value carries none.
     /// </remarks>
     private static (StatusEvidence Evidence, string? Reason) Interpret(JsonElement root)
     {
@@ -423,9 +619,37 @@ public static class SubtaskLedger
             return (StatusEvidence.Complete, null);
         }
 
-        return string.Equals(status, FailedValue, StringComparison.OrdinalIgnoreCase)
-            ? (StatusEvidence.Failed, reason)
-            : (StatusEvidence.Undecided, null);
+        if (string.Equals(status, FailedValue, StringComparison.OrdinalIgnoreCase))
+        {
+            return (StatusEvidence.Failed, reason);
+        }
+
+        var waiting = Waiting(status);
+
+        return waiting == StatusEvidence.Undecided
+            ? (StatusEvidence.Undecided, null)
+            : (waiting, string.IsNullOrWhiteSpace(reason) ? null : reason);
+    }
+
+    /// <summary>Recognises the non-terminal waiting values, compared case-insensitively.</summary>
+    /// <param name="status">The parsed <c>status</c> value, if any.</param>
+    /// <returns>The waiting evidence it names, or <see cref="StatusEvidence.Undecided"/>.</returns>
+    private static StatusEvidence Waiting(string? status)
+    {
+        if (string.Equals(status, BlockedValue, StringComparison.OrdinalIgnoreCase))
+        {
+            return StatusEvidence.Blocked;
+        }
+
+        if (string.Equals(status, WaitingForHumanValue, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, WaitingForUserValue, StringComparison.OrdinalIgnoreCase))
+        {
+            return StatusEvidence.WaitingForHuman;
+        }
+
+        return string.Equals(status, DeferredValue, StringComparison.OrdinalIgnoreCase)
+            ? StatusEvidence.Deferred
+            : StatusEvidence.Undecided;
     }
 
     /// <summary>Reports whether one subtask still has a usable description to attempt.</summary>
@@ -472,5 +696,14 @@ public static class SubtaskLedger
 
         /// <summary>The payload carries <c>failed</c>.</summary>
         Failed,
+
+        /// <summary>The payload carries <c>blocked</c>. Unfinished.</summary>
+        Blocked,
+
+        /// <summary>The payload carries <c>waiting_for_human</c> or <c>waiting_for_user</c>. Unfinished.</summary>
+        WaitingForHuman,
+
+        /// <summary>The payload carries <c>deferred</c>. Unfinished.</summary>
+        Deferred,
     }
 }

@@ -119,13 +119,14 @@ public sealed class TaskTabSubtaskRecoveryTests : IDisposable
         return paths;
     }
 
-    /// <summary>A journal whose first three phases are Completed and backed by artefacts on disk.</summary>
+    /// <summary>A journal whose first four phases are Completed and backed by artefacts on disk.</summary>
     /// <param name="paths">The task whose artefacts are written.</param>
     /// <param name="implementation">The recorded status of the implementation phase.</param>
     private static TaskState Journal(TaskPaths paths, PhaseStatus implementation)
     {
         File.WriteAllText(paths.SpecAbsolute, "Spezifikation", Utf8);
         File.WriteAllText(paths.PlanAbsolute, "Plan", Utf8);
+        File.WriteAllText(paths.SimplifiedAbsolute, "Vereinfacht", Utf8);
         File.WriteAllText(paths.ReviewAbsolute, "Review", Utf8);
 
         var state = new TaskState
@@ -136,6 +137,7 @@ public sealed class TaskTabSubtaskRecoveryTests : IDisposable
         };
 
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Simplifier, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         state.Phases.Add(new TaskPhaseState(

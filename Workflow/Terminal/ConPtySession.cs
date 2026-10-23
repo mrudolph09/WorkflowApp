@@ -12,6 +12,7 @@ public sealed class ConPtySession : ITerminalSession
 {
     private const int ReadBufferSize = 4096;
     private static readonly TimeSpan TeardownTimeout = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan StopPollInterval = TimeSpan.FromMilliseconds(100);
 
     // CA2213 cannot trace disposal into a Task.Run delegate - but Dispose() always runs
     // ReleaseConsoleAndPipes(), which disposes every one of these, on a worker thread.
@@ -164,6 +165,86 @@ public sealed class ConPtySession : ITerminalSession
         // CA1806: the HRESULT must be consumed. A resize failure is not fatal here - the terminal
         // simply keeps its previous size - so it is intentionally discarded rather than throwing.
         _ = NativeMethods.ResizePseudoConsole(_pseudoConsole.DangerousGetHandle(), size);
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// The session has no job object, so the tree is confirmed the only way left: the shell's own
+    /// process handle signals its exit, and a process-tree kill that ran without any failure found
+    /// every descendant it could reach. Both are repeated until they hold together or the timeout
+    /// passes. A descendant whose shell had already exited before the first pass cannot be reached
+    /// through the tree any more - the residual this design accepts.
+    /// </remarks>
+    public async Task<bool> StopAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (_processId == 0)
+        {
+            return true;
+        }
+
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            // The handle may already be closed: nothing left to confirm with.
+            return false;
+        }
+
+        var deadline = Stopwatch.GetTimestamp() + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+
+        while (true)
+        {
+            var killed = TryKillProcessTree();
+            if (killed && RootHasExited())
+            {
+                IsRunning = false;
+                return true;
+            }
+
+            if (Stopwatch.GetTimestamp() >= deadline)
+            {
+                return false;
+            }
+
+            await Task.Delay(StopPollInterval, cancellationToken);
+        }
+    }
+
+    /// <summary>True once the shell process has exited, read from the handle CreateProcess returned.</summary>
+    private bool RootHasExited()
+    {
+        var handle = _processHandle;
+
+        return handle == IntPtr.Zero || NativeMethods.WaitForSingleObject(handle, 0) == NativeMethods.WaitObject0;
+    }
+
+    /// <summary>Kills the shell and its descendants; true when nothing failed doing so.</summary>
+    private bool TryKillProcessTree()
+    {
+        try
+        {
+            using var process = Process.GetProcessById(_processId);
+            process.Kill(entireProcessTree: true);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            // Not running any more.
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            // Exited between the lookup and the kill.
+            return true;
+        }
+        catch (Win32Exception)
+        {
+            // The shell itself could not be killed (yet); the caller retries.
+            return false;
+        }
+        catch (AggregateException)
+        {
+            // Some descendant could not be killed; the caller retries.
+            return false;
+        }
     }
 
     /// <inheritdoc />

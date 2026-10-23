@@ -10,4 +10,9 @@ public interface IMessageDialogService
     /// <summary>Shows an error with a single OK button and returns once it is dismissed.</summary>
     /// <param name="message">The German text to show.</param>
     public void ShowError(string message);
+
+    /// <summary>Asks a Ja/Nein question and returns once it is answered.</summary>
+    /// <param name="message">The German question to show.</param>
+    /// <returns>True when the user answered Ja.</returns>
+    public bool Confirm(string message);
 }

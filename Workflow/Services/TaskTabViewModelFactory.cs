@@ -18,10 +18,11 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
     private readonly ITerminalSessionFactory _sessions;
     private readonly Dispatcher _dispatcher;
     private readonly IReadOnlyList<string> _startupErrors;
+    private readonly IMessageDialogService _messages;
 
     /// <summary>Creates the factory.</summary>
     /// <param name="folders">Task-folder service.</param>
-    /// <param name="orchestrator">The four-phase state machine.</param>
+    /// <param name="orchestrator">The phase state machine.</param>
     /// <param name="settings">Shared settings.</param>
     /// <param name="stateStore">The per-task workflow journal, shared by every tab.</param>
     /// <param name="picker">Folder-browser dialog.</param>
@@ -33,6 +34,7 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
     /// carries them so that EVERY tab it makes - including tabs opened with '+' long after the
     /// startup dialog was dismissed - has Start disabled (F17, spec section 9.4).
     /// </param>
+    /// <param name="messages">The Ja/Nein questions every tab asks before completing or restarting a task.</param>
     public TaskTabViewModelFactory(
         ITaskFolderService folders,
         IWorkflowOrchestrator orchestrator,
@@ -42,9 +44,13 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
         IWebViewEnvironmentProvider environment,
         ITerminalSessionFactory sessions,
         Dispatcher dispatcher,
-        IReadOnlyList<string> startupErrors)
+        IReadOnlyList<string> startupErrors,
+        IMessageDialogService messages)
     {
         ArgumentNullException.ThrowIfNull(startupErrors);
+        ArgumentNullException.ThrowIfNull(messages);
+
+        _messages = messages;
 
         _folders = folders;
         _orchestrator = orchestrator;
@@ -66,5 +72,6 @@ public sealed class TaskTabViewModelFactory : ITaskTabViewModelFactory
         _picker,
         new TerminalViewModel(_environment, _sessions, _dispatcher),
         FolderDebounce,
-        _startupErrors);
+        _startupErrors,
+        _messages);
 }

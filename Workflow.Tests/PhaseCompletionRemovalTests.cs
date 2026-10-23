@@ -209,8 +209,12 @@ public sealed class PhaseCompletionRemovalTests : IDisposable
 
         vm.ApplyProgress(new PhaseProgress(phase, PhaseStatus.Active));
 
+        // PauseCommand is executable here by design (Workflow_LOAD_AND_PAUSE spec 6.4) and is no
+        // completion action: it only withholds the NEXT phase and never reaches
+        // ManualPhaseSignal.Signal(), which is what requirement 5.2 guards. The same holds for
+        // RefreshOpenGateItemsOnOpenCommand: it only re-reads the open gate items from disk.
         Assert.Equal(
-            new[] { "BrowseDirectoryCommand", "BrowseWorkflowDirectoryCommand", "CloseCommand" },
+            new[] { "BrowseDirectoryCommand", "BrowseWorkflowDirectoryCommand", "CloseCommand", "PauseCommand", "RefreshOpenGateItemsOnOpenCommand" },
             ExecutableCommands(vm));
 
         // Positive control: the manual path is not dead, it is merely out of reach here. The very

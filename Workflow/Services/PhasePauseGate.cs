@@ -2,8 +2,8 @@ namespace Workflow.Services;
 
 /// <summary>
 /// The user's pause switch for one tab's runs (Workflow_LOAD_AND_PAUSE spec section 6). While it is
-/// paused, a run that reaches the boundary between two phases waits there; the running phase itself
-/// is never touched.
+/// paused, a run that reaches the boundary between two phases, or between two sessions of an
+/// Implementation subtask run, waits there; the running session itself is never touched.
 /// </summary>
 /// <remarks>
 /// Built like <see cref="ManualPhaseSignal"/>: a lock around a <see cref="TaskCompletionSource"/>
@@ -30,12 +30,27 @@ public sealed class PhasePauseGate
         }
     }
 
+    /// <summary>
+    /// Raised when <see cref="Pause"/> closes an open gate, on the caller's thread and outside the
+    /// lock. A run pauses the gate itself to hold for the user's approval of its decisions (B7), so
+    /// the tab listens here to show Play; pausing a paused gate raises nothing.
+    /// </summary>
+    public event EventHandler? Paused;
+
     /// <summary>Closes the gate. Pausing a paused gate keeps the waits already pending.</summary>
     public void Pause()
     {
+        bool closed;
+
         lock (_gate)
         {
+            closed = _paused is null;
             _paused ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        if (closed)
+        {
+            Paused?.Invoke(this, EventArgs.Empty);
         }
     }
 

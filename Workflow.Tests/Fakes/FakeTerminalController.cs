@@ -58,21 +58,107 @@ public sealed class FakeTerminalController : ITerminalController
 
     public void ClearScreen() => ClearCount++;
 
+    /// <summary>
+    /// The nonce the orchestrator wrapped its launcher command with, captured from what was Sent.
+    /// Null until that command has been written.
+    /// </summary>
+    public string? LauncherNonce { get; private set; }
+
+    /// <summary>
+    /// Simulates the launcher exiting back to the shell, which then prints its return marker.
+    /// Every later snapshot carries that marker, as a real pseudo-console would once the primary
+    /// screen buffer is restored.
+    /// </summary>
+    public void SimulateLauncherExit()
+    {
+        if (LauncherNonce is null)
+        {
+            throw new InvalidOperationException("The launcher command has not been sent yet.");
+        }
+
+        _launcherExited = true;
+        EmitOutput();
+    }
+
+    /// <summary>
+    /// Simulates the user starting a launcher by hand after the session stalled: the new TUI takes
+    /// the alternate screen buffer, so the shell's return marker is no longer rendered.
+    /// </summary>
+    public void SimulateLauncherRelaunch() => _launcherExited = false;
+
+    /// <summary>
+    /// Suppresses both markers, modelling a shell that never executed the line that was typed into
+    /// it. Production always prints the run marker, so this is the one state a test has to ask for.
+    /// </summary>
+    public bool SuppressMarkers { get; set; }
+
+    private bool _launcherExited;
+
+    /// <summary>
+    /// Mirrors the shell, not just the test's script: a real session prints the run marker the
+    /// instant it executes the line we typed, and the return marker when the launcher gives the
+    /// terminal back. Prefixing them here is what makes an ordinary test represent "a launcher is
+    /// running" rather than "the shell never ran anything", which is the state the orchestrator now
+    /// refuses to paste into.
+    /// </summary>
+    private string WithMarkers(string screen)
+    {
+        if (LauncherNonce is null || SuppressMarkers)
+        {
+            return screen;
+        }
+
+        var marker = (_launcherExited ? "WF-RET-" : "WF-RUN-") + LauncherNonce;
+        return marker + "\n" + screen;
+    }
+
     public Task<string> SnapshotAsync(int lines, CancellationToken cancellationToken) =>
-        Task.FromResult(_snapshots.Count > 0 ? _snapshots.Dequeue() : CurrentSnapshot ?? string.Empty);
+        Task.FromResult(WithMarkers(_snapshots.Count > 0 ? _snapshots.Dequeue() : CurrentSnapshot ?? string.Empty));
 
     public void Send(string text)
     {
+        ArgumentNullException.ThrowIfNull(text);
+
         // Captured BEFORE any emission, so a test can ask what the terminal had produced at the
         // moment this write happened.
         OutputCountAtSend.Add(OutputCount);
         Sent.Add(text);
 
+        var runMarker = text.IndexOf("('WF-RUN-' + '", StringComparison.Ordinal);
+        if (runMarker >= 0)
+        {
+            var start = runMarker + "('WF-RUN-' + '".Length;
+            var end = text.IndexOf('\'', start);
+            if (end > start)
+            {
+                LauncherNonce = text[start..end];
+                _launcherExited = false;
+            }
+        }
+
         if (EmitOutputOnNextCarriageReturn && text == "\r")
         {
             EmitOutput();
         }
+
+        if (text == "\r")
+        {
+            OnCarriageReturn?.Invoke();
+        }
     }
+
+    /// <summary>
+    /// Runs synchronously inside every bare carriage-return write, after it has been recorded. Lets a
+    /// test script exactly what the launcher does with that one key press - start working, absorb it,
+    /// or emit unrelated output later - instead of an always-on reaction.
+    /// </summary>
+    public Action? OnCarriageReturn { get; set; }
+
+    /// <summary>Runs synchronously inside every SendPaste call, after the body has been recorded.</summary>
+    public Action? OnPaste { get; set; }
+
+    /// <summary>Number of bare carriage returns written so far, i.e. submit attempts.</summary>
+    public int CarriageReturnCount => Sent.Count(text => text == "\r");
 
     /// <summary>When true, a bare carriage return produces output, as a live launcher would.</summary>
     public bool EmitOutputOnNextCarriageReturn { get; set; }
@@ -89,6 +175,7 @@ public sealed class FakeTerminalController : ITerminalController
     public void SendPaste(string body)
     {
         Pasted.Add(body);
+        OnPaste?.Invoke();
 
         if (PasteEchoDelay <= TimeSpan.Zero)
         {
@@ -104,5 +191,40 @@ public sealed class FakeTerminalController : ITerminalController
         });
     }
 
-    public void DisposeSession() => DisposeCount++;
+    /// <summary>
+    /// Moves the last output back by <paramref name="by"/>, as if the session had been silent that
+    /// long. Lets a stall test reach the watchdog's threshold without waiting for it.
+    /// </summary>
+    public void BackdateOutput(TimeSpan by) => LastOutputUtc -= by;
+
+    /// <summary>
+    /// Runs synchronously inside every DisposeSession call, before it is counted. Lets a test record
+    /// what was on disk at the moment the session was killed - the order of the kill relative to the
+    /// application's own file writes.
+    /// </summary>
+    public Action? OnDisposeSession { get; set; }
+
+    public void DisposeSession()
+    {
+        OnDisposeSession?.Invoke();
+        DisposeCount++;
+    }
+
+    /// <summary>What StopSessionAsync reports: true for a process tree confirmed gone.</summary>
+    public bool StopConfirms { get; set; } = true;
+
+    /// <summary>Number of StopSessionAsync calls so far.</summary>
+    public int StopCount { get; private set; }
+
+    /// <summary>Runs synchronously inside every StopSessionAsync call, before it is counted.</summary>
+    public Action? OnStopSession { get; set; }
+
+    public Task<bool> StopSessionAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        OnStopSession?.Invoke();
+        StopCount++;
+
+        return Task.FromResult(StopConfirms);
+    }
 }

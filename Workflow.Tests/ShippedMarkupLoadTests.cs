@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Controls;
 using Workflow.Views;
 
 namespace Workflow.Tests;
@@ -75,6 +76,8 @@ public class ShippedMarkupLoadTests
         Assert.NotNull(resources);
         Assert.NotNull(resources["PhaseStatusToBrushConverter"]);
         Assert.NotNull(resources["MaterialDesignRaisedButton"]);
+        // Styles/TerminalFrameStyles.xaml: TerminalView below cannot load without it.
+        Assert.NotNull(resources["TerminalFrameStyle"]);
 
         // Constructing a view runs its generated InitializeComponent, which is where WPF resolves
         // every StaticResource, style and converter reference its markup names. Each line is its
@@ -83,5 +86,13 @@ public class ShippedMarkupLoadTests
         Assert.NotNull(new SubtaskIndicatorView());
         Assert.NotNull(new TerminalView());
         Assert.NotNull(new TaskTabView());
+
+        // Styles/TabControlStyles.xaml: a ControlTemplate is parsed only when it is applied, so the
+        // tab strip - the 'Task laden' chip and the chip style it names included - is proven only by
+        // instantiating it (Workflow_LOAD_AND_PAUSE spec section 5.2).
+        var tabs = new TabControl { Style = Assert.IsType<Style>(resources["WorkflowTabControlStyle"]) };
+        Assert.True(tabs.ApplyTemplate());
+        Assert.IsType<Button>(tabs.Template.FindName("LoadTaskButton", tabs));
+        Assert.IsType<Button>(tabs.Template.FindName("AddTabButton", tabs));
     }
 }

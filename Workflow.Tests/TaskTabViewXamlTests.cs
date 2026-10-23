@@ -204,4 +204,286 @@ public class TaskTabViewXamlTests
 
         Assert.Equal(4, declared);
     }
+
+    // --- Pause and Play (Workflow_LOAD_AND_PAUSE spec section 6.5) ----------------------------
+
+    private static XElement PauseButton(XDocument view) =>
+        Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding PauseCommand}",
+            "Pause Button");
+
+    private static XElement PlayButton(XDocument view) =>
+        Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding UnpauseCommand}",
+            "Play Button");
+
+    // 'neben der Subtasks-Checkbox': both buttons share one host that directly follows the checkbox
+    // inside the bottom bar's WrapPanel, Pause first.
+    [Fact]
+    public void ThePauseControls_SitDirectlyAfterTheSubtaskCheckBox()
+    {
+        // Arrange
+        var view = View();
+        var checkBox = SubtaskCheckBox(view);
+        var pause = PauseButton(view);
+        var play = PlayButton(view);
+
+        // Act
+        var host = pause.Parent;
+
+        // Assert
+        Assert.NotNull(host);
+        Assert.Same(host, play.Parent);
+        Assert.Same(checkBox.Parent, host.Parent);
+        Assert.Same(host, checkBox.ElementsAfterSelf().First());
+        Assert.Same(play, pause.ElementsAfterSelf().First());
+    }
+
+    [Fact]
+    public void ThePlayButton_IsShownOnlyWhilePausedAndThePauseButtonAlways()
+    {
+        // Arrange
+        var view = View();
+
+        // Act
+        var playVisibility = Attribute(PlayButton(view), "Visibility");
+        var pauseVisibility = Attribute(PauseButton(view), "Visibility");
+
+        // Assert
+        AssertBinding(
+            "{Binding IsPaused, Converter={StaticResource BooleanToVisibilityConverter}}",
+            playVisibility,
+            "Play Button.Visibility");
+        Assert.Null(pauseVisibility);
+    }
+
+    [Fact]
+    public void ThePauseControls_CarryTheirIconsAndGermanTooltips()
+    {
+        // Arrange
+        var view = View();
+        var pause = PauseButton(view);
+        var play = PlayButton(view);
+
+        // Act
+        var pauseIcon = Assert.Single(pause.Descendants(MaterialDesign + "PackIcon"));
+        var playIcon = Assert.Single(play.Descendants(MaterialDesign + "PackIcon"));
+
+        // Assert
+        Assert.Equal("Pause", Attribute(pauseIcon, "Kind"));
+        Assert.Equal("Play", Attribute(playIcon, "Kind"));
+        Assert.Equal(
+            "Pausieren: Die laufende Phase bzw. der laufende Subtask läuft zu Ende, der nächste Schritt startet erst nach Fortsetzen",
+            Attribute(pause, "ToolTip"));
+        Assert.Equal("Fortsetzen: Der nächste Schritt startet wieder automatisch", Attribute(play, "ToolTip"));
+
+        // Pause is disabled while paused; its tooltip must still explain the state.
+        Assert.Equal("True", Attribute(pause, "ToolTipService.ShowOnDisabled"));
+    }
+
+    // Once phase 4 has written its done file there is nothing to continue: the Start button gives
+    // way to a 'Task abschliessen' button in its place, and the manual-override button of the same
+    // name steps aside so the bar does not show the caption twice.
+    [Fact]
+    public void AFinishedTask_SwapsTheStartButtonForTaskAbschliessen()
+    {
+        // Arrange
+        var view = View();
+        var start = Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding StartWorkflowCommand}",
+            "Start Button");
+        var finish = Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding CloseCommand}",
+            "finished-task Button");
+        var completeTask = Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding CompleteTaskCommand}",
+            "manual-override Button");
+
+        // Act
+        var caption = Assert.Single(finish.Descendants(Presentation + "TextBlock"));
+
+        // Assert
+        Assert.Equal("Task abschliessen", Attribute(caption, "Text"));
+        Assert.Equal(Attribute(start, "DockPanel.Dock"), Attribute(finish, "DockPanel.Dock"));
+        AssertBinding(
+            "{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}",
+            Attribute(start, "Visibility"),
+            "Start Button.Visibility");
+        AssertBinding(
+            "{Binding IsTaskFinished, Converter={StaticResource BooleanToVisibilityConverter}}",
+            Attribute(finish, "Visibility"),
+            "finished-task Button.Visibility");
+        AssertBinding(
+            "{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}",
+            Attribute(completeTask, "Visibility"),
+            "manual-override Button.Visibility");
+    }
+
+    // WF_QUEUE spec 4.5: the Queue box sits directly right of Start - declared right after the
+    // finished-task button and docked left - and hides with Start once the task is finished.
+    [Fact]
+    public void TheQueueComboBox_SitsRightOfStartAndHidesWithIt()
+    {
+        // Arrange
+        var view = View();
+        var finish = Single(view, Presentation + "Button", e => Attribute(e, "Command") == "{Binding CloseCommand}", "finished-task Button");
+        var queue = Single(view, Presentation + "ComboBox", e => Attribute(e, "ItemsSource") == "{Binding QueueCandidates}", "Queue ComboBox");
+
+        // Act
+        var next = finish.ElementsAfterSelf().First();
+
+        // Assert
+        Assert.Same(queue, next);
+        Assert.Equal("Left", Attribute(queue, "DockPanel.Dock"));
+        Assert.Equal("Queue", Attribute(queue, MaterialDesign + "HintAssist.Hint"));
+        Assert.Equal("True", Attribute(queue, MaterialDesign + "TextFieldAssist.HasClearButton"));
+        Assert.Equal("Header", Attribute(queue, "DisplayMemberPath"));
+        Assert.Equal("False", Attribute(queue, "IsEditable"));
+        Assert.Equal("{StaticResource MaterialDesignOutlinedComboBox}", Attribute(queue, "Style"));
+        AssertBinding("{Binding QueuedAfter, Mode=TwoWay}", Attribute(queue, "SelectedItem"), "Queue ComboBox.SelectedItem");
+        AssertBinding("{Binding IsQueueEditable}", Attribute(queue, "IsEnabled"), "Queue ComboBox.IsEnabled");
+        AssertBinding(
+            "{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}",
+            Attribute(queue, "Visibility"),
+            "Queue ComboBox.Visibility");
+        Assert.Equal("True", Attribute(queue, "ToolTipService.ShowOnDisabled"));
+        Assert.Equal(
+            "Startet den Workflow dieses Tasks automatisch, sobald der gewählte Task fertig ist (Implementierung grün). Zur Auswahl stehen die anderen geöffneten Tasks, die noch nicht fertig sind.",
+            Attribute(queue, "ToolTip"));
+    }
+
+    // Workflow_LoadFix spec 8.5: 'Implementierung beginnen' sits directly beside the manual-override
+    // 'Task abschliessen' (declared after it, so it docks to its left) and steps aside with it once
+    // the task is finished.
+    [Fact]
+    public void TheStartImplementationButton_SitsBesideTaskAbschliessenAndHidesWithIt()
+    {
+        // Arrange
+        var view = View();
+        var completeTask = Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding CompleteTaskCommand}",
+            "manual-override Button");
+        var startImplementation = Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding StartImplementationCommand}",
+            "'Implementierung beginnen' Button");
+
+        // Act
+        var next = completeTask.ElementsAfterSelf().First();
+
+        // Assert
+        Assert.Same(startImplementation, next);
+        Assert.Equal("Implementierung beginnen", Attribute(startImplementation, "Content"));
+        Assert.Equal("Right", Attribute(startImplementation, "DockPanel.Dock"));
+        Assert.Equal("{StaticResource MaterialDesignRaisedButton}", Attribute(startImplementation, "Style"));
+        AssertBinding(
+            "{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}",
+            Attribute(startImplementation, "Visibility"),
+            "'Implementierung beginnen' Button.Visibility");
+        Assert.Equal("True", Attribute(startImplementation, "ToolTipService.ShowOnDisabled"));
+        Assert.Equal(
+            "Vereinfachen, Review und Review umsetzen überspringen und sofort mit der Implementierung beginnen. Eine laufende Phase wird abgebrochen. Mit Subtasks, wenn 'Subtasks' ausgewählt ist.",
+            Attribute(startImplementation, "ToolTip"));
+    }
+
+    // --- Desktop-Job jetzt starten (WF_DESKTOPJOBBUTTON spec section 4.7) ---
+
+    [Fact]
+    public void TheStartDesktopJobNowButton_SitsAfterTheSubtaskIndicatorInItsSubtaskOnlyWrapper()
+    {
+        // Arrange
+        var view = View();
+        var indicator = IndicatorView(view);
+        var button = Single(
+            view,
+            Presentation + "Button",
+            e => Attribute(e, "Command") == "{Binding StartDesktopJobNowCommand}",
+            "'Desktop-Job jetzt starten' Button");
+
+        // Act
+        var next = indicator.ElementsAfterSelf().First();
+
+        // Assert
+        Assert.Same(button, next);
+        Assert.Equal("Desktop-Job jetzt starten", Attribute(button, "Content"));
+        Assert.Equal("{StaticResource MaterialDesignOutlinedButton}", Attribute(button, "Style"));
+        Assert.Equal("True", Attribute(button, "ToolTipService.ShowOnDisabled"));
+        Assert.Equal(
+            "Startet den wartenden Desktop-Job sofort, ohne die Leerlaufzeit abzuwarten. Danach Maus und Tastatur nicht berühren: jede Maus- oder Tastatureingabe und jede Sperre des Arbeitsplatzes bricht den Job ab. Nur aktiv, solange ein Desktop-Job auf Leerlauf wartet und nicht pausiert ist.",
+            Attribute(button, "ToolTip"));
+        Assert.Null(Attribute(button, "Visibility"));
+        AssertBinding(
+            "{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}",
+            Attribute(indicator.Parent!, "Visibility"),
+            "subtask wrapper Visibility");
+    }
+
+    // --- Open gate items: the icon beside Implementierung and its overview ---------------------
+
+    private static readonly XNamespace Xaml = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+    private static XElement OpenGateItemsToggle(XDocument view) =>
+        Single(
+            view,
+            Presentation + "ToggleButton",
+            e => Attribute(e, Xaml + "Name") == "OpenGateItemsToggle",
+            "open-gate-items ToggleButton");
+
+    [Fact]
+    public void TheOpenGateItemsToggle_FollowsThePhaseIndicatorsAndShowsOnlyWithItems()
+    {
+        // Arrange
+        var view = View();
+        var phases = Single(
+            view,
+            Presentation + "ItemsControl",
+            e => Attribute(e, "ItemsSource") == "{Binding Phases}",
+            "phase ItemsControl");
+        var toggle = OpenGateItemsToggle(view);
+
+        // Act
+        var next = phases.ElementsAfterSelf().First();
+
+        // Assert - Implementierung is the last phase, so the element right after the phases sits beside it.
+        Assert.Same(toggle.Parent, next);
+        AssertBinding(
+            "{Binding HasOpenGateItems, Converter={StaticResource BooleanToVisibilityConverter}}",
+            Attribute(next, "Visibility"),
+            "open-gate-items wrapper Visibility");
+        AssertBinding("{Binding RefreshOpenGateItemsOnOpenCommand}", Attribute(toggle, "Command"), "ToggleButton.Command");
+    }
+
+    [Fact]
+    public void TheOpenGateItemsPopup_IsTiedToTheToggleAndShowsReadOnlyCopyableText()
+    {
+        // Arrange
+        var view = View();
+
+        // Act
+        var popup = Single(view, Presentation + "Popup", e => Attribute(e, Xaml + "Name") == "OpenGateItemsPopup", "open-gate-items Popup");
+        var text = Single(view, Presentation + "TextBox", e => Attribute(e, Xaml + "Name") == "OpenGateItemsBox", "open-gate-items TextBox");
+        var copy = Single(view, Presentation + "Button", e => Attribute(e, "Click") == "CopyOpenGateItems_Click", "'Alles kopieren' Button");
+
+        // Assert
+        AssertBinding("{Binding IsChecked, ElementName=OpenGateItemsToggle, Mode=TwoWay}", Attribute(popup, "IsOpen"), "Popup.IsOpen");
+        Assert.Equal("False", Attribute(popup, "StaysOpen"));
+        AssertBinding("{Binding OpenGateItemsText, Mode=OneWay}", Attribute(text, "Text"), "TextBox.Text");
+        Assert.Equal("True", Attribute(text, "IsReadOnly"));
+        Assert.Contains(copy.Descendants(Presentation + "TextBlock"), t => Attribute(t, "Text") == "Alles kopieren");
+        Assert.Contains(popup.Descendants(), e => e == text);
+        Assert.Contains(popup.Descendants(), e => e == copy);
+    }
 }

@@ -6,13 +6,13 @@
 
 The validation review resolved **all twelve** recorded source conflicts. Issues 1, 2, 3, 5, 6, 9 and 10 were settled in the first pass; issues 4, 7, 8, 11 and 12 in the second. Every decision is written into the sections below and summarized under **Resolved Decisions**. No open issue blocks task generation.
 
-Workflow gains optional sequential subtask execution during phase 4. A decomposition session creates an ordered index in a separate tracking repository; each eligible subtask then runs in a fresh terminal session. The disk ledger supplies progress and recovery evidence.
+Workflow gains optional sequential subtask execution during the implementation phase. A decomposition session creates an ordered index in a separate tracking repository; each eligible subtask then runs in a fresh terminal session. The disk ledger supplies progress and recovery evidence.
 
 Sources: [SPEC](../../../docs/superpowers/specs/2026-09-17-subtask-execution-design.md) and [PLAN](../../../docs/superpowers/plans/2026-09-17-subtask-execution-plan.md). SPEC section and PLAN task references are provenance, not newly generated tasks. Technical decisions below come from those artifacts; every source conflict has been resolved in the 2026-09-18 validation and is recorded in **Resolved Decisions**. Original codebase assertions in SPEC section 3 are historical source assertions, not a fresh verification of every integration point.
 
 ### Goals
 
-Implement requirements 1–7 while preserving the existing normal phase-4 path, existing terminal/session mechanics, ordered execution, one attempt per subtask per run, and disk-derived recovery.
+Implement requirements 1–7 while preserving the existing normal implementation path, existing terminal/session mechanics, ordered execution, one attempt per subtask per run, and disk-derived recovery.
 
 ### Non-Goals
 
@@ -22,7 +22,7 @@ No parallel/nested execution, automatic in-run retry, execution timeout, subtask
 
 ### This Spec Owns
 
-- Subtask configuration, phase-4 branching, sequential session orchestration, progress presentation, and recovery integration.
+- Subtask configuration, implementation-phase branching, sequential session orchestration, progress presentation, and recovery integration.
 - The path/token/index/status/flag contract between the Workflow application and agent sessions.
 - Required corrections to the two Workflow prompts, the missing external status template, and non-empty external `result.json` examples. Deleting `verification.json` and adding a tracking-repo README are explicitly out of scope (issue 8 resolved).
 - Removal of `Phase abschliessen`, preservation of `ManualPhaseSignal` for task completion, and awaiting the run before closing its tab.
@@ -48,7 +48,7 @@ Changes to token sets, path composition, index/status rules, manual completion s
 
 ### Existing Architecture Analysis
 
-The sources describe a fixed four-phase workflow with one live terminal per tab and file-watcher completion. Reuse `ArtifactWatcher` including its polling fallback and non-empty-file rule. Extract one session primitive instead of duplicating terminal settle/render/paste/submit behavior. Keep `PhaseStatus` as `Pending`, `Active`, and `Completed` and `TaskState.CurrentVersion` at 1.
+The sources describe a fixed phase workflow (now five phases: Specification, Simplifier, Review, ResolveReview, Implementation) with one live terminal per tab and file-watcher completion. Reuse `ArtifactWatcher` including its polling fallback and non-empty-file rule. Extract one session primitive instead of duplicating terminal settle/render/paste/submit behavior. Keep `PhaseStatus` as `Pending`, `Active`, and `Completed` and `TaskState.CurrentVersion` at 1.
 
 The current project file confirms `net8.0-windows`, existing UI package versions below, and prompt markdown copying through `Prompt\**\*.md`. No new dependency or project-file change is proposed. No `.kiro/steering` documents are present; this import does not invent project policy.
 
@@ -143,19 +143,19 @@ The ledger exposes `SubtaskSnapshot? TryRead(SubtaskPaths paths)`, `bool IsDecom
 
 ### Configuration and Persistence
 
-**Decision (issue 3, resolved):** configuration crosses the boundary as one immutable snapshot, not as a live object with independent getters. `SubtaskConfiguration` is a `sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirectory)`. The tab holds the editable state; `SubtaskConfiguration.Capture()` produces exactly one snapshot when phase 4 is entered, so the pairing of `Enabled` and `WorkflowDirectory` is atomic by construction and no paired-read guarantee has to be argued. The interface `ISubtaskConfiguration` is retained only as the capture source; the orchestrator receives the captured record.
+**Decision (issue 3, resolved):** configuration crosses the boundary as one immutable snapshot, not as a live object with independent getters. `SubtaskConfiguration` is a `sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirectory)`. The tab holds the editable state; `SubtaskConfiguration.Capture()` produces exactly one snapshot when Implementation is entered, so the pairing of `Enabled` and `WorkflowDirectory` is atomic by construction and no paired-read guarantee has to be argued. The interface `ISubtaskConfiguration` is retained only as the capture source; the orchestrator receives the captured record.
 
-**Decision (issue 3, resolved):** an enabled configuration that fails validation at phase-4 entry is an error, never a fallback. The branch raises `SubtaskConfigurationException`, the tab presents the German `ValidationMessage`, and Implementation stays recoverable. The application never silently downgrades an enabled-but-invalid configuration to a normal full-context implementation run, because that would run unbounded work against the product working directory in contradiction of requirement 1.3. The phase-4 editing lock covers **every** input including the folder-picker button.
+**Decision (issue 3, resolved):** an enabled configuration that fails validation at Implementation entry is an error, never a fallback. The branch raises `SubtaskConfigurationException`, the tab presents the German `ValidationMessage`, and Implementation stays recoverable. The application never silently downgrades an enabled-but-invalid configuration to a normal full-context implementation run, because that would run unbounded work against the product working directory in contradiction of requirement 1.3. The Implementation editing lock covers **every** input including the folder-picker button.
 
 Append defaulted `Lazy<SubtaskConfiguration>? Subtasks = null` and `IProgress<SubtaskProgress>? SubtaskProgress = null` to `WorkflowRunRequest` to preserve existing construction sites. Null configuration means disabled.
 
-*(Corrected during task 2.5. This line previously read `SubtaskConfiguration? Subtasks = null`, i.e. an already-taken snapshot. That contradicted this section's own decision above — "produces exactly one snapshot **when phase 4 is entered**" — and requirement 1.6, because the request is built at run entry, so a configuration change made while phases 1-3 run could never reach the run. The member is a **deferred, once-only** capture: `SubtaskConfiguration.Deferred(ISubtaskConfiguration)` returns a default `Lazy<T>` whose `ExecutionAndPublication` factory runs at most once, and `WorkflowOrchestrator`'s phase-4 guard is the sole force point, its `&&` short-circuiting on the phase test so a run that never reaches implementation never reads the tab. The orchestrator still never receives an `ISubtaskConfiguration`: `Lazy<T>` is invariant, so `Lazy<ISubtaskConfiguration>` remains unassignable to `Lazy<SubtaskConfiguration>` and the guarantee stays compile-enforced.)*
+*(Corrected during task 2.5. This line previously read `SubtaskConfiguration? Subtasks = null`, i.e. an already-taken snapshot. That contradicted this section's own decision above — "produces exactly one snapshot **when Implementation is entered**" — and requirement 1.6, because the request is built at run entry, so a configuration change made while the phases before Implementation run could never reach the run. The member is a **deferred, once-only** capture: `SubtaskConfiguration.Deferred(ISubtaskConfiguration)` returns a default `Lazy<T>` whose `ExecutionAndPublication` factory runs at most once, and `WorkflowOrchestrator`'s Implementation guard is the sole force point, its `&&` short-circuiting on the phase test so a run that never reaches implementation never reads the tab. The orchestrator still never receives an `ISubtaskConfiguration`: `Lazy<T>` is invariant, so `Lazy<ISubtaskConfiguration>` remains unassignable to `Lazy<SubtaskConfiguration>` and the guarantee stays compile-enforced.)*
 
 `AppSettings` adds `Collection<string> RecentWorkflowDirectories` and `string? LastWorkflowDirectory`. `AddRecentWorkflowDirectory(string directory)` shares a private `Promote(Collection<string>, string, int)` helper with the existing directory MRU: normalize, case-insensitive deduplicate, promote and cap at 15.
 
 `TaskState` and its DTO add `bool SubtasksEnabled`, `string? WorkflowDirectory` and `bool ImplementationCompletedManually` with false/null/false defaults. The third field records the manual-override decision from issue 6b; all three are additive with safe defaults, so version stays 1 and old records load unchanged (1.7, E15–E16). Keep current camelCase/string-enum serialization. `SaveSubtaskSettings(TaskPaths paths, bool enabled, string? workflowDirectory)` creates a journal if needed, preserves `Dismissed`, and follows the store's non-throwing contract. Save initial settings, edits when a task folder exists, and the selected configuration at subtask phase entry. Keep normal settings/description behavior intact.
 
-Directory validation returns `IsValid` and a German `ErrorMessage`: select a directory if blank, report missing directory if absent, and explain missing `task_template` if the marker is absent. Revalidate at phase-4 entry. Never require `.git`.
+Directory validation returns `IsValid` and a German `ErrorMessage`: select a directory if blank, report missing directory if absent, and explain missing `task_template` if the marker is absent. Revalidate at Implementation entry. Never require `.git`.
 
 ### Session and Loop
 
@@ -205,7 +205,7 @@ Creation prompt changes preserve SPEC P0–P7: remove unsupported brace names, e
 
 **Decision (issue 7, resolved):** the failure reason promised by requirement 3.7 travels in the progress payload as the ordered `States` list. The ledger already materializes exactly this list when it builds a `SubtaskSnapshot`, so nothing new is computed — today it is simply discarded before reaching the view model. The tooltip renders title plus `failreason` for each failed entry, and `LoadForResume` seeds the indicator from the same shape, so live progress and restored progress share one contract. The list is exposed as `IReadOnlyList<SubtaskState>`, honouring the convention against public `List<T>`.
 
-The tab owns configuration and MRU bindings. Preserve the never-clear collection reconciliation pattern to avoid TwoWay selection resetting to null. The picker gets an optional title parameter retaining `Arbeitsverzeichnis auswählen` as the default. Bind checkbox, picker row, indicator and error text as specified; the phase-4 editing lock covers the checkbox, the recent-directory selector **and** the folder-picker button (issue 3, resolved).
+The tab owns configuration and MRU bindings. Preserve the never-clear collection reconciliation pattern to avoid TwoWay selection resetting to null. The picker gets an optional title parameter retaining `Arbeitsverzeichnis auswählen` as the default. Bind checkbox, picker row, indicator and error text as specified; the Implementation editing lock covers the checkbox, the recent-directory selector **and** the folder-picker button (issue 3, resolved).
 
 The indicator's green condition is `Total > 0 && Completed == Total` (issue 6a, resolved), evaluated from the same freshly read snapshot that drives journal completion, so presentation and journal can never disagree. `Failed == 0` alone never turns it green.
 
@@ -329,7 +329,7 @@ Recorded in the validation review of 2026-09-18. Each was an open source conflic
 |---|---|---|
 | 1. Initial pending state | Closed vocabulary on the decisive values only: `complete` → Complete, `failed` → Failed, **any other parsed value including `pending` and unrecognized values → Pending**; unreadable/malformed after settling → Failed. A fresh decomposition reports zero failures. | Data Models → derivation table |
 | 2. Pre-existing failed entry | Eligibility is `state != Complete && !attemptedThisRun`. A failed or pending entry from an earlier run gets exactly one fresh attempt per run, initiated by Continue. No first-run/resume distinction and no extra persisted state. The two source walkthrough steps expecting a skip are corrected. | Session and Loop |
-| 3. Configuration capture and editing lock | One immutable `sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirectory)` captured once at phase-4 entry, so pairing is atomic by construction. Enabled + invalid raises `SubtaskConfigurationException`; there is no silent fallback to normal mode. The phase-4 lock covers every input including the browse button. | Configuration and Persistence; Presentation and Recovery |
+| 3. Configuration capture and editing lock | One immutable `sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirectory)` captured once at Implementation entry, so pairing is atomic by construction. Enabled + invalid raises `SubtaskConfigurationException`; there is no silent fallback to normal mode. The Implementation lock covers every input including the browse button. | Configuration and Persistence; Presentation and Recovery |
 | 5. Damaged descriptions and reuse | `IsDecomposed` requires the readable ordered index only. A missing or empty `subtask.md` fails that entry and the loop continues; it never discards the index or forces re-decomposition. | Data Models |
 | 6a. Green condition | Green is `Total > 0 && Completed == Total`, from the same freshly read snapshot that drives journal completion. `Failed == 0` alone never turns it green. | Presentation and Recovery |
 | 6b. Manual completion | `Task abschliessen` is an explicit override: Implementation `Completed` **plus** `ImplementationCompletedManually = true` in the journal. The indicator keeps showing real counts rather than claiming green. | Session and Loop; Configuration and Persistence |

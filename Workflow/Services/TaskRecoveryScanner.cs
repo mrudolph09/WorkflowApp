@@ -98,6 +98,21 @@ public sealed class TaskRecoveryScanner : ITaskRecoveryScanner
         ArgumentNullException.ThrowIfNull(paths);
 
         var state = _store.TryLoad(paths);
+        var created = false;
+
+        // Workflow_LoadFix spec section 5, superseding Workflow_LOAD_AND_PAUSE decision D1: a picked
+        // folder without any journal file gets a fresh one, and the reconciliation below promotes
+        // whatever its artefacts already prove - a spec and a plan make Specification complete. TryCreate
+        // never replaces an existing file, so an unreadable journal still ends in null below.
+        // Read again whatever TryCreate returned: a creator racing this one may have published its
+        // journal first, and that journal is then the one loaded, reported as not created (spec 5.2
+        // step 2).
+        if (state is null)
+        {
+            created = _store.TryCreate(paths);
+            state = _store.TryLoad(paths);
+        }
+
         if (state is null)
         {
             return null;
@@ -116,7 +131,19 @@ public sealed class TaskRecoveryScanner : ITaskRecoveryScanner
             _store.SetDismissed(paths, dismissed: false);
         }
 
-        return new RecoverableTask(paths, state, resume);
+        return new RecoverableTask(paths, state, resume, created);
+    }
+
+    /// <inheritdoc />
+    public bool CanLoad(TaskPaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        // Read-only on purpose (Workflow_LoadFix spec 6.2, D21): no TryCreate and no reconciliation,
+        // because the takeover flow asks this BEFORE it renames anything. A missing journal is fine,
+        // Load creates one; a present journal must read, because Load never overwrites it.
+        return Directory.Exists(paths.TaskDirectory)
+            && (!File.Exists(paths.StateAbsolute) || _store.TryLoad(paths) is not null);
     }
 
     private void Scan(

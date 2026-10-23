@@ -3,7 +3,7 @@ using Workflow.Models;
 
 namespace Workflow.ViewModels;
 
-/// <summary>One of the four grey/yellow/green station indicators.</summary>
+/// <summary>One of the grey/yellow/green station indicators, one per phase.</summary>
 public sealed partial class PhaseIndicatorViewModel : ObservableObject
 {
     [ObservableProperty]

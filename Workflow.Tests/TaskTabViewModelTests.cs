@@ -69,6 +69,28 @@ public sealed class TaskTabViewModelTests : IDisposable
             Task.FromException(failure);
     }
 
+    /// <summary>
+    /// A run that journals every phase before the implementation as completed and the implementation
+    /// as given, then returns - as a run
+    /// whose done file was written does, or a subtask run that stopped short.
+    /// </summary>
+    private sealed class JournallingOrchestrator(ITaskStateStore store, PhaseStatus implementation)
+        : IWorkflowOrchestrator
+    {
+        public Task RunAsync(WorkflowRunRequest request, CancellationToken cancellationToken)
+        {
+            foreach (var definition in PhaseCatalog.All)
+            {
+                store.RecordPhase(
+                    request.Paths,
+                    definition.Phase,
+                    definition.Phase == WorkflowPhase.Implementation ? implementation : PhaseStatus.Completed);
+            }
+
+            return Task.CompletedTask;
+        }
+    }
+
     /// <summary>A folder service whose rename always fails, as a locked or colliding one would.</summary>
     private sealed class FailingRenameFolderService : ITaskFolderService
     {
@@ -80,6 +102,12 @@ public sealed class TaskTabViewModelTests : IDisposable
         public void EnsureCreated(TaskPaths paths) => _inner.EnsureCreated(paths);
 
         public bool DirectoryAlreadyExisted(TaskPaths paths) => _inner.DirectoryAlreadyExisted(paths);
+
+        public IReadOnlyList<string> FindMissingPlanningArtefacts(TaskPaths paths) =>
+            _inner.FindMissingPlanningArtefacts(paths);
+
+        public void AdoptArtefact(string sourceFile, string artefactPath) =>
+            _inner.AdoptArtefact(sourceFile, artefactPath);
 
         public void Rename(string workingDirectory, string oldName, string newName) =>
             throw new IOException("Der Ordner wird von einem anderen Prozess verwendet.");
@@ -205,15 +233,18 @@ public sealed class TaskTabViewModelTests : IDisposable
     }
 
     [StaFact]
-    public void Phases_AreTheFourStationsInOrderAndStartPending()
+    public void Phases_AreTheFiveStationsInOrderAndStartPending()
     {
+        // Arrange
         using var vm = Create();
 
-        Assert.Equal(4, vm.Phases.Count);
-        Assert.Equal("Spezifikation", vm.Phases[0].DisplayName);
-        Assert.Equal("Review", vm.Phases[1].DisplayName);
-        Assert.Equal("Review umsetzen", vm.Phases[2].DisplayName);
-        Assert.Equal("Implementierung", vm.Phases[3].DisplayName);
+        // Act
+        var names = vm.Phases.Select(p => p.DisplayName).ToArray();
+
+        // Assert
+        Assert.Equal(
+            new[] { "Spezifikation", "Vereinfachen", "Review", "Review umsetzen", "Implementierung" },
+            names);
         Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
     }
 
@@ -323,19 +354,215 @@ public sealed class TaskTabViewModelTests : IDisposable
     }
 
     [StaFact]
+    public void StartWorkflow_RunEndsWithEveryPhaseCompleted_FinishesTheTask()
+    {
+        var store = new FakeTaskStateStore();
+        using var vm = Create(
+            orchestrator: new JournallingOrchestrator(store, PhaseStatus.Completed),
+            stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "demo";
+
+        vm.StartWorkflowCommand.Execute(null);
+
+        Assert.False(vm.IsRunning);
+        Assert.True(vm.IsTaskFinished);
+        Assert.False(vm.StartWorkflowCommand.CanExecute(null));
+    }
+
+    [StaFact]
+    public void StartWorkflow_RunEndsWithImplementationStillActive_DoesNotFinishTheTask()
+    {
+        var store = new FakeTaskStateStore();
+        using var vm = Create(
+            orchestrator: new JournallingOrchestrator(store, PhaseStatus.Active),
+            stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "demo";
+
+        vm.StartWorkflowCommand.Execute(null);
+
+        Assert.False(vm.IsRunning);
+        Assert.False(vm.IsTaskFinished);
+        Assert.True(vm.StartWorkflowCommand.CanExecute(null));
+    }
+
+    // --- Queue (WF_QUEUE spec section 4) ---
+
+    [StaFact]
+    public void StartWorkflow_RunEndsWithEveryPhaseCompleted_RaisesFinishedOnceWithTheRunSettled()
+    {
+        // Arrange
+        var store = new FakeTaskStateStore();
+        using var vm = Create(orchestrator: new JournallingOrchestrator(store, PhaseStatus.Completed), stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "demo";
+        var raised = 0;
+        bool? runningAtRaise = null;
+        vm.Finished += (_, _) =>
+        {
+            raised++;
+            runningAtRaise ??= vm.IsRunning;
+        };
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert
+        Assert.Equal(1, raised);
+        Assert.False(runningAtRaise);
+    }
+
+    [StaFact]
+    public void StartWorkflow_RunEndsWithImplementationStillActive_RaisesNoFinished()
+    {
+        // Arrange
+        var store = new FakeTaskStateStore();
+        using var vm = Create(orchestrator: new JournallingOrchestrator(store, PhaseStatus.Active), stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "demo";
+        var raised = 0;
+        vm.Finished += (_, _) => raised++;
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert
+        Assert.Equal(0, raised);
+    }
+
+    [StaFact]
+    public void StartWorkflow_ClearsTheQueue()
+    {
+        // Arrange
+        using var predecessor = Create();
+        using var vm = Create();
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "demo";
+        vm.QueuedAfter = predecessor;
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert
+        Assert.True(vm.IsRunning);
+        Assert.Null(vm.QueuedAfter);
+    }
+
+    [StaFact]
+    public void StartWorkflow_RefusedByTheStartGate_KeepsTheQueue()
+    {
+        // Arrange: no task name, so the start gate refuses.
+        using var predecessor = Create();
+        using var vm = Create();
+        vm.WorkingDirectory = _root;
+        vm.QueuedAfter = predecessor;
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert
+        Assert.False(vm.IsRunning);
+        Assert.Same(predecessor, vm.QueuedAfter);
+    }
+
+    [StaFact]
+    public void StartWorkflow_DescriptionCannotBeSaved_StartsNothingKeepsTheQueueAndSaysSo()
+    {
+        // Arrange
+        var store = new FakeTaskStateStore { FailDescriptionWriteFor = "demo" };
+        using var predecessor = Create();
+        using var vm = Create(stateStore: store);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "demo";
+        vm.QueuedAfter = predecessor;
+
+        // Act
+        var thrown = Record.Exception(() => vm.StartWorkflowCommand.Execute(null));
+
+        // Assert
+        Assert.Null(thrown);
+        Assert.False(vm.IsRunning);
+        Assert.False(vm.IsNameLocked);
+        Assert.Same(predecessor, vm.QueuedAfter);
+        Assert.Equal("Die Taskbeschreibung konnte nicht gespeichert werden: simulated description write failure", vm.ValidationMessage);
+    }
+
+    [StaFact]
+    public void StartIfQueuedAfter_WhenTheStartGateIsShut_StartsNothingAndSaysSo()
+    {
+        // Arrange
+        using var predecessor = Create();
+        predecessor.TaskName = "alpha";
+        using var vm = Create();
+        vm.WorkingDirectory = _root;
+        vm.QueuedAfter = predecessor;
+
+        // Act
+        var started = vm.StartIfQueuedAfter(predecessor);
+
+        // Assert
+        Assert.False(started);
+        Assert.False(vm.IsRunning);
+        Assert.Null(vm.QueuedAfter);
+        Assert.Equal("Queue: 'alpha' ist fertig, der Workflow konnte aber nicht automatisch gestartet werden.", vm.InfoMessage);
+    }
+
+    [StaFact]
+    public void CancelIfQueuedAfter_ClearsOnlyAQueueOnThatTabAndSaysSo()
+    {
+        // Arrange
+        using var predecessor = Create();
+        predecessor.TaskName = "alpha";
+        using var other = Create();
+        using var vm = Create();
+        vm.QueuedAfter = predecessor;
+
+        // Act
+        vm.CancelIfQueuedAfter(other);
+        var afterOther = vm.QueuedAfter;
+        vm.CancelIfQueuedAfter(predecessor);
+
+        // Assert
+        Assert.Same(predecessor, afterOther);
+        Assert.Null(vm.QueuedAfter);
+        Assert.Equal("Queue aufgehoben: 'alpha' wurde geschlossen.", vm.InfoMessage);
+    }
+
+    [StaFact]
+    public void IsQueueEditable_IsFalseWhileTheTabRuns()
+    {
+        // Arrange
+        using var vm = Create();
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "demo";
+        var before = vm.IsQueueEditable;
+        var raised = new List<string?>();
+        vm.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert
+        Assert.True(before);
+        Assert.False(vm.IsQueueEditable);
+        Assert.Contains(nameof(TaskTabViewModel.IsQueueEditable), raised);
+    }
+
+    [StaFact]
     public void ApplyProgress_DrivesTheIndicatorColours()
     {
         using var vm = Create();
 
         vm.ApplyProgress(new PhaseProgress(WorkflowPhase.Specification, PhaseStatus.Active));
-        Assert.Equal(PhaseStatus.Active, vm.Phases[0].Status);
+        Assert.Equal(PhaseStatus.Active, vm.Phases[(int)WorkflowPhase.Specification].Status);
 
         vm.ApplyProgress(new PhaseProgress(WorkflowPhase.Specification, PhaseStatus.Completed));
-        vm.ApplyProgress(new PhaseProgress(WorkflowPhase.Review, PhaseStatus.Active));
+        vm.ApplyProgress(new PhaseProgress(WorkflowPhase.Simplifier, PhaseStatus.Active));
 
-        Assert.Equal(PhaseStatus.Completed, vm.Phases[0].Status);
-        Assert.Equal(PhaseStatus.Active, vm.Phases[1].Status);
-        Assert.Equal(PhaseStatus.Pending, vm.Phases[2].Status);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.Specification].Status);
+        Assert.Equal(PhaseStatus.Active, vm.Phases[(int)WorkflowPhase.Simplifier].Status);
+        Assert.Equal(PhaseStatus.Pending, vm.Phases[(int)WorkflowPhase.Review].Status);
     }
 
     [StaFact]
@@ -372,6 +599,7 @@ public sealed class TaskTabViewModelTests : IDisposable
 
         var state = new TaskState { TaskDescription = "die Beschreibung", UpdatedUtc = DateTimeOffset.UtcNow };
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Simplifier, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Active, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
@@ -385,10 +613,11 @@ public sealed class TaskTabViewModelTests : IDisposable
         Assert.True(vm.IsRecovered);
         Assert.Equal(WorkflowPhase.Review, vm.ResumePhase);
         Assert.Equal("Continue workflow", vm.StartButtonLabel);
-        Assert.Equal(PhaseStatus.Completed, vm.Phases[0].Status);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.Specification].Status);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.Simplifier].Status);
 
         // An Active in the journal means the app died mid-phase: it is about to be re-run.
-        Assert.Equal(PhaseStatus.Pending, vm.Phases[1].Status);
+        Assert.Equal(PhaseStatus.Pending, vm.Phases[(int)WorkflowPhase.Review].Status);
     }
 
     [Fact]
@@ -472,6 +701,7 @@ public sealed class TaskTabViewModelTests : IDisposable
 
         var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Simplifier, PhaseStatus.Pending, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Pending, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
@@ -481,8 +711,74 @@ public sealed class TaskTabViewModelTests : IDisposable
         vm.WorkingDirectory = _root;
         vm.TaskName = "alpha";
 
-        Assert.Equal(WorkflowPhase.Review, vm.ResumePhase);
+        Assert.Equal(WorkflowPhase.Simplifier, vm.ResumePhase);
         Assert.Equal("Continue workflow", vm.StartButtonLabel);
+    }
+
+    /// <summary>
+    /// The re-arm path reconciles through the same helper as the startup scan, so a journal that
+    /// stopped at "phase 1 Active" while spec and plan were already written resumes at the
+    /// simplifier and paints phase 1 green, instead of re-running the specification.
+    /// </summary>
+    [Fact]
+    public void TypingATaskWhoseSpecificationIsActiveButOnDisk_OffersContinueAtSimplifierWithSpecificationGreen()
+    {
+        // Arrange
+        var store = new FakeTaskStateStore();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        File.WriteAllText(paths.SpecAbsolute, "spec");
+        File.WriteAllText(paths.PlanAbsolute, "plan");
+
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = new DateTimeOffset(2026, 10, 1, 15, 0, 0, TimeSpan.Zero) };
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Active, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Simplifier, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
+        store.Seed(paths, state);
+
+        using var vm = Create(stateStore: store);
+
+        // Act
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+
+        // Assert
+        Assert.Equal(WorkflowPhase.Simplifier, vm.ResumePhase);
+        Assert.Equal("Continue workflow", vm.StartButtonLabel);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.Specification].Status);
+        Assert.Equal(PhaseStatus.Pending, vm.Phases[(int)WorkflowPhase.Simplifier].Status);
+        Assert.NotEmpty(store.Replacements);
+    }
+
+    /// <summary>
+    /// Promotion needs a journal: a folder that merely holds artefacts was never run by this
+    /// application, and reusing it for a new Taskbeschreibung must not skip the specification
+    /// (resume design section 6.3, BASE section 8.3).
+    /// </summary>
+    [Fact]
+    public void TypingATaskFolderWithArtefactsButNoJournal_StaysAFreshStart()
+    {
+        // Arrange
+        var store = new FakeTaskStateStore();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        File.WriteAllText(paths.SpecAbsolute, "spec");
+        File.WriteAllText(paths.PlanAbsolute, "plan");
+        File.WriteAllText(paths.ReviewAbsolute, "review");
+
+        using var vm = Create(stateStore: store);
+
+        // Act
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "alpha";
+
+        // Assert
+        Assert.Null(vm.ResumePhase);
+        Assert.Equal("Start workflow", vm.StartButtonLabel);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+        Assert.Empty(store.Replacements);
     }
 
     [Fact]
@@ -503,6 +799,7 @@ public sealed class TaskTabViewModelTests : IDisposable
 
         var state = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Simplifier, PhaseStatus.Pending, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Pending, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Pending, null));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
@@ -511,8 +808,8 @@ public sealed class TaskTabViewModelTests : IDisposable
         using var vm = Create(stateStore: store);
         vm.WorkingDirectory = _root;
         vm.TaskName = "alpha";
-        Assert.Equal(PhaseStatus.Completed, vm.Phases[0].Status);
-        Assert.Equal(WorkflowPhase.Review, vm.ResumePhase);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.Specification].Status);
+        Assert.Equal(WorkflowPhase.Simplifier, vm.ResumePhase);
 
         // Same task NAME, different working directory - the case that actually reaches a
         // different folder. (Retyping the name alone renames the folder and carries its journal
@@ -537,6 +834,7 @@ public sealed class TaskTabViewModelTests : IDisposable
         // would rightly demote phase 1 and this would no longer be the "completed task" case.
         File.WriteAllText(paths.SpecAbsolute, "spec");
         File.WriteAllText(paths.PlanAbsolute, "plan");
+        File.WriteAllText(paths.SimplifiedAbsolute, "simplified");
         File.WriteAllText(paths.ReviewAbsolute, "review");
         File.WriteAllText(paths.DoneAbsolute, "done");
 
@@ -552,7 +850,7 @@ public sealed class TaskTabViewModelTests : IDisposable
         vm.WorkingDirectory = _root;
         vm.TaskName = "fertig";
 
-        // The button already reads 'Start workflow' because nothing is resumable. Four green
+        // The button already reads 'Start workflow' because nothing is resumable. Five green
         // indicators above it would paint an about-to-start run as already finished.
         Assert.Null(vm.ResumePhase);
         Assert.Equal("Start workflow", vm.StartButtonLabel);
@@ -594,11 +892,12 @@ public sealed class TaskTabViewModelTests : IDisposable
         var paths = new TaskPaths(_root, "alpha");
         Directory.CreateDirectory(paths.TaskDirectory);
 
-        // The journal on disk still claims phases 1-3 are complete; the recovered tab was handed
+        // The journal on disk still claims phases 1-4 are complete; the recovered tab was handed
         // the reconciled view that demoted them. StartWorkflow calls SyncFolder directly, and the
         // re-arm must not overwrite ResumePhase from that journal (SPEC 6.6).
         var onDisk = new TaskState { TaskDescription = "d", UpdatedUtc = DateTimeOffset.UtcNow };
         onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Simplifier, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         onDisk.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
@@ -615,6 +914,223 @@ public sealed class TaskTabViewModelTests : IDisposable
 
         Assert.NotNull(orchestrator.Request);
         Assert.Equal(WorkflowPhase.Specification, orchestrator.Request.StartPhase);
+    }
+
+    [StaFact]
+    public void ApplyLauncherStatus_StallReported_SetsTheLauncherStatusMessage()
+    {
+        // Arrange
+        using var vm = Create();
+
+        // Act
+        vm.ApplyLauncherStatus("Der Launcher laeuft nicht.");
+
+        // Assert
+        Assert.Equal("Der Launcher laeuft nicht.", vm.LauncherStatusMessage);
+    }
+
+    [StaFact]
+    public void ApplyLauncherStatus_Cleared_LeavesAnUnrelatedInfoMessageIntact()
+    {
+        // Arrange - the tab is already telling the user something independent of any launcher.
+        using var vm = Create();
+        vm.InfoMessage = "Ordner existiert bereits und wird weiterverwendet.";
+
+        // Act
+        vm.ApplyLauncherStatus("Der Launcher laeuft nicht.");
+        vm.ApplyLauncherStatus(null);
+
+        // Assert - clearing the stall must not erase the folder notice that was there before it.
+        Assert.Null(vm.LauncherStatusMessage);
+        Assert.Equal("Ordner existiert bereits und wird weiterverwendet.", vm.InfoMessage);
+    }
+
+    [StaFact]
+    public void StartWorkflow_PassesALauncherStatusSinkToTheOrchestrator()
+    {
+        // Arrange - without this wiring the orchestrator's refusal to paste would be reported to
+        // nothing, and a paused session would look like a terminal that stopped for no reason.
+        var orchestrator = new CapturingOrchestrator();
+        using var vm = Create(orchestrator: orchestrator);
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "LauncherSink";
+        vm.TaskDescription = "d";
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert
+        Assert.NotNull(orchestrator.Request);
+        Assert.NotNull(orchestrator.Request.LauncherStatus);
+    }
+
+    [StaFact]
+    public async Task RunAsync_RunEndsWithAnException_ClearsTheLauncherStatus()
+    {
+        // Arrange - the orchestrator clears its own status on every ordinary exit, but a run that
+        // unwinds through an exception never reaches that point.
+        using var vm = Create(orchestrator: new ThrowingOrchestrator(new IOException("boom")));
+        vm.WorkingDirectory = _root;
+        vm.TaskName = "LauncherStallCleared";
+        vm.TaskDescription = "d";
+        vm.ApplyLauncherStatus("Der Launcher laeuft nicht.");
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        for (var i = 0; i < 50 && vm.IsRunning; i++)
+        {
+            await Task.Delay(20);
+        }
+
+        // Assert - a stall reason must not outlive the run that produced it.
+        Assert.False(vm.IsRunning);
+        Assert.Null(vm.LauncherStatusMessage);
+    }
+
+    // --- A task opened with 'Task laden' (Workflow_LOAD_AND_PAUSE spec section 5.5) ------------
+
+    private static readonly DateTimeOffset LoadedPhaseDone = new(2026, 9, 30, 12, 0, 0, TimeSpan.Zero);
+
+    private static TaskState LoadedJournal(params PhaseStatus[] statuses)
+    {
+        var state = new TaskState { TaskDescription = "d", UpdatedUtc = LoadedPhaseDone };
+
+        for (var i = 0; i < PhaseCatalog.All.Count; i++)
+        {
+            state.Phases.Add(new TaskPhaseState(
+                PhaseCatalog.All[i].Phase,
+                statuses[i],
+                statuses[i] == PhaseStatus.Completed ? LoadedPhaseDone : null));
+        }
+
+        return state;
+    }
+
+    [Fact]
+    public void LoadForResume_FinishedTask_KeepsFiveGreenIndicatorsAndOffersAFreshStart()
+    {
+        // Arrange
+        using var vm = Create();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        var state = LoadedJournal(
+            PhaseStatus.Completed, PhaseStatus.Completed, PhaseStatus.Completed, PhaseStatus.Completed, PhaseStatus.Completed);
+
+        // Act
+        vm.LoadForResume(new RecoverableTask(paths, state, ResumePhase: null));
+
+        // Assert
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Completed, p.Status));
+        Assert.Null(vm.ResumePhase);
+        Assert.Equal("Start workflow", vm.StartButtonLabel);
+        Assert.Equal("Alle Phasen sind abgeschlossen. 'Start workflow' beginnt den Task von vorn.", vm.InfoMessage);
+        Assert.True(vm.IsNameLocked);
+        Assert.True(vm.StartWorkflowCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void LoadForResume_UnfinishedTask_WritesNoInfoLine()
+    {
+        // Arrange
+        using var vm = Create();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        var state = LoadedJournal(
+            PhaseStatus.Completed, PhaseStatus.Pending, PhaseStatus.Pending, PhaseStatus.Pending, PhaseStatus.Pending);
+
+        // Act
+        vm.LoadForResume(new RecoverableTask(paths, state, WorkflowPhase.Simplifier));
+
+        // Assert
+        Assert.Null(vm.InfoMessage);
+    }
+
+    [Fact]
+    public void LoadForResume_CreatedJournal_SaysSoAndNamesTheNextPhase()
+    {
+        // Arrange - Workflow_LoadFix spec 5.4.
+        using var vm = Create();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        var state = LoadedJournal(
+            PhaseStatus.Completed, PhaseStatus.Pending, PhaseStatus.Pending, PhaseStatus.Pending, PhaseStatus.Pending);
+
+        // Act
+        vm.LoadForResume(new RecoverableTask(paths, state, WorkflowPhase.Simplifier, JournalCreated: true));
+
+        // Assert
+        Assert.Equal("Neue .workflow-state.json angelegt. Nächste Phase: Vereinfachen.", vm.InfoMessage);
+        Assert.Equal("Continue workflow", vm.StartButtonLabel);
+    }
+
+    [Fact]
+    public void LoadForResume_SkippedReviewPhases_ShowsThemSkipped()
+    {
+        // Arrange
+        using var vm = Create();
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        var state = LoadedJournal(
+            PhaseStatus.Completed, PhaseStatus.Skipped, PhaseStatus.Skipped, PhaseStatus.Skipped, PhaseStatus.Pending);
+
+        // Act
+        vm.LoadForResume(new RecoverableTask(paths, state, WorkflowPhase.Implementation));
+
+        // Assert
+        Assert.Equal(
+            new[] { PhaseStatus.Completed, PhaseStatus.Skipped, PhaseStatus.Skipped, PhaseStatus.Skipped, PhaseStatus.Pending },
+            vm.Phases.Select(p => p.Status));
+        Assert.Null(vm.InfoMessage);
+    }
+
+    [Fact]
+    public void StartWorkflow_RestartingAFinishedTask_TurnsEveryIndicatorGrey()
+    {
+        // Arrange
+        var orchestrator = new CapturingOrchestrator();
+        using var vm = Create(orchestrator: orchestrator);
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        vm.LoadForResume(new RecoverableTask(
+            paths,
+            LoadedJournal(PhaseStatus.Completed, PhaseStatus.Completed, PhaseStatus.Completed, PhaseStatus.Completed, PhaseStatus.Completed),
+            ResumePhase: null));
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert - the orchestrator clears the journal from phase 1 on; the indicators follow suit.
+        Assert.NotNull(orchestrator.Request);
+        Assert.Equal(WorkflowPhase.Specification, orchestrator.Request.StartPhase);
+        Assert.All(vm.Phases, p => Assert.Equal(PhaseStatus.Pending, p.Status));
+    }
+
+    [Fact]
+    public void StartWorkflow_ResetsTheIndicatorsFromTheStartPhaseOnAndKeepsEarlierOnes()
+    {
+        // Arrange - an irregular journal: Review umsetzen recorded Completed after an incomplete Review.
+        var orchestrator = new CapturingOrchestrator();
+        using var vm = Create(orchestrator: orchestrator);
+        var paths = new TaskPaths(_root, "alpha");
+        Directory.CreateDirectory(paths.TaskDirectory);
+        vm.LoadForResume(new RecoverableTask(
+            paths,
+            LoadedJournal(PhaseStatus.Completed, PhaseStatus.Completed, PhaseStatus.Pending, PhaseStatus.Completed, PhaseStatus.Pending),
+            WorkflowPhase.Review));
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.ResolveReview].Status);   // positive control
+
+        // Act
+        vm.StartWorkflowCommand.Execute(null);
+
+        // Assert
+        Assert.NotNull(orchestrator.Request);
+        Assert.Equal(WorkflowPhase.Review, orchestrator.Request.StartPhase);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.Specification].Status);
+        Assert.Equal(PhaseStatus.Completed, vm.Phases[(int)WorkflowPhase.Simplifier].Status);
+        Assert.Equal(PhaseStatus.Pending, vm.Phases[(int)WorkflowPhase.Review].Status);
+        Assert.Equal(PhaseStatus.Pending, vm.Phases[(int)WorkflowPhase.ResolveReview].Status);
+        Assert.Equal(PhaseStatus.Pending, vm.Phases[(int)WorkflowPhase.Implementation].Status);
     }
 
     private sealed class CapturingOrchestrator : IWorkflowOrchestrator

@@ -103,4 +103,93 @@ public sealed class TaskFolderService : ITaskFolderService
 
         Directory.Move(source, target);
     }
+
+    /// <inheritdoc />
+    public IReadOnlyList<string> FindMissingPlanningArtefacts(TaskPaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        var missing = new List<string>(2);
+
+        if (IsMissingOrEmpty(paths.SpecAbsolute))
+        {
+            missing.Add(paths.SpecAbsolute);
+        }
+
+        if (IsMissingOrEmpty(paths.PlanAbsolute))
+        {
+            missing.Add(paths.PlanAbsolute);
+        }
+
+        return missing.Count > 0 && HoldsCandidate(paths) ? missing : [];
+    }
+
+    /// <inheritdoc />
+    public void AdoptArtefact(string sourceFile, string artefactPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceFile);
+        ArgumentException.ThrowIfNullOrWhiteSpace(artefactPath);
+
+        // A 0-byte artefact holds nothing to lose and counts as missing (spec 6.2, D17), so it
+        // makes way for the chosen file.
+        var target = new FileInfo(artefactPath);
+        if (target.Exists && target.Length == 0)
+        {
+            target.Delete();
+        }
+
+        // overwrite: false - an artefact with content, including one that appeared in the meantime,
+        // is never replaced; the IOException reaches the user as the reason nothing was renamed.
+        // File.Move keeps the last write time, which is what promotion dates Specification from.
+        File.Move(sourceFile, artefactPath, overwrite: false);
+    }
+
+    // The reconciliation's own definition of absent evidence (WrittenUtc needs Length > 0), so the
+    // offer and the promotion of Specification never disagree about a file. A size that cannot be read
+    // counts as present: what cannot be checked is never offered for replacement (spec 6.2).
+    private static bool IsMissingOrEmpty(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return !info.Exists || info.Length == 0;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    // A candidate is any top-level Markdown file that is not already one of the task's canonical
+    // artefacts. Without one there is nothing to adopt, and an empty or fresh task folder must not
+    // raise the question (Workflow_LoadFix spec 6.2).
+    private static bool HoldsCandidate(TaskPaths paths)
+    {
+        var canonical = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            paths.SpecAbsolute,
+            paths.PlanAbsolute,
+            paths.ReviewAbsolute,
+            paths.DoneAbsolute,
+        };
+
+        try
+        {
+            return Directory
+                .EnumerateFiles(paths.TaskDirectory, "*.md", SearchOption.TopDirectoryOnly)
+                .Any(file => !canonical.Contains(file));
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 }

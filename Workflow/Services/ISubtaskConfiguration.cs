@@ -3,14 +3,14 @@ using Workflow.Models;
 namespace Workflow.Services;
 
 /// <summary>
-/// The live, editable subtask configuration the tab owns while phases 1-3 run.
+/// The live, editable subtask configuration the tab owns while the phases before Implementation run.
 /// </summary>
 /// <remarks>
 /// This interface exists <em>only</em> as the capture source for
 /// <see cref="SubtaskConfiguration.Capture(ISubtaskConfiguration)"/> (design issue 3 resolved),
 /// reached either directly or through the deferred form
 /// <see cref="SubtaskConfiguration.Deferred(ISubtaskConfiguration)"/> the run carries.
-/// Nothing downstream of phase-4 entry may hold it: the orchestrator receives the captured
+/// Nothing downstream of Implementation entry may hold it: the orchestrator receives the captured
 /// <see cref="SubtaskConfiguration"/> record instead, which is what makes it impossible to observe
 /// the enabled flag at one moment and the tracking directory at another (requirement 1.6).
 /// </remarks>
@@ -27,7 +27,7 @@ public interface ISubtaskConfiguration
 }
 
 /// <summary>
-/// One immutable snapshot of the subtask configuration, taken exactly once when phase 4 is entered.
+/// One immutable snapshot of the subtask configuration, taken exactly once when Implementation is entered.
 /// </summary>
 /// <param name="Enabled">Whether the run executes as subtasks. False is a normal implementation run.</param>
 /// <param name="WorkflowDirectory">
@@ -37,7 +37,7 @@ public interface ISubtaskConfiguration
 /// <remarks>
 /// <para>
 /// Design "Components and Interfaces -&gt; Configuration and Persistence" (issue 3 resolved): the
-/// configuration crosses the phase-4 boundary as one immutable record, not as a live object with
+/// configuration crosses the Implementation boundary as one immutable record, not as a live object with
 /// independent getters. The tab keeps the editable state; <see cref="Capture(ISubtaskConfiguration)"/>
 /// reads it once and everything afterwards sees only this record, so the pairing of
 /// <paramref name="Enabled"/> and <paramref name="WorkflowDirectory"/> is atomic by construction and
@@ -74,7 +74,7 @@ public sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirector
         configuration is { Enabled: true };
 
     /// <summary>
-    /// Takes the one snapshot of the live configuration, at phase-4 entry.
+    /// Takes the one snapshot of the live configuration, at Implementation entry.
     /// </summary>
     /// <param name="source">The tab's live, editable state.</param>
     /// <returns>An immutable record of the enabled flag and the tracking directory.</returns>
@@ -94,7 +94,7 @@ public sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirector
 
     /// <summary>
     /// Hands the run a capture that has not been taken yet, so that <see cref="Capture"/> runs when
-    /// the run first needs the answer - phase-4 entry - rather than when the run is built.
+    /// the run first needs the answer - Implementation entry - rather than when the run is built.
     /// </summary>
     /// <param name="source">The tab's live, editable state.</param>
     /// <returns>
@@ -104,13 +104,14 @@ public sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirector
     /// <exception cref="ArgumentNullException"><paramref name="source"/> is null.</exception>
     /// <remarks>
     /// <para>
-    /// Requirement 1.6 puts the snapshot at <em>phase-4 entry</em>, not at run entry: while phases
-    /// 1-3 run the user may still tick the checkbox or pick a different directory, and those edits
-    /// must reach the run. Capturing when the request is built would freeze the configuration
-    /// before the user was finished with it. Deferring the call is what closes that gap, and the
-    /// phase-4 guard in <c>WorkflowOrchestrator.RunPhaseAsync</c> - whose <c>&amp;&amp;</c>
-    /// short-circuits on the phase check - is what keeps a run that never reaches implementation
-    /// from reading the tab at all.
+    /// Requirement 1.6 puts the snapshot at <em>Implementation entry</em>, not at run entry: while
+    /// the phases before Implementation run the user may still tick the checkbox or pick a
+    /// different directory, and those edits must reach the run. Capturing when the request is
+    /// built would freeze the configuration before the user was finished with it. Deferring the
+    /// call is what closes that gap, and the Implementation guard in
+    /// <c>WorkflowOrchestrator.RunPhaseAsync</c> - whose <c>&amp;&amp;</c> short-circuits on the
+    /// phase check - is what keeps a run that never reaches implementation from reading the tab at
+    /// all.
     /// </para>
     /// <para>
     /// <see cref="Lazy{T}"/> rather than a bare delegate, and this is the load-bearing part: the
@@ -137,7 +138,7 @@ public sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirector
     /// <c>ArtifactWatcher</c>, <c>TaskRecoveryScanner</c> and <c>ConPtySession</c>. Those pool-thread
     /// completions are harmless here, because an awaiter with a captured
     /// <c>DispatcherSynchronizationContext</c> posts its continuation back to the dispatcher no
-    /// matter which thread completed the task. So every continuation, including the phase-4 guard
+    /// matter which thread completed the task. So every continuation, including the Implementation guard
     /// that forces this capture, resumes on the captured dispatcher context. There is therefore no
     /// thread affinity to violate (these are plain CLR properties, not <c>DependencyObject</c>
     /// state) and no cross-thread visibility question about the non-volatile fields
@@ -157,7 +158,7 @@ public sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirector
     }
 
     /// <summary>
-    /// Takes the phase-4 snapshot and immediately rejects it if subtask mode is enabled but its
+    /// Takes the Implementation-entry snapshot and immediately rejects it if subtask mode is enabled but its
     /// tracking directory is unusable.
     /// </summary>
     /// <param name="source">The tab's live, editable state.</param>
@@ -167,7 +168,7 @@ public sealed record SubtaskConfiguration(bool Enabled, string? WorkflowDirector
     /// Subtask mode is enabled and the directory fails <see cref="WorkflowDirectoryValidation"/>.
     /// </exception>
     /// <remarks>
-    /// This is the phase-4 entry point (requirement 1.8). It validates the <em>captured</em>
+    /// This is the Implementation entry point (requirement 1.8). It validates the <em>captured</em>
     /// directory, not a second read of <paramref name="source"/>, and it never answers an
     /// enabled-but-invalid configuration with <see cref="Disabled"/>: downgrading it to a normal
     /// full-context implementation run would turn unbounded work loose on the product working

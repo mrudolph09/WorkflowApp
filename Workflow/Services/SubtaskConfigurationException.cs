@@ -2,12 +2,12 @@ namespace Workflow.Services;
 
 /// <summary>
 /// Raised when the subtask configuration cannot be used: an enabled configuration whose tracking
-/// directory fails validation at phase-4 entry, or a decomposition that produced an unusable index.
+/// directory fails validation at Implementation entry, or a decomposition that produced an unusable index.
 /// </summary>
 /// <remarks>
 /// A user-fixable condition, not a defect: the tab catches it, presents
 /// <see cref="ValidationMessage"/>, and leaves implementation recoverable (requirements 1.8 and 2.9,
-/// design "Error Handling"). It is deliberately its own type so that the phase-4 branch can let it
+/// design "Error Handling"). It is deliberately its own type so that the Implementation branch can let it
 /// travel past the generic failure handling and never be mistaken for a reason to fall back to a
 /// normal implementation run.
 /// </remarks>

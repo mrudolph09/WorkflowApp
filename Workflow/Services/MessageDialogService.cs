@@ -25,4 +25,19 @@ public sealed class MessageDialogService : IMessageDialogService
 
         MessageBox.Show(owner, message, Caption, MessageBoxButton.OK, MessageBoxImage.Error);
     }
+
+    /// <inheritdoc />
+    public bool Confirm(string message)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(message);
+
+        // Owned by the main window whenever there is one, as ShowError does.
+        var owner = Application.Current?.MainWindow;
+
+        var answer = owner is null
+            ? MessageBox.Show(message, Caption, MessageBoxButton.YesNo, MessageBoxImage.Question)
+            : MessageBox.Show(owner, message, Caption, MessageBoxButton.YesNo, MessageBoxImage.Question);
+
+        return answer == MessageBoxResult.Yes;
+    }
 }

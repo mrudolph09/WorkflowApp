@@ -6,7 +6,7 @@ using Workflow.Models;
 namespace Workflow.Services;
 
 /// <summary>
-/// The tokens a prompt template may use, in three layers: the base set the four phase prompts
+/// The tokens a prompt template may use, in three layers: the base set the five phase prompts
 /// share, the decomposition set that extends it with the tracking-repository paths, and the
 /// execution set that extends that with the per-subtask title and body.
 /// </summary>
@@ -19,13 +19,13 @@ namespace Workflow.Services;
 /// Requirement 6.6: every path token this type adds is absolute, taken verbatim from
 /// <see cref="SubtaskPaths"/>. No prompt composes a root with a relative fragment, and no prompt
 /// re-derives a path the application already supplies. The base tokens keep their existing
-/// working-directory-relative artefact paths unchanged - the four existing phase prompts must
+/// working-directory-relative artefact paths unchanged - the existing phase prompts must
 /// render exactly as before.
 /// </para>
 /// </remarks>
 public static class PromptVariables
 {
-    /// <summary>Token names of the base set, without braces; used by the four phase prompts.</summary>
+    /// <summary>Token names of the base set, without braces; used by the five phase prompts.</summary>
     public static IReadOnlyCollection<string> KnownNames { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
         "taskbezeichnung",
@@ -34,6 +34,7 @@ public static class PromptVariables
         "spec_path",
         "plan_path",
         "review_path",
+        "simplified_path",
         "done_path",
     };
 
@@ -78,6 +79,7 @@ public static class PromptVariables
             ["spec_path"] = paths.SpecRelative,
             ["plan_path"] = paths.PlanRelative,
             ["review_path"] = paths.ReviewRelative,
+            ["simplified_path"] = paths.SimplifiedRelative,
             ["done_path"] = paths.DoneRelative,
         };
     }

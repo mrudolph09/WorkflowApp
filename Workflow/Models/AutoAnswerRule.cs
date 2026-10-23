@@ -24,12 +24,23 @@ public sealed record AutoAnswerRule(string Id, string Pattern, string Send, stri
 /// into a shell while Claude Code / Codex is still cold-starting (SPEC section 7.3).
 /// </param>
 /// <param name="PastePendingPattern">
-/// Regular expression that identifies a pasted-but-unsubmitted prompt still sitting in the input
-/// box (Claude Code collapses a multi-line paste to "[Pasted text #1 …] paste again to expand").
-/// The submit loop presses Enter until this marker is gone, because a single carriage return after
-/// a bracketed paste is treated as a newline, not as submit, in the pwsh → yo → Claude chain
-/// (SPEC section 9.3).
+/// Regular expression that identifies an actual collapsed-paste chip on screen (Claude Code
+/// collapses a multi-line paste to "[Pasted text #1 +N lines]"). On the positive-evidence path it is
+/// landing evidence only: it proves the paste reached the launcher, never that it was submitted -
+/// the chip stays in the history after a submit. The legacy path still presses Enter until it is
+/// gone (SPEC section 6.5).
 /// </param>
+/// <param name="SubmittedPattern">
+/// Regular expression that identifies the launcher actively working on a prompt (Claude Code renders
+/// "esc to interrupt" only while a query runs). On the positive-evidence path its false-to-true
+/// transition after the one Enter is the only accepted proof of submission. Empty keeps the legacy
+/// submit loop for every phase.
+/// </param>
+/// <param name="SubmitAfterPasteLandedMs">
+/// Wait between the paste demonstrably landing and the one Enter, so Claude Code's post-paste
+/// handling has finished before the key arrives.
+/// </param>
+/// <param name="SubmittedVerifyTimeoutMs">How long to look for <paramref name="SubmittedPattern"/> after the Enter.</param>
 public sealed record AutoAnswerRuleSet(
     int Version,
     int QuietPeriodMs,
@@ -41,4 +52,7 @@ public sealed record AutoAnswerRuleSet(
     int SubmitVerifyMs = 1500,
     int MaxSubmitAttempts = 4,
     string ReadyPattern = "",
-    string PastePendingPattern = "");
+    string PastePendingPattern = "",
+    string SubmittedPattern = "",
+    int SubmitAfterPasteLandedMs = 8000,
+    int SubmittedVerifyTimeoutMs = 10000);

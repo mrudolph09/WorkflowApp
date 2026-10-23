@@ -11,7 +11,7 @@ namespace Workflow.Models;
 /// <remarks>
 /// <para>
 /// Requirement 1.3 asks for one explanatory German message per invalid case, and requirement 1.8
-/// re-runs the same check at phase-4 entry, so the flag and the message travel together: the tab
+/// re-runs the same check at Implementation entry, so the flag and the message travel together: the tab
 /// gates the start action on <see cref="IsValid"/> and presents <see cref="ErrorMessage"/> when the
 /// configuration is rejected. The shape mirrors <see cref="TaskNameValidation"/>.
 /// </para>

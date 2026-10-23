@@ -1,12 +1,13 @@
----
+﻿---
 description: "Canonical Superpowers design specification for the Workflow WPF (.NET 8) task-orchestration app"
-summary: "Workflow is a WPF/.NET 8 MahApps+MaterialDesign app that drives a 4-phase Claude-Code/Codex pipeline (Spezifikation -> Review -> Review umsetzen -> Implementierung) per task tab. Each phase spawns a fresh ConPTY session hosting pwsh, rendered by xterm.js inside WebView2; phase completion is detected from artefact files (existence for 1/2, SHA-256 delta for 3, manual button for 4). Key decisions: task folder lives under the ComboBox-selected working directory; task name is locked after Start workflow; multi-line prompts are injected via bracketed paste; auto-answering is data-driven via autoanswer.rules.json because `yo` defaults to 'No, exit'. REVIEW-RESOLVED 2026-09-12: §4.4.1 pins the analyzer rules that actually fire (IDE0040 on every interface member, CA1002/CA5392/CA1062/CA1508/CA1001/CA2213) and records that UseWPF strips System.IO from implicit usings; CA1031 is never global, CA1003 is; §6.3.1 records that the documented ConPTY sequence does NOT stream output despite the child provably attaching, so Task 8 opens with a blocking spike; §6.4 makes the xterm `ready` handshake awaited; §7.3 adds Gate A (observed launcher readiness) and confirms exit-on-first-non-match is correct (D13) against the old '60 s elapses' wording; §7.5 makes hashing tri-state and watcher failure reportable; §8.1 requires root-aware path normalisation; §9.3 is rebased on the files actually on disk (only `{plan_path}_` remains, plus a NEW defect: a live qdocimporter/eval completion bullet that contradicts §14); §10.3 forwards SelectedContentTemplate; §12.4 forbids disposing a terminal on tab-switch Unloaded. Prompt instructions 8 and 12 stay Not Applicable, but item 12 is now enforced by deleting the bullet and asserting it in tests."
+summary: "Workflow is a WPF/.NET 8 MahApps+MaterialDesign app that drives a 5-phase Claude-Code/Codex pipeline (Spezifikation -> Vereinfachen -> Review -> Review umsetzen -> Implementierung) per task tab. Each phase spawns a fresh ConPTY session hosting pwsh, rendered by xterm.js inside WebView2; phase completion is detected from artefact files (existence for Spezifikation, Vereinfachen and Review, SHA-256 delta for Review umsetzen, manual button for Implementierung). Key decisions: task folder lives under the ComboBox-selected working directory; task name is locked after Start workflow; multi-line prompts are injected via bracketed paste; auto-answering is data-driven via autoanswer.rules.json because `yo` defaults to 'No, exit'. REVIEW-RESOLVED 2026-09-12: §4.4.1 pins the analyzer rules that actually fire (IDE0040 on every interface member, CA1002/CA5392/CA1062/CA1508/CA1001/CA2213) and records that UseWPF strips System.IO from implicit usings; CA1031 is never global, CA1003 is; §6.3.1 records that the documented ConPTY sequence does NOT stream output despite the child provably attaching, so Task 8 opens with a blocking spike; §6.4 makes the xterm `ready` handshake awaited; §7.3 adds Gate A (observed launcher readiness) and confirms exit-on-first-non-match is correct (D13) against the old '60 s elapses' wording; §7.5 makes hashing tri-state and watcher failure reportable; §8.1 requires root-aware path normalisation; §9.3 is rebased on the files actually on disk (only `{plan_path}_` remains, plus a NEW defect: a live qdocimporter/eval completion bullet that contradicts §14); §10.3 forwards SelectedContentTemplate; §12.4 forbids disposing a terminal on tab-switch Unloaded. Prompt instructions 8 and 12 stay Not Applicable, but item 12 is now enforced by deleting the bullet and asserting it in tests. REVISED 2026-09-15 (live-run fixes): the auto-answer key sequence is split into discrete key presses (Ink reads one chunk as one keypress); the trust dialog rule matches Claude Code 2.1.x 'Quick safety check' and answers Arrow-Down+Enter; §7.3 replaces D13 exit-on-first-non-match with a readyPattern gate so the prompt is not pasted during Claude's cold-start; §6.5 replaces the single submit CR with a screen-verified retry (pastePendingPattern) because Claude collapses a paste and absorbs Enter for ~7 s; the window shows an auto-incrementing build number (Workflow/build.number → BuildInfo.g.cs) top-right. 2026-09-29 (§10.4): the task tab no longer splits by a fixed ratio; the form is sized to its content and capped at half the tab, the terminal fills the rest, and the status messages share one fixed-height line so a mid-run message never resizes the PTY. 2026-09-29 (§10.4): the terminal sits inside a gold frame translated from an SVG (TerminalFrameStyle; design in workflow_border/workflow_border_spec.md). REVISED 2026-10-06 (§6.5): Claude Code reads only a lone `` as Return, so the retry loop's queued CRs became literal line breaks and its hint-based success test was a false positive; Claude sessions (phase definitions carry an explicit PromptSubmissionMode) now paste once, write no CR until the chip/landing is observed, wait submitAfterPasteLandedMs, write exactly one CR, accept only submittedPattern (`esc to interrupt`) as proof, and otherwise show a neutral warning; Codex keeps the output-count loop. REVISED 2026-10-12 (§7.1a): new phase Vereinfachen (Simplifier, enum 1) between Spezifikation and Review cuts an over-built spec/plan in place to the smallest design that still solves the task; it completes when `{simplified_path}` (`<Task>-simplified.md`, written last) exists, a stale report is deleted before the phase (an undeletable one stops the run instead of completing it), a journal without its entry gets it Skipped when Review is already done or provable, and 'Implementierung beginnen' skips it together with Review and Review umsetzen."
 paths:
   - "../plans/implementationplan.md"
   - "../../../Workflow/Workflow.csproj"
   - "../../../Workflow/.editorconfig"
   - "../../../Workflow/.roslyn"
   - "../../../Workflow/Prompt/initial_prompt.md"
+  - "../../../Workflow/Prompt/simplifier_prompt.md"
   - "../../../Workflow/Prompt/review_prompt.md"
   - "../../../Workflow/Prompt/resolve_review_prompt.md"
   - "../../../Workflow/Prompt/implementation_prompt.md"
@@ -24,20 +25,21 @@ paths:
 
 ## 1. Purpose
 
-Workflow is a Windows desktop application that automates a repeatable four-stage AI-assisted
-engineering pipeline. For each *Task* the user describes, Workflow drives four consecutive
+Workflow is a Windows desktop application that automates a repeatable five-stage AI-assisted
+engineering pipeline. For each *Task* the user describes, Workflow drives five consecutive
 terminal sessions through Claude Code and Codex, feeding each a prepared prompt, detecting
 when the expected artefacts have been produced, and advancing to the next stage automatically —
 while leaving the user able to type into the live terminal at any moment.
 
-The four stages, referred to throughout as *phases*:
+The five stages, referred to throughout as *phases* (by name, never by number):
 
-| # | German label      | Tool           | Produces                                   |
-|---|-------------------|----------------|--------------------------------------------|
-| 1 | Spezifikation     | `yo`           | `{spec_path}` and `{plan_path}`            |
-| 2 | Review            | `codex --yolo` | `{review_path}`                            |
-| 3 | Review umsetzen   | `yo`           | updated `{spec_path}` / `{plan_path}`      |
-| 4 | Implementierung   | `yo`           | `findings.md`, `task_plan.md`, `progress.md` |
+| Phase (`WorkflowPhase`) | German label      | Tool           | Produces                                                                  |
+|-------------------------|-------------------|----------------|---------------------------------------------------------------------------|
+| `Specification`         | Spezifikation     | `yo`           | `{spec_path}` and `{plan_path}`                                           |
+| `Simplifier`            | Vereinfachen      | `yo`           | `{spec_path}` / `{plan_path}` cut down in place, then `{simplified_path}` |
+| `Review`                | Review            | `codex --yolo` | `{review_path}`                                                           |
+| `ResolveReview`         | Review umsetzen   | `yo`           | updated `{spec_path}` / `{plan_path}`                                     |
+| `Implementation`        | Implementierung   | `yo`           | `findings.md`, `task_plan.md`, `progress.md`                              |
 
 ---
 
@@ -51,7 +53,7 @@ English equivalents. This mapping is normative.
 | Taskbezeichnung               | `TaskName`          | Short task name. Also the tab header **and** the folder name.   |
 | Taskbeschreibung              | `TaskDescription`   | Multi-line free text describing the task. Fed into prompt 1.    |
 | Bezeichnung                   | —                   | Placeholder tab header shown while `TaskName` is empty.         |
-| Station / Phase               | `WorkflowPhase`     | One of the four pipeline stages.                                |
+| Station / Phase               | `WorkflowPhase`     | One of the five pipeline stages.                                |
 | Pfad                          | `WorkingDirectory`  | Directory selected in the ComboBox; the terminal `cd`s here.    |
 
 > **Important:** the supplied prompt templates use `{taskbeschreibung}` in two different senses —
@@ -66,9 +68,10 @@ English equivalents. This mapping is normative.
 
 - Multi-tab WPF shell; one Task per tab; `+` button to add tabs; close button per tab.
 - Per-tab: task name, task description, working-directory ComboBox with directory picker,
-  *Start workflow* button, four phase indicators, *Task abschliessen* button.
-- Embedded, fully interactive terminal per tab (70 % of tab height, 100 % width).
-- Automatic sequencing of the four phases, including auto-answering the launcher's initial
+  *Start workflow* button, five phase indicators, *Task abschliessen* button.
+- Embedded, fully interactive terminal per tab (100 % width; the height the form leaves, at
+  least 50 % of the tab).
+- Automatic sequencing of the five phases, including auto-answering the launcher's initial
   Yes/No confirmation prompt.
 - Prompt template loading with strict variable substitution.
 - Artefact detection driving phase transitions.
@@ -327,7 +330,6 @@ C:\Users\Marco\Documents\repo\Workflow\
 │   ├─ ViewModels\
 │   ├─ Views\
 │   ├─ Converters\
-│   ├─ Behaviors\ RichTextBoxAssist.cs
 │   ├─ Styles\ TabControlStyles.xaml  PhaseIndicatorStyles.xaml
 │   ├─ verify.ps1                         (NEW — acceptance gate script, §15.3)
 │   └─ Prompt\*.md                        (EXISTS — 1 empty, 2 defective; see §9)
@@ -528,8 +530,74 @@ the partial text. The correct mechanism is bracketed paste:
 ESC [ 2 0 0 ~   <body, all newlines normalised to CR>   ESC [ 2 0 1 ~
 ```
 
-then, as a **separate** write after a short delay (150 ms), a single `CR` to submit. Both
-Claude Code and Codex enable bracketed-paste mode (`DECSET 2004`) in their TUIs.
+then, as a **separate** write, a `CR` to submit. Both Claude Code and Codex enable
+bracketed-paste mode (`DECSET 2004`) in their TUIs.
+
+**One `CR` is not enough (revised 2026-09-15).** Claude Code collapses a multi-line bracketed
+paste into a chip (`[Pasted text #1 …] paste again to expand`) and holds a grace period of about
+seven seconds afterwards during which a carriage return is absorbed as part of the paste rather
+than submitting. A single `CR` — even after the terminal has gone quiet — therefore leaves the
+prompt sitting in the input box, which is exactly the "I have to press Enter myself" defect
+observed live on 2026-09-15. An output-count tick is a false positive here: the collapse and the
+grace-period redraws all produce output while nothing is submitted.
+
+The submit is therefore **verified against the screen and retried**: after the paste settles, the
+orchestrator writes a `CR`, waits `SubmitVerifyMs`, and re-snapshots; while the screen still
+matches `pastePendingPattern` (`paste again to expand`) it writes another `CR`, up to
+`MaxSubmitAttempts` (shipped 8). It stops the instant the chip is gone. When no
+`pastePendingPattern` is configured — or the prompt was short enough not to collapse — it falls
+back to the original output-count check. This is a shared code path: every phase submits the
+same way, so the fix applies to every phase.
+
+**Superseded for Claude Code (revised 2026-10-06).** Workflow_LoadFix ST-001 (~37 KB of prompt)
+was never submitted in five tries: four times the chip stayed unsent, once the input box held
+nothing but four line breaks. Claude Code 2.1.291's own input handler explains both. It reads a
+stdin chunk as the Return key only when the chunk is a single `\r`; a chunk such as `\r\r\r\r` is
+inserted as literal text, i.e. line breaks. The retry loop above writes a `CR` every
+`SubmitVerifyMs` whether or not the previous one was read, so while a large paste is still on its
+way through conhost (no screen output yet, so the quiet gate passes early) the `CR`s queue up
+behind it and arrive as one chunk. Its success test was a false positive as well:
+`paste again to expand` is a footer hint (`showExpandPasteHint`), not the chip, and it disappears
+as soon as the input changes or the terminal is narrower than 90 columns. And output after a `CR`
+is no acknowledgement of that `CR` — a late paste redraw looks exactly the same.
+
+Every phase definition therefore carries an explicit `PromptSubmissionMode` — a per-launcher
+contract, never inferred from what is or is not on screen. Specification, Vereinfachen, Review
+umsetzen, Implementierung and the decomposition and subtask sessions (all `yo`, i.e. Claude Code) are
+`PositiveEvidence`; Review (Codex, which renders no working footer) is `LegacyOutputActivity` and
+keeps the loop above. `PositiveEvidence` applies only when `submittedPattern` is configured, so a
+rules file without it keeps the loop above for every phase. On that path the orchestrator:
+
+1. refuses an already-busy baseline: if the screen matches `submittedPattern` before the paste,
+   nothing is pasted, because no false-to-true transition could be attributed to this prompt;
+2. pastes once, taking the output-count baseline **before** `SendPaste`;
+3. requires landing evidence before any `CR`: the collapsed chip (`pastePendingPattern`), or — for
+   a short, non-collapsed prompt — output since the paste followed by `PasteQuietPeriodMs` of
+   quiet. If neither appears within `PasteSettleTimeoutMs`, **no** `CR` is written: silence is also
+   what a paste still on its way looks like;
+4. waits `SubmitAfterPasteLandedMs` instead of probing Claude's post-paste handling with Enters;
+5. writes **exactly one** `CR` — and none at all if the screen already matches `submittedPattern`,
+   e.g. because the prompt's own text says so — and accepts nothing but `submittedPattern`
+   appearing within `SubmittedVerifyTimeoutMs` as proof of submission;
+6. otherwise shows the neutral warning *"Das automatische Absenden des Prompts konnte nicht
+   bestätigt werden. Bitte im Terminal prüfen; falls der Prompt noch im Eingabefeld steht, einmal
+   Enter drücken."* It never writes a second `CR` and never re-pastes: either could duplicate or
+   corrupt a prompt that was in fact submitted.
+
+Every wait on that path observes 'Task abschliessen': a raised signal ends the prompt step at once,
+without a warning and without a later `CR`. The warning belongs to its session and is cleared when
+the session ends, whichever way it ends.
+
+| Key | Shipped | Used by |
+|-----|---------|---------|
+| `pasteQuietPeriodMs` | 800 | both paths: quiet that ends the paste gate / counts as landing for a short prompt |
+| `pasteSettleTimeoutMs` | 30000 | both paths: ceiling on that gate; on the evidence path, the landing cap |
+| `submitVerifyMs` | 1200 | `LegacyOutputActivity`: wait after each `CR` |
+| `maxSubmitAttempts` | 8 | `LegacyOutputActivity`: `CR`s written at most |
+| `pastePendingPattern` | `(?is)(\[Pasted text #\d+\|\[\.\.\.Truncated text #\d+)` | the chip itself; landing evidence only on the evidence path |
+| `submittedPattern` | `(?is)esc to interrupt` | `PositiveEvidence`: the only proof of submission; empty disables the path |
+| `submitAfterPasteLandedMs` | 8000 | `PositiveEvidence`: wait between landing and the one `CR` |
+| `submittedVerifyTimeoutMs` | 10000 | `PositiveEvidence`: how long to look for `submittedPattern` |
 
 **The delayed submit is bound to the session that received the paste.** `SendPaste` returns a
 `Task` that the orchestrator awaits, and the delay is cancelled when the session it targeted is
@@ -548,25 +616,52 @@ would then land in a fresh launcher — accepting whatever option it has presele
 ### 7.1 Phase model
 
 ```csharp
-public enum WorkflowPhase { Specification = 0, Review = 1, ResolveReview = 2, Implementation = 3 }
-public enum PhaseStatus  { Pending, Active, Completed }
+public enum WorkflowPhase { Specification = 0, Simplifier = 1, Review = 2, ResolveReview = 3, Implementation = 4 }
+public enum PhaseStatus  { Pending, Active, Completed, Skipped }
 ```
 
-`PhaseDefinition` is an immutable record describing one phase; the four instances live in a
-static `PhaseCatalog`:
+`PhaseDefinition` is an immutable record describing one phase; the five instances live in a
+static `PhaseCatalog`, in this order:
 
-| Phase           | `DisplayName`     | `Launcher`      | `PromptFile`                 | `Completion`        |
-|-----------------|-------------------|-----------------|------------------------------|---------------------|
-| Specification   | Spezifikation     | `yo`            | `initial_prompt.md`          | `FilesExist(spec, plan)` |
-| Review          | Review            | `codex --yolo`  | `review_prompt.md`           | `FilesExist(review)`     |
-| ResolveReview   | Review umsetzen   | `yo`            | `resolve_review_prompt.md`   | `AnyContentChanged(spec, plan)` |
-| Implementation  | Implementierung   | `yo`            | `implementation_prompt.md`   | `Manual`                 |
+| Phase           | `DisplayName`     | `Launcher`      | `PromptFile`                 | `Completion`                    | Submission             |
+|-----------------|-------------------|-----------------|------------------------------|---------------------------------|------------------------|
+| Specification   | Spezifikation     | `yo`            | `initial_prompt.md`          | `FilesExist(spec, plan)`        | `PositiveEvidence`     |
+| Simplifier      | Vereinfachen      | `yo`            | `simplifier_prompt.md`       | `FilesExist(simplified)`        | `PositiveEvidence`     |
+| Review          | Review            | `codex --yolo`  | `review_prompt.md`           | `FilesExist(review)`            | `LegacyOutputActivity` |
+| ResolveReview   | Review umsetzen   | `yo`            | `resolve_review_prompt.md`   | `AnyContentChanged(spec, plan)` | `PositiveEvidence`     |
+| Implementation  | Implementierung   | `yo`            | `implementation_prompt.md`   | `Manual`                        | `PositiveEvidence`     |
+
+### 7.1a Vereinfachen (`Simplifier`)
+
+- **Purpose.** Runs right after Spezifikation and before Review. It cuts an over-built spec and
+  plan down to the smallest design that still solves the task, editing `{spec_path}` and
+  `{plan_path}` **in place** — the Review then critiques the simplified documents.
+- **Completion marker.** The simplifier writes its report `{simplified_path}`
+  (`W\N\N-simplified.md`) as its **last** action. Because spec and plan are rewritten over many
+  writes, their hashes cannot say when it is finished; the report's existence (`FilesExist`) can.
+- **Stale marker.** Before the phase starts, a report left over from an earlier run is deleted,
+  exactly like the implementation's done marker, so an old report never completes the phase
+  instantly. Unlike the done marker, a report that cannot be deleted (read-only or held open)
+  stops the run before the session starts, with a message naming the file; Vereinfachen stays
+  *Active*, so *Continue workflow* retries once the file is released.
+- **Journal.** `.workflow-state.json` holds five phase entries in catalogue order. A journal
+  written before this phase existed has no `Simplifier` entry; loading normalises it to five, the
+  missing one `Pending`, and the reconciliation below then decides it.
+- **Reconciliation (resume / *Task laden*).** The report on disk proves Vereinfachen
+  `Completed`. Without the report, but with Review already done in the journal or provable on
+  disk (`{review_path}`), Vereinfachen is recorded `Skipped` — this covers a journal written before
+  the phase existed and a journal-less folder whose review is already there; running the
+  simplifier there would rewrite reviewed documents and reset every later phase. Otherwise the
+  task resumes at Vereinfachen (e.g. a folder holding only spec and plan).
+- ***Implementierung beginnen*** skips Vereinfachen together with Review and Review umsetzen
+  (each recorded `Skipped` unless already completed).
 
 ### 7.2 Per-phase sequence (`WorkflowOrchestrator.RunPhaseAsync`)
 
 1. Raise `PhaseChanged(phase, Active)`.
 2. Snapshot completion state: for `ResolveReview`, compute and store SHA-256 of `spec_path` and
-   `plan_path` *before* anything runs.
+   `plan_path` *before* anything runs. For `Simplifier` (and `Implementation`), first delete a
+   stale completion marker (`{simplified_path}` / the done file) from an earlier run (§7.1a).
 3. **Await terminal readiness** (§6.4): the WebView2 has navigated *and* `terminal.js` has sent
    `ready`. Then create a fresh `ITerminalSession` and start `pwsh.exe -NoLogo -NoExit`
    (fall back to `powershell.exe -NoLogo -NoExit` if `pwsh.exe` is absent), working directory =
@@ -582,7 +677,8 @@ static `PhaseCatalog`:
    may still read it. It is disposed when the *next* phase's session starts, when the tab closes,
    or at application exit.
 
-Phases 1→2→3→4 chain automatically. Phase 4 ends only on *Task abschliessen*.
+Spezifikation → Vereinfachen → Review → Review umsetzen → Implementierung chain automatically.
+Implementierung ends only on *Task abschliessen*.
 
 ### 7.3 Settle-and-answer loop
 
@@ -619,15 +715,24 @@ Two concrete requirements:
 - Gate A is itself bounded by `SettleTimeoutMs`; if the launcher never draws, the loop falls
   through to the timeout path below.
 
-**Exit on first non-match is correct and deliberate.** Once the screen is genuinely quiet and no
-rule matches, the launcher is at its input prompt and the prompt is sent immediately. The loop
-does **not** wait out `SettleTimeoutMs` in that case: doing so would add a minute to *every*
-phase of *every* task, which is the normal path, not the exceptional one.
+**Gate C — observed launcher readiness (revised 2026-09-15, supersedes the old D13
+"exit on first non-match").** A quiet screen with no matching rule is *not* proof the launcher is
+ready. `yo` runs `pwsh` → `yo.bat` → `claude`, and Node's cold start opens a quiet window of a
+second or more during which the screen still shows the shell prompt with `yo` typed on it. The
+old rule ("quiet + no match ⇒ ready, paste now") pasted the prompt into that gap: it landed in
+the shell, or in Claude before its input was listening, and was lost — so the Enter that followed
+had nothing to submit. This was observed live on 2026-09-15 and is the cause of the "prompt not
+sent" defect.
 
-`SettleTimeoutMs` (default 60 000) is therefore a **ceiling on the whole loop**, reached only
-when Gate A never opens or when rules keep matching. On reaching it the loop exits and the prompt
-is sent anyway; the user can always intervene by typing. §12.3 and V7 are written against this
-reading.
+The loop therefore proceeds to paste only when, in addition to quiet + no-match, the rendered
+screen matches `readyPattern` — a regex identifying the launcher's own input being up (Claude
+Code: `? for shortcuts`, `shift+tab to cycle`, `esc to interrupt`). Until then it keeps waiting.
+When no `readyPattern` is configured, `IsLauncherReady` returns true and the old behaviour stands.
+
+`SettleTimeoutMs` (default 60 000) is the **ceiling on the whole loop**, reached only when Gate A
+never opens, the ready marker never appears, or rules keep matching. On reaching it the loop exits
+and the prompt is sent anyway; the user can always intervene by typing. §12.3 and V7 are written
+against this reading.
 
 Each rule fires **at most once per phase** (tracked by `Id`), which prevents an infinite
 answer/redraw cycle when a rule's pattern remains visible on screen after being answered.
@@ -652,8 +757,14 @@ notice, the rules are **data, not code**.
     {
       "id": "claude-bypass-permissions",
       "pattern": "(?is)bypass permissions mode",
-      "send": "2\r",
-      "description": "claude --dangerously-skip-permissions warning; option 2 = 'Yes, I accept'. Default selection is 'No, exit', so Enter alone is wrong."
+      "send": "\e[B\r",
+      "description": "claude --dangerously-skip-permissions warning; 'No, exit' is preselected, 'Yes, I accept' is the row below. Arrow-Down then Enter; Enter alone is wrong, the digit hotkey proved unreliable."
+    },
+    {
+      "id": "claude-trust-folder-safety-check",
+      "pattern": "(?is)(quick safety check|is this a project you created or one you trust|yes, i trust this folder)",
+      "send": "\e[B",
+      "description": "Claude Code 2.1.x trust dialog ('Quick safety check ...'); 'No, exit' is preselected, 'Yes, I trust this folder' is the row below. Arrow-Down then Enter. Observed live 2026-09-15: this, not the bypass warning (skipped via skipDangerousModePermissionPrompt), was the dialog that kept exiting Claude."
     },
     {
       "id": "claude-trust-folder",
@@ -710,7 +821,7 @@ outcomes, and `AnyContentChanged` treats them differently:
 | `Unreadable` | `IOException` / `UnauthorizedAccessException` — another process holds the file. | **Never** reports a change. The path is retried on the next poll. |
 
 Collapsing `Unreadable` into `null` and comparing it with a non-null baseline reports a content
-change for a file whose bytes have not moved. During phase 3 the spec and the plan are exactly
+change for a file whose bytes have not moved. During Review umsetzen the spec and the plan are exactly
 the files an editor or the running CLI is most likely to have open, so this would advance the
 workflow on a transient lock. Baselines captured as `Unreadable` are re-captured on the first
 poll that succeeds, so a lock held at phase start does not permanently arm the watcher either.
@@ -745,9 +856,11 @@ Given `WorkingDirectory = W` and `TaskName = N`:
 | `SpecAbsolute`         | `W\N\N_spec.md`                   | artefact watching                |
 | `PlanAbsolute`         | `W\N\N_plan.md`                   | artefact watching                |
 | `ReviewAbsolute`       | `W\N\N-review.md`                 | artefact watching                |
+| `SimplifiedAbsolute`   | `W\N\N-simplified.md`             | artefact watching (Vereinfachen) |
 | `SpecRelative`         | `./N/N_spec.md`                   | `{spec_path}` in prompts         |
 | `PlanRelative`         | `./N/N_plan.md`                   | `{plan_path}` in prompts         |
 | `ReviewRelative`       | `./N/N-review.md`                 | `{review_path}` in prompts       |
+| `SimplifiedRelative`   | `./N/N-simplified.md`             | `{simplified_path}` in prompts   |
 
 Relative forms use forward slashes and a leading `./`, matching the notation in the requirement
 and in `review_prompt.md`. They are relative to `W`, which is where the CLI runs after `cd`.
@@ -796,11 +909,11 @@ folder is created for an invalid name.
   and the user has no way to tell which is authoritative.
 - If `W\N` already exists, it is **reused, not overwritten**, and an informational message is
   shown ("Ordner existiert bereits und wird weiterverwendet"). Prior artefacts in it may cause
-  phase 1 to complete instantly; that is acceptable and visible.
+  Spezifikation to complete instantly; that is acceptable and visible.
 
 ### 8.4 Name is locked after *Start workflow*
 
-Once phase 1 starts, `TaskName` becomes read-only and no further folder rename is attempted.
+Once Spezifikation starts, `TaskName` becomes read-only and no further folder rename is attempted.
 
 Rationale: the running `pwsh` has its current directory inside `W` and `yo` may have opened
 files inside `W\N`; `Directory.Move` would throw `IOException` (`ERROR_SHARING_VIOLATION`).
@@ -832,6 +945,8 @@ displaying the locked name for the rest of the run.
 | `{spec_path}`        | `TaskPaths.SpecRelative`                     |
 | `{plan_path}`        | `TaskPaths.PlanRelative`                     |
 | `{review_path}`      | `TaskPaths.ReviewRelative`                   |
+| `{simplified_path}`  | `TaskPaths.SimplifiedRelative`               |
+| `{done_path}`        | `TaskPaths.DoneRelative`                     |
 
 Any token outside this set is an error.
 
@@ -848,7 +963,7 @@ than worked around. Only the *remaining delta* is applied — a wholesale overwr
 working content that is newer than this document.
 
 **(a) `resolve_review_prompt.md` — RESOLVED ON DISK, one addition still required.**
-The file is no longer 0 bytes. It contains a usable phase-3 prompt that opens with the three
+The file is no longer 0 bytes. It contains a usable Review umsetzen prompt that opens with the three
 artefact paths and requires the resolver to verify each finding against the repository and
 classify it valid / partially valid / invalid. **That content is kept as is** — it is better than
 the version this specification originally proposed, because repository verification and
@@ -861,7 +976,7 @@ Both {spec_path} and {plan_path} must be written to, even if only to append a sh
 `## Review resolution` note recording that no change was required.
 ```
 
-> This paragraph is load-bearing, not politeness: phase 3 completes on a **content change** to
+> This paragraph is load-bearing, not politeness: Review umsetzen completes on a **content change** to
 > spec or plan (§7.5). The file as it stands ends by asking for a *report* of what was rejected —
 > a run in which every finding is rejected therefore writes nothing, and the phase never
 > advances. The manual *Phase abschliessen* button (§10.6) is the backstop, but the guarantee
@@ -892,7 +1007,7 @@ Under `Completion requires:` the file lists:
 ```
 
 This directly contradicts §14 and §3.2, which declare QDocImport eval gates **out of scope** for
-this application. Left in place, phase 4 instructs the implementation agent to modify a separate,
+this application. Left in place, Implementierung instructs the implementation agent to modify a separate,
 regulated .NET Framework product that shares nothing with Workflow — and the agent cannot report
 completion without doing so, or without silently ignoring a stated completion requirement.
 
@@ -913,7 +1028,7 @@ future regression in either direction is caught by the build rather than by a st
 
 ### 9.4 Startup validation gate
 
-At application start, `PromptTemplateService.ValidateAll()` verifies that all four files exist,
+At application start, `PromptTemplateService.ValidateAll()` verifies that every phase's prompt file exists,
 are non-empty, and contain only tokens from §9.2. Failure shows a blocking German error dialog
 naming the file and the offending token, and disables *Start workflow* on every tab. This turns
 §4.5's silent runtime `FileNotFoundException` into an actionable message.
@@ -980,7 +1095,8 @@ frame around a dark console. The xterm theme in `terminal.js` is set to match
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-- Minimum size 1100 × 760. Below that the 30 %/70 % split stops being usable.
+- Minimum size 1100 × 760. Below that the form, capped at half the tab, has to scroll too far to
+  stay usable.
 - The ArmFlex icon is a `materialDesign:PackIcon Kind="ArmFlex"` at 56 × 56, placed in a `Grid`
   overlay with `HorizontalAlignment="Right" VerticalAlignment="Top"` inside the content area
   (not in `RightWindowCommands`, which is size-constrained by the title bar).
@@ -999,8 +1115,17 @@ Design: a plain `TabControl` with a custom `ControlTemplate` whose header row is
 containing `<TabPanel IsItemsHost="True"/>` docked left and the `+` `Button` docked left after
 it. MahApps look is preserved by styling the items with `MahApps.Styles.TabItem` (verified
 present) plus `mah:TabControlHelper.CloseButtonEnabled` and `mah:TabControlHelper.CloseTabCommand`
-(both verified present). The content host is wrapped in `mah:TransitioningContentControl`
-(verified present) so the animated content transition of the MahApps tab control is retained.
+(both verified present).
+
+**The content host is NOT a single `ContentPresenter`/`TransitioningContentControl`** (revised
+2026-09-15). A single selected-content host reuses one `TaskTabView`, and therefore ONE WebView2,
+for every tab: switching tabs only swaps the `DataContext`, `Loaded` never fires for the newly
+shown tab, its `TerminalViewModel` is never attached and the terminal area stays blank - observed
+as soon as two tabs existed at startup (recovered tasks). Instead the template hosts an
+`ItemsControl` over `ItemsSource` with a `Grid` panel and `ItemTemplate="{TemplateBinding
+ContentTemplate}"`; every tab's view stays alive and only the one whose
+`TaskTabViewModel.IsSelected` is true is visible (`MainWindowViewModel.OnSelectedTabChanged`
+keeps the flag in sync). The animated MahApps content transition is given up for this.
 
 Trade-off, accepted: a hand-written `ControlTemplate` for the TabControl shell. Rejected
 alternatives — a sentinel "+" `TabItem` (breaks `ItemsSource` binding and needs selection
@@ -1038,68 +1163,73 @@ Tab header template: `TextBlock` bound to `TaskTabViewModel.Header`, which is
 `string.IsNullOrWhiteSpace(TaskName) ? "(Bezeichnung)" : TaskName` — implemented as a
 `[NotifyPropertyChangedFor(nameof(Header))]` on `TaskName`.
 
-### 10.4 `TaskTabView` — the 30 / 70 split
+### 10.4 `TaskTabView` — form sized to content, terminal fills the rest
 
-`Grid` with `RowDefinitions = "0.3*, 0.7*"`, exactly as required.
+`Grid` with `RowDefinitions = "Auto, *"`. The form's content has a fixed height, so any fixed
+ratio fits one window height only: on a larger window the form row outgrew its content and left
+an empty band above the terminal. The form therefore takes the height it needs, and the terminal
+everything below it. `TaskTabView.xaml.cs` caps the form at half the tab on every `SizeChanged`;
+beyond that its fields scroll, so the terminal always keeps at least 50 %.
 
-**Row 0 (30 %)** is a `ScrollViewer` (`VerticalScrollBarVisibility="Auto"`) wrapping a
-`StackPanel`. The scroller is necessary, not decorative: the required contents are ≈ 470 px tall
-while 30 % of the minimum window height is ≈ 228 px.
+**Row 0 (the form)** is a `DockPanel`. The action bar is docked to its bottom, outside the
+scroller, so Start, the phase state and *Task abschliessen* stay visible when the fields scroll.
+Above it, a `ScrollViewer` (`VerticalScrollBarVisibility="Auto"`) holds a `Grid` with the columns
+`*`, `16`, `2*`. All inputs use the outlined Material Design styles.
 
-| Order | Control | Details |
+| Position | Control | Details |
 |---|---|---|
-| 1 | `TextBox` | Header/hint `Task`. `Style="{StaticResource MaterialDesignOutlinedTextBox}"`, `materialDesign:HintAssist.Hint="Task"`. Two-way bound to `TaskName`, `UpdateSourceTrigger=PropertyChanged`. `IsReadOnly="{Binding IsNameLocked}"`. |
-| 2 | `RichTextBox` | `Height="200"`, `VerticalScrollBarVisibility="Auto"`, `AcceptsReturn="True"`. Bound to `TaskDescription` via `Behaviors\RichTextBoxAssist.PlainText` (§10.5). |
-| 3 | `ComboBox` + `Button` | ComboBox `ItemsSource="{Binding RecentDirectories}"`, `SelectedItem="{Binding WorkingDirectory}"`, hint `Arbeitsverzeichnis`. Button `PackIcon Kind="FolderOpen"`, `MaterialDesignIconButton`, opens the picker. |
-| 4 | `Button` | `Start workflow`, `MaterialDesignRaisedButton`, `PackIcon Kind="Play"`. `CanExecute` = name valid **and** directory selected **and** phase is Idle. |
-| 5 | `ItemsControl` | Four `PhaseIndicatorView`s, horizontal. |
-| 6 | `Button` | `Task abschliessen`, enabled only while phase 4 is Active. |
+| Row 1, left | `TextBox` | Header/hint `Task`. `Style="{StaticResource MaterialDesignOutlinedTextBox}"`, `materialDesign:HintAssist.Hint="Task"`. Two-way bound to `TaskName`, `UpdateSourceTrigger=PropertyChanged`. `IsReadOnly="{Binding IsNameLocked}"`. |
+| Row 1, right | `ComboBox` + `Button` | `MaterialDesignOutlinedComboBox`, `ItemsSource="{Binding RecentDirectories}"`, `SelectedItem="{Binding WorkingDirectory}"`, hint `Arbeitsverzeichnis`. Button `PackIcon Kind="FolderOpen"`, `MaterialDesignIconButton`, opens the picker. |
+| Row 2, right | `ComboBox` + `Button` | `Workflow-Verzeichnis`, the same structure directly beneath the Arbeitsverzeichnis, shown only in subtask mode; its error message follows it. |
+| Row 3 | status line | `ValidationMessage`, `InfoMessage` and `LauncherStatusMessage` side by side on **one line of fixed height**. Each is cut off with an ellipsis, carries its full text as a tooltip, and collapses while empty. The height is fixed because the launcher status arrives while a session starts and the folder info stays up for the whole run: a line that grew or shrank would resize the terminal, and with it the PTY, just as the agent draws its screen. |
+| Row 4 | `TextBox` + `Button` | Full width. TextBox `MaterialDesignOutlinedTextBox`, hint `Taskbeschreibung`, `AcceptsReturn="True"`, `TextWrapping="Wrap"`, `MinLines="1"`, `MaxLines="10"`, no `Height`. Two-way bound to `TaskDescription`, `UpdateSourceTrigger=PropertyChanged`. Button `PackIcon Kind="ContentCopy"`, `MaterialDesignIconButton`, copies the whole text (§10.5). |
+| Action bar, left | `Button` | `Start workflow`, `MaterialDesignRaisedButton`, `PackIcon Kind="Play"`. `CanExecute` = name valid **and** directory selected **and** phase is Idle. |
+| Action bar, middle | `ItemsControl` + subtask controls | Five `PhaseIndicatorView`s, horizontal, followed by the `Subtasks` checkbox and the subtask indicator; they wrap together on a narrow window. |
+| Action bar, right | `Button` | `Task abschliessen`, enabled only while Implementierung is Active. |
 
-**Row 1 (70 %)** is `TerminalView`: a `Grid` with `RowDefinitions="*,Auto"` — `WebView2` fills the
+A resize the user causes (ticking Subtasks, typing further lines of description) may change the
+form's height, and so the terminal's; a message arriving by itself may not.
+
+**Row 1 (the terminal)** is `TerminalView`, set inside the gold terminal frame (`TerminalFrameStyle`, `Workflow/Styles/TerminalFrameStyles.xaml`; design: `workflow_border/workflow_border_spec.md`) with 8 px of padding
+in the xterm background colour: a `Grid` with `RowDefinitions="*,Auto"` — `WebView2` fills the
 star row; a `DockPanel` beneath holds a single-line `TextBox` (hint
 `Eingabe an das Terminal … (Enter zum Senden)`) and a send `Button`. Enter in the TextBox, or the
 button, writes the text plus `CR` to the PTY and clears the box. This satisfies the explicit
 requirement for an *Eingabefeld*; typing directly into the terminal surface also works.
 
-### 10.5 `RichTextBoxAssist.PlainText`
+### 10.5 Taskbeschreibung field
 
-`RichTextBox` has no bindable `Text` dependency property. A small attached property provides
-two-way binding between the `FlowDocument` and a plain `string`, with a re-entrancy guard.
+A multi-line `TextBox`, bound straight to `TaskDescription`. The requirement asks for a *rich
+textfield*, but the prompt consumes plain text only, and a WPF `TextBox` already accepts nothing
+but Unicode text on paste — a paste from Word, Notion or a browser arrives clean. An earlier
+revision used a `RichTextBox` with a plain-text attached property for exactly that reason; it
+bought nothing and is gone (D9).
 
-Two mechanics are load-bearing and are easy to get wrong:
-
-1. **`TextChanged` is wired independently of any value change.** A dependency-property changed
-   callback only runs when the *effective value changes*. The common case — a fresh tab whose
-   `TaskDescription` is `""` — binds the property to the same value as its default, so the
-   callback never fires. If the handler is attached only from inside that callback, the
-   document→source direction is never wired and everything the user types is silently dropped,
-   leaving phase 1 to render `initial_prompt.md` with an empty `{taskbeschreibung}`. The handler
-   is therefore attached from the property's `OnAttached`/coerce path, or from the control's
-   `Loaded`, so it exists regardless of the initial value.
-2. **The source is updated through the binding, not over it.** The reverse direction writes with
-   `SetCurrentValue` (or `BindingOperations.GetBindingExpression(...)?.UpdateSource()`), never
-   `SetValue`. `SetValue` sets a *local* value, which outranks a binding and silently detaches a
-   one-way binding; `SetCurrentValue` changes the effective value while leaving the binding in
-   place, which is exactly the intent here.
-
-The round-trip is covered by a test that binds a real view-model property two-way, starts from
-`""`, simulates typing, and asserts the view model received the text (§13).
-
-The requirement asks for a *rich textfield*. The prompt consumes plain text only, so formatting
-is discarded at the boundary — but `RichTextBox` is still the right control: it tolerates a
-paste from Word/Notion/a browser (the overwhelmingly common way a task description arrives)
-without dumping markup into the prompt, which a plain `TextBox` would not. Cost is roughly
-40 lines and it is directly unit-testable.
+- **Height follows the text.** `MinLines="1"`, `MaxLines="10"` and no `Height`: an empty box is
+  one line tall, each line of text adds one, and from the eleventh line on the box scrolls
+  internally. `MinLines`/`MaxLines` are ignored while a `Height` is set.
+- **Readable.** `FontSize="14"` and `CaretBrush="{DynamicResource MaterialDesignBody}"`; the
+  default caret is dark and disappears on the dark theme.
+- **Copy button.** Right of the box, the same row pattern as the Arbeitsverzeichnis picker. It
+  copies the whole text to the clipboard and shows a check mark for 1.5 s; it is disabled while
+  the box is empty. This is a view concern, so it lives in `TaskTabView.xaml.cs`, not the view
+  model.
+- The text round-trips verbatim, trailing line breaks included.
 
 ### 10.6 Phase indicators
 
-Four pills, left to right: `Spezifikation`, `Review`, `Review umsetzen`, `Implementierung`.
+Five pills, left to right: `Spezifikation`, `Vereinfachen`, `Review`, `Review umsetzen`,
+`Implementierung`.
 
 | `PhaseStatus` | Colour               | `PackIconKind`  |
 |---------------|----------------------|-----------------|
 | `Pending`     | `#9E9E9E` grey       | `CircleOutline` |
 | `Active`      | `#FBC02D` yellow     | `ProgressClock` |
 | `Completed`   | `#43A047` green      | `CheckCircle`   |
+| `Skipped`     | `#607D8B` blue-grey  | `SkipNextCircle` |
+
+`Skipped` marks a phase passed without running: Vereinfachen, Review and Review umsetzen after
+*Implementierung beginnen*, or Vereinfachen on a task whose review predates it (§7.1a).
 
 Implemented with `PhaseStatusToBrushConverter` and `PhaseStatusToIconKindConverter`
 (`IValueConverter`). Both converters are nullable-annotated (`object? value`, `object? parameter`,
@@ -1181,9 +1311,9 @@ This is where the design is most exposed, so each stall has a named exit.
 | Stall | Cause | Exit |
 |---|---|---|
 | Auto-answer never matches | Upstream CLI changed its wording | The launcher renders (Gate A), the screen goes quiet, no rule matches, and the prompt is sent on that first quiet snapshot — **not** after 60 s. `settleTimeoutMs` is the ceiling for the case where the launcher never renders at all. Either way the prompt is sent and the terminal stays typeable, so the user can answer by hand. Rules are editable in `%APPDATA%` without a rebuild (§7.4). |
-| Auto-answer answers *No* | A rule sends `\r` where the affirmative is not preselected | The default rule set sends `2` explicitly for the `yo` bypass warning. Documented in each rule's `description`. |
-| Phase 3 never completes | Model resolved everything by rejection and wrote nothing | `resolve_review_prompt.md` mandates a `## Review resolution` note (§9.3a); plus *Phase abschliessen* (§10.6). |
-| Phase 1/2 completes instantly | Artefacts left over from a previous run in a reused folder | Visible in the indicators; the user can delete the folder. Accepted — auto-deleting a user's directory is worse. |
+| Auto-answer answers *No* | A rule sends `\r` where the affirmative is not preselected | The default rule set sends Arrow-Down then Enter (`\e[B\r`) for the `yo` bypass warning, one key press per write. Documented in each rule's `description`. |
+| Review umsetzen never completes | Model resolved everything by rejection and wrote nothing | `resolve_review_prompt.md` mandates a `## Review resolution` note (§9.3a); plus *Phase abschliessen* (§10.6). |
+| Spezifikation / Review completes instantly | Artefacts left over from a previous run in a reused folder | Visible in the indicators; the user can delete the folder. Accepted — auto-deleting a user's directory is worse. |
 | Prompt submitted early | A raw newline inside the prompt body | Bracketed paste (§6.5) with newlines normalised to CR. |
 | Prompt sent into an unrendered screen | `LastOutputUtc` seeded to `DateTimeOffset.MinValue`, so the first iteration thinks the terminal is quiet | Gate A in §7.3: `StartSession` resets `LastOutputUtc`, and the loop requires output *and* a non-empty snapshot after the launcher command before evaluating quietness. |
 | Submit `CR` lands in the next phase | `SendPaste` fires a detached 150 ms timer while the orchestrator advances on a pre-existing artefact (§8.3) | The paste, including its submit, is awaited and scoped to the session that received it (§6.5). |
@@ -1192,9 +1322,9 @@ This is where the design is most exposed, so each stall has a named exit.
 
 - One PTY, one child process tree, and one WebView2 per tab. Closing a tab must run the §6.3
   shutdown sequence; otherwise `pwsh` and `node` (Claude Code) survive as orphans.
-- **Disposal is bound to tab removal and application exit — never to `Unloaded`.** A `TabControl`
-  hosts the selected item in a single content host, so selecting a different tab unloads the
-  previous tab's visual tree. Disposing `TerminalViewModel` from `TerminalView.OnUnloaded` would
+- **Disposal is bound to tab removal and application exit — never to `Unloaded`.** Since the
+  2026-09-15 revision of §10.3 every tab keeps its own view alive, so tab switches no longer
+  unload anything; the rule still stands for the remaining `Unloaded` sources (window close). Disposing `TerminalViewModel` from `TerminalView.OnUnloaded` would
   therefore kill a *running* task's PTY and WebView2 the moment the user looks at another tab,
   and re-selecting it would call `AttachAsync` on a disposed view model. That breaks the core
   promise of F2/F16 — tabs are independent and keep running — for the most ordinary interaction
@@ -1221,8 +1351,8 @@ This is where the design is most exposed, so each stall has a named exit.
 
 ## 13. Testing strategy
 
-`Workflow.Tests` — xUnit, `net8.0-windows`, `UseWPF=true` (needed for the `RichTextBoxAssist`
-and converter tests), added to `Workflow.sln`. xUnit is chosen for consistency with the
+`Workflow.Tests` — xUnit, `net8.0-windows`, `UseWPF=true` (needed for the
+converter tests), added to `Workflow.sln`. xUnit is chosen for consistency with the
 in-house WPF UI-test skill `mp-test/skills/writing-mp-flaui-tests`, which is `IClassFixture`-based.
 
 Everything below the ViewModel layer is deterministic and tested. `ConPtySession` and
@@ -1232,16 +1362,15 @@ would test the mock.
 
 | Suite | Covers |
 |---|---|
-| `PromptTemplateServiceTests` | Substitution of every token; unresolved token throws and names the token; empty file throws; BOM tolerated; CRLF/LF handled; `ValidateAll` accepts the shipped four files. |
+| `PromptTemplateServiceTests` | Substitution of every token; unresolved token throws and names the token; empty file throws; BOM tolerated; CRLF/LF handled; `ValidateAll` accepts the shipped phase prompt files. |
 | `TaskPathsTests` | All six path members for names with spaces and umlauts; relative forms use `./` and forward slashes; `{AppDirectory}` = working directory. |
 | `TaskFolderServiceTests` | Validation matrix (empty, invalid chars, trailing dot/space, `CON`, `COM1`, `lpt3.txt`, > 240 chars); create; rename; case-only rename; reuse of an existing folder. |
 | `ArtifactWatcherTests` | `FilesExist` fires only when all exist and are non-empty; zero-byte file does not fire; `AnyContentChanged` ignores a touch that does not change content; fires on a real edit; fires for a file absent at baseline; debounce collapses a burst. |
 | `AutoAnswerServiceTests` | Loads the shipped JSON; first-match-wins ordering; a rule fires at most once per phase; escape decoding (`\r`, `\e`, `\u0041`); `maxAnswersPerPhase` respected; a malformed regex is reported, not thrown at match time. |
-| `WorkflowOrchestratorTests` | With a fake `ITerminalSession` and fake watcher: the exact write sequence per phase (`cd "…"` → launcher → answers → bracketed-paste prompt); phases chain 1→2→3→4; phase 4 waits for the manual signal; cancellation disposes the session. |
+| `WorkflowOrchestratorTests` | With a fake `ITerminalSession` and fake watcher: the exact write sequence per phase (`cd "…"` → launcher → answers → bracketed-paste prompt); phases chain Spezifikation → Vereinfachen → Review → Review umsetzen → Implementierung; Implementierung waits for the manual signal; cancellation disposes the session. |
 | `SettingsServiceTests` | Round-trip; MRU ordering, de-dup (case-insensitive), 15-item cap; corrupt JSON falls back to defaults; atomic write leaves no `.tmp`. |
 | `ConverterTests` | Both phase converters for all three statuses, plus `null` and `DependencyProperty.UnsetValue`. |
-| `RichTextBoxAssistTests` | Plain-text round-trip; multi-line preserved; no infinite re-entrancy. |
-| `TaskTabViewModelTests` | `Header` falls back to `(Bezeichnung)`; `StartWorkflowCommand.CanExecute` matrix; `IsNameLocked` after start; `CompleteTaskCommand` only in phase 4; **`CanExecute` is `false` while startup errors are present**; **a forced `Directory.Move` failure rolls `TaskName` back to the on-disk name without re-entering the folder sync**; **a throwing orchestrator surfaces each failure family from §12.1 as a message instead of an unobserved task exception**. |
+| `TaskTabViewModelTests` | `Header` falls back to `(Bezeichnung)`; `StartWorkflowCommand.CanExecute` matrix; `IsNameLocked` after start; `CompleteTaskCommand` only in Implementierung; **`CanExecute` is `false` while startup errors are present**; **a forced `Directory.Move` failure rolls `TaskName` back to the on-disk name without re-entering the folder sync**; **a throwing orchestrator surfaces each failure family from §12.1 as a message instead of an unobserved task exception**. |
 | `MainWindowViewModelTests` | Startup errors reach every tab, including one opened with `+` afterwards; `CloseTab` disposes exactly the removed tab; `ShutdownAll` disposes all. |
 
 Additions to the suites above, one per defect this specification now pins down:
@@ -1250,9 +1379,8 @@ Additions to the suites above, one per defect this specification now pins down:
 |---|---|
 | `TaskPathsTests`, `TaskFolderServiceTests`, `SettingsServiceTests` | A drive root (`C:\`) survives normalisation: the task directory is `C:\N`, never `C:N` (§8.1). |
 | `ArtifactWatcherTests` | A file held under an exclusive lock does **not** report a content change; the watcher recovers and fires once the lock is released. Deleting the watched directory fails the watcher instead of polling forever. |
-| `PromptTemplateServiceTests` | The four **shipped** templates are asserted, not just synthetic ones: `resolve_review_prompt.md` contains the `## Review resolution` guarantee; `implementation_prompt.md` contains no `{plan_path}_` and no `qdocimporter` reference; `review_prompt.md` builds its output path from `{review_path}`. |
-| `WorkflowOrchestratorTests` | The prompt is not sent until the fake terminal has reported launcher output *and* a non-empty snapshot; a snapshot that is initially empty and only later shows the bypass warning still gets answered with `2`; the submit `CR` is cancelled when the session is replaced before the delay elapses; a non-matching rule set sends the prompt on the first quiet snapshot (well under `settleTimeoutMs`) rather than waiting out the ceiling. |
-| `RichTextBoxAssistTests` | Binding an **empty** string first (the default value, so no property-changed callback fires) still wires `TextChanged`, and a subsequent edit reaches the source through a real two-way `Binding` to a view model. |
+| `PromptTemplateServiceTests` | The **shipped** phase templates are asserted, not just synthetic ones: `resolve_review_prompt.md` contains the `## Review resolution` guarantee; `implementation_prompt.md` contains no `{plan_path}_` and no `qdocimporter` reference; `review_prompt.md` builds its output path from `{review_path}`. |
+| `WorkflowOrchestratorTests` | The prompt is not sent until the fake terminal has reported launcher output *and* a non-empty snapshot; a snapshot that is initially empty and only later shows the bypass warning still gets answered with Arrow-Down + Enter; the submit `CR` is cancelled when the session is replaced before the delay elapses; a non-matching rule set sends the prompt on the first quiet snapshot (well under `settleTimeoutMs`) rather than waiting out the ceiling. |
 
 ---
 
@@ -1286,7 +1414,7 @@ the outcome" — is honoured locally by the acceptance gates in §15, executed b
 **Declaring it N/A is not enough — the instruction is still live in a shipped file.**
 `Workflow\Prompt\implementation_prompt.md` lists
 `* appropriate eval gates has been added to qdocimporter/eval` under `Completion requires:`.
-That file is rendered and pasted into the phase-4 agent, so as long as the bullet is there, this
+That file is rendered and pasted into the Implementierung agent, so as long as the bullet is there, this
 section's decision is contradicted by the product itself: the agent is told it may not report
 completion until it has modified QDocImport. §9.3(d) therefore replaces the bullet with
 `* the acceptance gate `Workflow\verify.ps1` exits 0`, and a test over the shipped template
@@ -1306,7 +1434,7 @@ decision is enforceable rather than advisory.
 | A3 | `dotnet build` produces no `MVVMTK*` diagnostics. |
 | A4 | No `unsafe` keyword anywhere; `AllowUnsafeBlocks` stays `false`. |
 | A5 | `dotnet test Workflow.sln` — all tests green. |
-| A6 | `bin\Release\net8.0-windows\` contains `Prompt\` with all four `.md` files, `Assets\autoanswer.rules.json`, and `Assets\Terminal\` with all five files. |
+| A6 | `bin\Release\net8.0-windows\` contains `Prompt\` with every phase's `.md` file, `Assets\autoanswer.rules.json`, and `Assets\Terminal\` with all five files. |
 | A7 | **Every task in the implementation plan ends at 0 warnings / 0 errors.** A task that leaves analyzer errors for a later task is not complete. `CA1031` appears **only** as a `#pragma warning disable CA1031` at the PTY read loop and the top-level dispatcher handler — `grep -r "CA1031" Directory.Build.props` returns nothing. |
 | A8 | The shipped prompt templates are asserted by `PromptTemplateServiceTests`, not merely edited once: `implementation_prompt.md` contains no `{plan_path}_` and no case-insensitive match for `qdocimport`; `review_prompt.md` renders its output path from `{review_path}`; `resolve_review_prompt.md` is non-empty and contains `## Review resolution`. |
 | A9 | The ConPTY spike (§6.3.1) has been run and its result recorded in the plan before any `ConPtySession` code is committed. `ConPtySessionTests.Start_RunsACommandAndStreamsItsOutput` passes against a real pseudo-console, and the diagnostic test reports the child's exit code and first-byte latency on failure. |
@@ -1321,20 +1449,20 @@ decision is enforceable rather than advisory.
 | F4 | Typing a task name updates the tab header live and creates `{WorkingDirectory}\{TaskName}` on disk. |
 | F5 | Renaming while idle renames the folder; after *Start workflow* the name field is read-only. |
 | F6 | The directory picker adds the chosen path to the ComboBox, and it is still there after an app restart. |
-| F7 | *Start workflow* opens a live PTY, `cd`s to the selected path, launches `yo`, answers the bypass-permissions prompt with **`2`**, and pastes the rendered `initial_prompt.md`. |
+| F7 | *Start workflow* opens a live PTY, `cd`s to the selected path, launches `yo`, answers the bypass-permissions prompt with **Arrow-Down + Enter**, and pastes the rendered `initial_prompt.md`. |
 | F8 | The user can type into the terminal input field at any time during any phase and the keystrokes reach the CLI. |
-| F9 | When `{spec_path}` and `{plan_path}` both exist and are non-empty, indicator 1 turns green, indicator 2 turns yellow, and a new session runs `codex --yolo`. |
-| F10 | When `{review_path}` appears, indicator 2 turns green and phase 3 starts with `yo`. |
-| F11 | When spec or plan content changes during phase 3, indicator 3 turns green and phase 4 starts with `yo`. |
-| F12 | Phase 4 stays active until *Task abschliessen*. |
-| F13 | After *Task abschliessen*, `{TaskDirectory}` contains `{N}_spec.md`, `{N}_plan.md`, `{N}-review.md`, `findings.md`, `task_plan.md`, `progress.md`. |
-| F14 | Indicators are grey before, yellow during, green after — for all four phases. |
+| F9 | When `{spec_path}` and `{plan_path}` both exist and are non-empty, the Spezifikation indicator turns green, Vereinfachen turns yellow, and a new `yo` session gets `simplifier_prompt.md`; when `{simplified_path}` appears, Vereinfachen turns green, Review turns yellow, and a new session runs `codex --yolo`. |
+| F10 | When `{review_path}` appears, the Review indicator turns green and Review umsetzen starts with `yo`. |
+| F11 | When spec or plan content changes during Review umsetzen, its indicator turns green and Implementierung starts with `yo`. |
+| F12 | Implementierung stays active until *Task abschliessen*. |
+| F13 | After *Task abschliessen*, `{TaskDirectory}` contains `{N}_spec.md`, `{N}_plan.md`, `{N}-simplified.md`, `{N}-review.md`, `findings.md`, `task_plan.md`, `progress.md`. |
+| F14 | Indicators are grey before, yellow during, green after — for every phase. |
 | F15 | *Schließen* exits the application; no `pwsh`, `claude`, `node` or `codex` process survives. |
 | F16 | Closing a single tab kills only that tab's process tree. |
 | F17 | With a deliberately emptied prompt file, startup shows the §9.4 error naming that file, and *Start workflow* is disabled **on every tab, including one opened with `+` after the dialog was dismissed**. |
 | F18 | The window shows a rendered `TaskTabView` after startup — not the string `Workflow.ViewModels.TaskTabViewModel`. The custom `TabControl` template forwards `SelectedContentTemplate` (§10.3). |
 | F19 | With two tabs, both mid-run: selecting tab B and then tab A again leaves **both** PTYs alive and both terminals rendering. No process is killed and no `AttachAsync` runs against a disposed view model. Only closing a tab (or *Schließen*) kills a process tree. |
-| F20 | Phase 1 does not paste its prompt until the launcher has actually rendered. With a launcher that takes 5 s to draw its first frame, the bypass-permissions prompt is still answered with `2` and the prompt still arrives afterwards. |
+| F20 | Spezifikation does not paste its prompt until the launcher has actually rendered. With a launcher that takes 5 s to draw its first frame, the bypass-permissions prompt is still answered with Arrow-Down + Enter and the prompt still arrives afterwards. |
 | F21 | Deleting `{TaskDirectory}` mid-phase surfaces a German error naming the directory and leaves the phase; the indicator does not stay yellow indefinitely. |
 
 ### 15.3 Verification steps (manual, scripted where possible)
@@ -1348,7 +1476,7 @@ decision is enforceable rather than advisory.
    `Select-String '\{[a-zA-Z_]+\}' Prompt\*.md` yields only tokens from §9.2.
 5. **V5** (manual) Launch; create task `demo-task`; pick a scratch directory; run the full
    pipeline; confirm F7–F14 against the live terminal.
-6. **V6** (manual) Kill `claude.exe` externally mid-phase-1; confirm the app stays responsive and
+6. **V6** (manual) Kill `claude.exe` externally mid-Spezifikation; confirm the app stays responsive and
    the phase does not falsely complete.
 7. **V7** (manual) Edit `%APPDATA%\Workflow\autoanswer.rules.json` to a non-matching pattern;
    confirm that **no automatic answer is sent**, that the prompt is pasted once the screen goes
@@ -1375,13 +1503,13 @@ decision is enforceable rather than advisory.
 |---|---|---|---|
 | D1 | ConPTY + xterm.js in WebView2 | In-process C# VT emulator | xterm.js is the VT implementation VS Code ships; writing 1000–1500 lines of emulator for an Ink TUI is a fidelity gamble. WebView2 runtime is already installed. |
 | D2 | Task folder under the selected working directory | Next to `Workflow.exe`; `%APPDATA%` | Matches `cd {pfad}` plus relative `./{task}/` in the prompts; `{AppDirectory}` is defined as the working directory to remove the contradiction. |
-| D3 | Author `resolve_review_prompt.md` in this spec | Let the user supply it | Phase 3 is otherwise undefined. The file also carries the guarantee that makes phase-3 completion detectable. |
+| D3 | Author `resolve_review_prompt.md` in this spec | Let the user supply it | Review umsetzen is otherwise undefined. The file also carries the guarantee that makes its completion detectable. |
 | D4 | Lock the task name after start | Retry-and-roll-back on rename failure | Removes an entire failure class instead of handling it; a running CLI holds the directory. |
 | D5 | Manual composition root | `Microsoft.Extensions.DependencyInjection` | Nine services, one window. Constructor injection alone gives full testability; a container adds a package and indirection for no gain. |
 | D6 | Data-driven auto-answer rules | Hard-coded regexes | Upstream CLI wording changes without notice; a JSON file in `%APPDATA%` fixes a broken pipeline without a rebuild. This is the app's most fragile coupling. |
 | D7 | Bracketed paste for prompt injection | Line-by-line writes | A bare newline submits the partial prompt in an Ink input box. |
 | D8 | `FileSystemWatcher` **plus** 1 s polling | Watcher alone | A dropped event on a OneDrive/network/virtualised path stalls the pipeline permanently; the poll is cheap insurance on the app's critical path. |
-| D9 | `RichTextBox` + plain-text attached property | Multi-line `TextBox` | The requirement says *rich textfield*, and it correctly flattens pasted formatted text — the common input path. ~40 testable lines. |
+| D9 | Multi-line `TextBox` (`MinLines`/`MaxLines`) | `RichTextBox` + plain-text attached property | Revised 2026-09-29. The requirement says *rich textfield*, but the prompt takes plain text, and a WPF `TextBox` pastes plain text only — the RichTextBox's one argument, flattening pasted formatting, was never a difference. The `TextBox` grows line by line natively and needs no binding glue. |
 | D10 | Custom `ControlTemplate` for the TabControl | Sentinel `+` TabItem; overlay button | Only way to put `+` beside the `TabPanel` while keeping `ItemsSource` binding clean. MahApps item styling and `TransitioningContentControl` are retained. |
 | D11 | No persistence of per-task phase state | Resume-on-restart | Not required (§3.2); would add a state-vs-disk consistency problem with no asked-for benefit. |
 | D12 | Instructions 8 and 12 documented as N/A **and the live instruction removed from `implementation_prompt.md`** | Silently dropping them; writing gates into QDocImport; leaving the bullet in place while declaring it N/A | They are template boilerplate; acting on them would couple this app to an unrelated regulated product (§14). A declaration that the shipped prompt still contradicts is not a decision, it is a comment. |

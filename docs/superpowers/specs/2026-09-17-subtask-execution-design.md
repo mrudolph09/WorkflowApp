@@ -1,6 +1,6 @@
 ---
 description: "Canonical Superpowers design specification for the Subtask execution mode of the Workflow WPF app (phase 4 'Implementierung')"
-summary: "Adds an opt-in 'Subtasks' mode to phase 4. When the checkbox next to the Implementierung indicator is ticked, phase 4 stops running implementation_prompt.md and instead (a) runs create_subtasks.md once in a fresh `yo` session to decompose spec+plan into subtask folders inside a separate Workflows tracking repo, then (b) loops run_subtask.md over each subtask in a fresh session, one at a time, in the order given by an ordered list in {workflow_path}/{TaskName}/result.json. Handshake is two files per step: status.json (payload, written first) then a NON-EMPTY result.json (flag, written .tmp+rename). Disk is the only truth - there is no current-subtask index in the journal; recovery re-reads result.json plus every status.json and continues at the first non-complete subtask. Failed subtasks are skipped and counted; Implementation is journalled Completed only when Failed==0, so 'Continue workflow' re-attempts exactly the failures. A second indicator shows '12 von 24' plus a red 'N fehlgeschlagen'. PhaseStatus stays three-valued and the journal schema stays at version 1 (additive fields SubtasksEnabled/WorkflowDirectory). The workflow repo path is persisted globally in settings.json AND copied into the task journal; it is validated by the presence of task_template. The 'Phase abschliessen' button, CompleteCurrentPhaseCommand and PhaseIndicatorViewModel.IsActive are REMOVED - phases now end only on flag files. 'Task abschliessen' stays and additionally closes the tab. No timeouts anywhere. Section 14 carries the exact required corrections to Workflow/Prompt/create_subtasks.md and run_subtask.md (results.json vs result.json, flag at repo root, {tasktitel} vs {taskbezeichnung}, subtask_path absolute-vs-relative, missing status.json in task_template); those files are NOT changed by this design session and the plan carries them as separately marked tasks."
+summary: "Adds an opt-in 'Subtasks' mode to phase 4. When the checkbox next to the Implementierung indicator is ticked, phase 4 stops running implementation_prompt.md and instead (a) runs create_subtasks.md once in a fresh `yo` session to decompose spec+plan into subtask folders inside a separate Workflows tracking repo, then (b) loops run_subtask.md over each subtask in a fresh session, one at a time, in the order given by an ordered list in {workflow_path}/{TaskName}/result.json. Handshake is two files per step: status.json (payload, written first) then a NON-EMPTY result.json (flag, written .tmp+rename). Disk is the only truth - there is no current-subtask index in the journal; recovery re-reads result.json plus every status.json and continues at the first non-complete subtask. Failed subtasks are skipped and counted; Implementation is journalled Completed only when Failed==0, so 'Continue workflow' re-attempts exactly the failures. A second indicator shows '12 von 24' plus a red 'N fehlgeschlagen'. PhaseStatus stays three-valued and the journal schema stays at version 1 (additive fields SubtasksEnabled/WorkflowDirectory). The workflow repo path is persisted globally in settings.json AND copied into the task journal; it is validated by the presence of task_template. The 'Phase abschliessen' button, CompleteCurrentPhaseCommand and PhaseIndicatorViewModel.IsActive are REMOVED - phases now end only on flag files. 'Task abschliessen' stays and additionally closes the tab. No timeouts anywhere, except the B6 stall watchdog (section 10.8): an unattended session silent for 15 min is nudged, after a second stall killed, and only then does the app write the subtask's failed status itself. Section 14 carries the exact required corrections to Workflow/Prompt/create_subtasks.md and run_subtask.md (results.json vs result.json, flag at repo root, {tasktitel} vs {taskbezeichnung}, subtask_path absolute-vs-relative, missing status.json in task_template); those files are NOT changed by this design session and the plan carries them as separately marked tasks."
 paths:
   - "./specification.md"
   - "./2026-09-14-workflow-resume-design.md"
@@ -772,6 +772,18 @@ Watching them would create additional completion rules that no prompt establishe
 `verification.json` in particular has no writer specified anywhere. Section 15 proposes removing
 it from the template rather than inventing a meaning for it.
 
+### 10.8 Exception: the application writes the status of a stalled session
+
+Normally only the agent writes a subtask's `status.json` and `result.json`; the application only
+reads them. Unattended sessions (decomposition, decision pre-flight, subtask) are watched for silence
+instead (B6): after `StallAfter` (default 15 min) without terminal output the application sends Escape
+and a nudge prompt; after a second `StallAfter` it kills the session and, **for a subtask session
+only**, writes `status.json` (`"status": "failed"`, `"failreason": "stalled: keine Terminalausgabe seit
+N min"`, the other schema fields kept or defaulted) and then the non-empty flag, both by temporary file
+and rename. The order is binding: cancel the session's waits, kill the process tree, let the waits
+settle, and only then write - no agent process may be alive while the application writes, so the two
+writers can never interleave. The ledger then reads the entry as `Failed` like any other failure.
+
 ---
 
 ## 11. User interface
@@ -1328,7 +1340,7 @@ Prerequisite: the section 14 prompt changes and T1 have been applied.
 | D14 | `RunSessionAsync` extracted and used by **all** phases. | Three copies of the settle/paste/submit logic is the defect the refactor prevents; DRY. |
 | D15 | `Phase abschliessen` removed, `ManualPhaseSignal` kept. | User decision. The signal still backs `Task abschliessen` and still ends a run promptly. |
 | D16 | `Task abschliessen` awaits the run before closing the tab. | Closing first cancels the run and leaves the journal `Active`. 12.2. |
-| D17 | No timeouts anywhere. | User decision; the live terminal is the escape hatch. |
+| D17 | No timeouts anywhere - superseded for unattended sessions by the B6 stall watchdog. | User decision; the live terminal is the escape hatch. Unattended runs have nobody to use it, so a silent session is nudged and then killed (10.8). |
 | D18 | The app reads only `result.json`, `status.json` and `subtask.md`. | Every other file would become an undocumented completion rule. 10.7. |
 | D19 | Prompt and `task_template` corrections are proposals carried by the plan, not changes made now. | Explicit instruction for this session. Sections 14 and 15 are the binding target texts. |
 | D20 | Subtask titles are validated as single safe path segments. | The titles come from AI-written JSON and are used to compose paths that the app deletes files from. 5.2. |

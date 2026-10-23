@@ -98,6 +98,9 @@ public static class PhaseReconciliation
         {
             var entry = state.Phases[i];
 
+            // Only a Completed entry claims artefacts. A Skipped one claims none, so it is never
+            // demoted on its own; it falls with the rest when an earlier phase is demoted
+            // (Workflow_LoadFix spec 7.2).
             if (!demoteFromHere
                 && entry.Status == PhaseStatus.Completed
                 && !ArtefactsPresent(paths, state, entry.Phase))
@@ -118,7 +121,8 @@ public static class PhaseReconciliation
 
     /// <summary>
     /// Walks the phases in catalogue order and promotes each one that is not completed but whose
-    /// completion condition holds on disk, stopping at the first that cannot be proven.
+    /// completion condition holds on disk, stopping at the first that cannot be proven. A simplifier
+    /// without its report is passed as skipped when the review behind it is already done.
     /// </summary>
     /// <param name="paths">The task's path set.</param>
     /// <param name="state">The journal, already demoted where the disk demands it.</param>
@@ -137,24 +141,59 @@ public static class PhaseReconciliation
         {
             var entry = state.Phases[i];
 
-            if (entry.Status == PhaseStatus.Completed)
+            // A skipped phase is passed like a completed one, and its skip time becomes the baseline:
+            // evidence written before the user skipped ahead is not this cycle's. A null stamp - a
+            // hand edit - keeps the previous baseline instead of erasing it (Workflow_LoadFix 7.2).
+            if (IsDone(entry.Status))
             {
-                baseline = entry.CompletedUtc;
+                baseline = entry.CompletedUtc ?? baseline;
                 continue;
             }
 
-            if (!TrySatisfiedSince(paths, state, entry.Phase, baseline, out var since))
+            if (TrySatisfiedSince(paths, state, entry.Phase, baseline, out var since))
+            {
+                state.Phases[i] = new TaskPhaseState(entry.Phase, PhaseStatus.Completed, since);
+                baseline = since;
+                promoted = true;
+                continue;
+            }
+
+            if (!IsSimplifierBehindReview(paths, state, entry.Phase, baseline))
             {
                 return promoted;
             }
 
-            state.Phases[i] = new TaskPhaseState(entry.Phase, PhaseStatus.Completed, since);
-            baseline = since;
+            // Passed, not run: the baseline stays the previous phase's, so the review is judged
+            // exactly as it would have been without the simplifier.
+            state.Phases[i] = new TaskPhaseState(entry.Phase, PhaseStatus.Skipped, baseline);
             promoted = true;
         }
 
         return promoted;
     }
+
+    /// <summary>
+    /// Decides whether a simplifier without its report lies behind a review that is already done
+    /// in the journal or proven on disk.
+    /// </summary>
+    /// <param name="paths">The task's path set.</param>
+    /// <param name="state">The journal.</param>
+    /// <param name="phase">The phase the promotion walk stopped at.</param>
+    /// <param name="baseline">When the previous phase completed, or null when that is unknown.</param>
+    /// <returns>True when the walk should pass the simplifier as skipped.</returns>
+    /// <remarks>
+    /// This is the case of a journal written before the simplifier phase existed, and of a folder
+    /// loaded without any journal whose review is on disk. Running the simplifier there would rewrite
+    /// documents that were already reviewed and reset every later phase, so it is passed instead.
+    /// </remarks>
+    private static bool IsSimplifierBehindReview(
+        TaskPaths paths,
+        TaskState state,
+        WorkflowPhase phase,
+        DateTimeOffset? baseline) =>
+        phase == WorkflowPhase.Simplifier
+        && (IsDone(state.Phases[(int)WorkflowPhase.Review].Status)
+            || TrySatisfiedSince(paths, state, WorkflowPhase.Review, baseline, out _));
 
     /// <summary>
     /// Decides whether one phase's completion condition holds on disk and is not older than the
@@ -168,7 +207,7 @@ public static class PhaseReconciliation
     /// <returns>True when the phase may be promoted.</returns>
     /// <remarks>
     /// Each rule is the one the phase's live watcher applies, so a resume and a live run agree on
-    /// what "done" means. Phase 3 leaves no artefact of its own; its AllContentChanged rule becomes
+    /// what "done" means. ResolveReview leaves no artefact of its own; its AllContentChanged rule becomes
     /// "spec and plan both rewritten after the review". The subtask rule has no single timestamp,
     /// so <paramref name="since"/> stays null there - nothing uses implementation as a baseline.
     /// </remarks>
@@ -188,6 +227,7 @@ public static class PhaseReconciliation
         since = phase switch
         {
             WorkflowPhase.Specification => NotBefore(Latest(WrittenUtc(paths.SpecAbsolute), WrittenUtc(paths.PlanAbsolute)), baseline),
+            WorkflowPhase.Simplifier => NotBefore(WrittenUtc(paths.SimplifiedAbsolute), baseline),
             WorkflowPhase.Review => NotBefore(WrittenUtc(paths.ReviewAbsolute), baseline),
             WorkflowPhase.ResolveReview => RevisedAfterReview(paths, baseline),
             WorkflowPhase.Implementation => NotBefore(WrittenUtc(paths.DoneAbsolute), baseline),
@@ -197,7 +237,7 @@ public static class PhaseReconciliation
         return since is not null;
     }
 
-    /// <summary>Applies phase 3's rule: spec and plan were both written after the review.</summary>
+    /// <summary>Applies Review umsetzen's rule: spec and plan were both written after the review.</summary>
     /// <param name="paths">The task's path set.</param>
     /// <param name="baseline">When the review phase completed, or null when that is unknown.</param>
     /// <returns>The later of the two rewrites, or null when either one predates the review.</returns>
@@ -221,6 +261,12 @@ public static class PhaseReconciliation
 
     private static DateTimeOffset? Latest(DateTimeOffset? first, DateTimeOffset? second) =>
         first is { } a && second is { } b ? (a > b ? a : b) : null;
+
+    /// <summary>A phase no run has to execute again: completed, or skipped by the user.</summary>
+    /// <param name="status">The recorded status.</param>
+    /// <returns>True for <see cref="PhaseStatus.Completed"/> and <see cref="PhaseStatus.Skipped"/>.</returns>
+    public static bool IsDone(PhaseStatus status) =>
+        status is PhaseStatus.Completed or PhaseStatus.Skipped;
 
     /// <summary>When a non-empty artefact was last written.</summary>
     /// <param name="path">The artefact.</param>
@@ -248,16 +294,16 @@ public static class PhaseReconciliation
         }
     }
 
-    /// <summary>The first phase in catalogue order that is not completed.</summary>
+    /// <summary>The first phase in catalogue order that is neither completed nor skipped.</summary>
     /// <param name="state">The journal, already reconciled.</param>
-    /// <returns>That phase, or null when every phase is completed.</returns>
+    /// <returns>That phase, or null when every phase is done.</returns>
     public static WorkflowPhase? FirstIncomplete(TaskState state)
     {
         ArgumentNullException.ThrowIfNull(state);
 
         foreach (var entry in state.Phases)
         {
-            if (entry.Status != PhaseStatus.Completed)
+            if (!IsDone(entry.Status))
             {
                 return entry.Phase;
             }
@@ -343,7 +389,7 @@ public static class PhaseReconciliation
     /// compiler-mandated rather than defensive: <c>WorkflowDirectory</c> is <c>string?</c> and the
     /// constructor's parameter is not. The constructor itself rejects empty and whitespace.
     /// </remarks>
-    private static SubtaskPaths? TryTrackingPaths(TaskPaths paths, TaskState state)
+    internal static SubtaskPaths? TryTrackingPaths(TaskPaths paths, TaskState state)
     {
         var directory = state.WorkflowDirectory;
 
@@ -367,6 +413,7 @@ public static class PhaseReconciliation
     private static bool ArtefactsPresent(TaskPaths paths, TaskState state, WorkflowPhase phase) => phase switch
     {
         WorkflowPhase.Specification => NonEmpty(paths.SpecAbsolute) && NonEmpty(paths.PlanAbsolute),
+        WorkflowPhase.Simplifier => NonEmpty(paths.SimplifiedAbsolute),
         WorkflowPhase.Review => NonEmpty(paths.ReviewAbsolute),
         WorkflowPhase.Implementation => ImplementationPresent(paths, state),
         _ => true,
@@ -380,7 +427,8 @@ public static class PhaseReconciliation
     /// A subtask task never falls back to the normal done-marker: that marker is absent by design
     /// and consulting it would demote a completed task on every restart, contradicting requirement
     /// 4.3. Unavailable evidence keeps the recorded state for the same reason - unreadable is not
-    /// the same as unfinished (requirement 4.6).
+    /// the same as unfinished (requirement 4.6). A normal task closed through <c>Task abschliessen</c>
+    /// has no done-marker either; the explicit override outranks the missing marker there too.
     /// </remarks>
     private static bool ImplementationPresent(TaskPaths paths, TaskState state) =>
         Evaluate(paths, state) switch
@@ -389,7 +437,7 @@ public static class PhaseReconciliation
             SubtaskEvidence.AllComplete => true,
             SubtaskEvidence.Unavailable => true,
             SubtaskEvidence.Incomplete => false,
-            _ => NonEmpty(paths.DoneAbsolute),
+            _ => state.ImplementationCompletedManually || NonEmpty(paths.DoneAbsolute),
         };
 
     private static bool NonEmpty(string path)

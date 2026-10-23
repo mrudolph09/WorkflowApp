@@ -4,11 +4,14 @@
   "settleTimeoutMs": 60000,
   "maxAnswersPerPhase": 5,
   "pasteQuietPeriodMs": 800,
-  "pasteSettleTimeoutMs": 15000,
+  "pasteSettleTimeoutMs": 30000,
   "submitVerifyMs": 1200,
   "maxSubmitAttempts": 8,
   "readyPattern": "(?is)(\\? for shortcuts|shift\\+tab to cycle|esc to interrupt|ask codex to do anything|context \\d+% used)",
-  "pastePendingPattern": "(?is)paste again to expand",
+  "pastePendingPattern": "(?is)(\\[Pasted text #\\d+|\\[\\.\\.\\.Truncated text #\\d+|\\[Pasted Content \\d+ chars\\])",
+  "submittedPattern": "(?is)esc to interrupt",
+  "submitAfterPasteLandedMs": 8000,
+  "submittedVerifyTimeoutMs": 10000,
   "rules": [
     {
       "id": "claude-bypass-permissions",

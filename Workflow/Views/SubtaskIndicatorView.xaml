@@ -30,5 +30,11 @@
                    Text="{Binding FailedText}"
                    Foreground="{DynamicResource MaterialDesignValidationErrorBrush}"
                    Visibility="{Binding HasFailures, Converter={StaticResource BooleanToVisibilityConverter}}" />
+
+        <TextBlock Margin="8,0,0,0"
+                   VerticalAlignment="Center"
+                   Text="{Binding WaitingText}"
+                   Foreground="{Binding Status, Converter={StaticResource PhaseStatusToBrushConverter}}"
+                   Visibility="{Binding HasWaiting, Converter={StaticResource BooleanToVisibilityConverter}}" />
     </StackPanel>
 </UserControl>

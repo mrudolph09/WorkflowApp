@@ -29,6 +29,7 @@ public sealed class PromptVariablesTests
         "spec_path",
         "plan_path",
         "review_path",
+        "simplified_path",
         "done_path",
     ];
 
@@ -38,6 +39,7 @@ public sealed class PromptVariablesTests
         "done_path",
         "plan_path",
         "review_path",
+        "simplified_path",
         "spec_path",
         "subtask_path",
         "task_path",
@@ -53,6 +55,7 @@ public sealed class PromptVariablesTests
         "done_path",
         "plan_path",
         "review_path",
+        "simplified_path",
         "spec_path",
         "subtask",
         "subtask_path",
@@ -64,9 +67,10 @@ public sealed class PromptVariablesTests
         "workflow_path",
     ];
 
-    /// <summary>The four phase prompts whose rendering must not change.</summary>
+    /// <summary>The five phase prompts whose rendering must not change.</summary>
     public static TheoryData<string> ExistingPhasePrompts() => new(
         "initial_prompt.md",
+        "simplifier_prompt.md",
         "review_prompt.md",
         "resolve_review_prompt.md",
         "implementation_prompt.md");
@@ -81,7 +85,7 @@ public sealed class PromptVariablesTests
     // --- Layer 1: the existing base set must stay byte-identical. ---------------------------
 
     [Fact]
-    public void KnownNames_StillHoldsExactlyTheSevenBaseTokens()
+    public void KnownNames_StillHoldsExactlyTheEightBaseTokens()
     {
         Assert.Equal(Sorted(BaseTokenNames), Sorted(PromptVariables.KnownNames));
     }
@@ -98,7 +102,22 @@ public sealed class PromptVariablesTests
         Assert.Equal("./alpha-task/alpha-task_spec.md", variables["spec_path"]);
         Assert.Equal("./alpha-task/alpha-task_plan.md", variables["plan_path"]);
         Assert.Equal("./alpha-task/alpha-task-review.md", variables["review_path"]);
+        Assert.Equal("./alpha-task/alpha-task-simplified.md", variables["simplified_path"]);
         Assert.Equal("./alpha-task/alpha-task-done.md", variables["done_path"]);
+    }
+
+    [Fact]
+    public void For_SimplifiedPath_IsTheRelativeSimplifierReport()
+    {
+        // Arrange
+        var paths = Paths();
+
+        // Act
+        var variables = PromptVariables.For(paths, TaskDescription);
+
+        // Assert
+        Assert.Equal(paths.SimplifiedRelative, variables["simplified_path"]);
+        Assert.Equal("./alpha-task/alpha-task-simplified.md", variables["simplified_path"]);
     }
 
     // --- Layer 2: decomposition extends the base set. ----------------------------------------
@@ -261,6 +280,7 @@ public sealed class PromptVariablesTests
             ("spec_path", "./alpha-task/alpha-task_spec.md"),
             ("plan_path", "./alpha-task/alpha-task_plan.md"),
             ("review_path", "./alpha-task/alpha-task-review.md"),
+            ("simplified_path", "./alpha-task/alpha-task-simplified.md"),
             ("done_path", "./alpha-task/alpha-task-done.md"),
         };
 
@@ -303,6 +323,23 @@ public sealed class PromptVariablesTests
 
         Assert.Equal(expected, withCreation);
         Assert.Equal(expected, withRun);
+    }
+
+    [Fact]
+    public void Render_ShippedSimplifierPrompt_LeavesNoTokenUnsubstituted()
+    {
+        // Arrange
+        var service = new PromptTemplateService(ShippedPromptDirectory);
+
+        // Act
+        var rendered = service.Render("simplifier_prompt.md", PromptVariables.For(Paths(), TaskDescription));
+
+        // Assert
+        Assert.DoesNotMatch(@"\{[A-Za-z_]+\}", rendered);
+        Assert.Contains("./alpha-task/alpha-task_spec.md", rendered, StringComparison.Ordinal);
+        Assert.Contains("./alpha-task/alpha-task_plan.md", rendered, StringComparison.Ordinal);
+        Assert.Contains("./alpha-task/alpha-task-simplified.md", rendered, StringComparison.Ordinal);
+        Assert.Contains(TaskDescription, rendered, StringComparison.Ordinal);
     }
 
     [Fact]

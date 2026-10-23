@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Workflow users running implementation plans that exceed one agent session's context need an optional subtask execution mode. Phase 4 decomposes an existing spec and plan into an ordered set of subtasks in a separate tracking repository, then executes each in a fresh session with visible progress and recovery from disk.
+Workflow users running implementation plans that exceed one agent session's context need an optional subtask execution mode. The implementation phase decomposes an existing spec and plan into an ordered set of subtasks in a separate tracking repository, then executes each in a fresh session with visible progress and recovery from disk.
 
 **Status: imported draft, validated and fully resolved on 2026-09-18.** The import preserved supported behavior without silently resolving contradictory source statements; the design validation then resolved all twelve recorded conflicts, and the criteria below carry those decisions. English is the specification language; product labels and messages remain German where specified by the sources.
 
@@ -15,7 +15,7 @@ Source A1–A27 and E1–E17 below are provenance labels only. Canonical require
 
 ## Boundary Context
 
-- **In scope:** optional phase-4 decomposition and sequential execution, configuration, progress, file protocol, recovery, prompt validation/corrections, removal of manual phase completion, and closing the tab after manual task completion.
+- **In scope:** optional implementation-phase decomposition and sequential execution, configuration, progress, file protocol, recovery, prompt validation/corrections, removal of manual phase completion, and closing the tab after manual task completion.
 - **Out of scope:** parallel or nested subtasks, automatic in-run retry, execution timeouts, a subtask editor/reorder/delete UI, migrating old tasks, and application git operations against the tracking repository.
 - **Adjacent expectations:** the user supplies a tracking directory containing `task_template`; agent sessions produce the described files. Other tracking documents remain agent/human concerns, not application completion evidence. Required template changes are separate-repository work: the missing per-subtask `status.json` and non-empty example `result.json` files are mandatory, while deleting `verification.json` and adding a README are out of scope.
 - **Known limitation:** tabs with the same task name and tracking directory share process state; collision prevention is explicitly outside this feature (SPEC E14).
@@ -33,9 +33,9 @@ Source A1–A27 and E1–E17 below are provenance labels only. Canonical require
 - **1.3** If the selected tracking directory is blank, absent, or lacks `task_template`, the application shall show an explanatory German message and disable starting a workflow with subtask mode enabled. (A3; E1–E2)
 - **1.4** When a valid tracking directory is selected, the application shall persist it as the last choice and in a separate recent-directory history and offer it for subtask mode on a new tab. (A4)
 - **1.5** When a task starts with subtask mode selected, the application shall persist the mode and tracking directory with that task; when those options change for an existing task, it shall persist the changes. (A5; SPEC 8.3)
-- **1.6** While phases 1–3 run, the application shall allow subtask configuration changes and capture the configuration as one immutable snapshot at phase-4 entry; while phase 4 is active, it shall prevent changes to every subtask input, including the folder-picker button. (SPEC 8.1, 11.6; design issue 3 resolved)
+- **1.6** While the phases before Implementation run, the application shall allow subtask configuration changes and capture the configuration as one immutable snapshot at Implementation entry; while Implementation is active, it shall prevent changes to every subtask input, including the folder-picker button. (SPEC 8.1, 11.6; design issue 3 resolved)
 - **1.7** When older settings or task records lack subtask fields, the application shall load the existing defaults and treat old tasks as having subtask mode disabled. (E15–E16)
-- **1.8** If subtask mode is enabled but its tracking directory is invalid at phase-4 entry, the application shall raise a configuration error, present the German message, and leave implementation recoverable; it shall not fall back to a normal implementation run. (design issue 3 resolved)
+- **1.8** If subtask mode is enabled but its tracking directory is invalid at Implementation entry, the application shall raise a configuration error, present the German message, and leave implementation recoverable; it shall not fall back to a normal implementation run. (design issue 3 resolved)
 
 ### Requirement 2: Decompose and execute in declared order
 
@@ -43,8 +43,8 @@ Source A1–A27 and E1–E17 below are provenance labels only. Canonical require
 
 #### Acceptance Criteria
 
-- **2.1** When phase 4 starts with subtask mode disabled, the application shall retain the existing implementation prompt and task done-marker completion behavior. (A6)
-- **2.2** When phase 4 starts with subtask mode enabled and decomposition is not reusable, the application shall start a fresh decomposition session using the existing spec and plan and the task-specific tracking destination. (A7)
+- **2.1** When Implementation starts with subtask mode disabled, the application shall retain the existing implementation prompt and task done-marker completion behavior. (A6)
+- **2.2** When Implementation starts with subtask mode enabled and decomposition is not reusable, the application shall start a fresh decomposition session using the existing spec and plan and the task-specific tracking destination. (A7)
 - **2.3** When a readable ordered index exists, the application shall reuse that decomposition regardless of individual missing subtask descriptions; a folder without a usable description shall fail only its own entry. (A8; design issue 5 resolved)
 - **2.4** When executing subtasks, the application shall follow the index order and use one fresh session at a time in the product working directory. (A9)
 - **2.5** When starting a subtask session, the application shall supply that subtask's full description and correctly resolved tracking paths. (A10)
@@ -65,7 +65,7 @@ Source A1–A27 and E1–E17 below are provenance labels only. Canonical require
 - **3.1** While subtask mode is selected, the application shall show a second indicator labelled `Subtasks`. (A16)
 - **3.2** When decomposition is running, the indicator shall show `Zerlegung läuft…`; while the loop runs, it shall show completed and total counts as `{N} von {M}`, updating after each subtask. (A17)
 - **3.3** When failures are present, the indicator shall additionally show `{K} fehlgeschlagen` in the error colour; a subtask whose status is `pending` or any other unrecognized value shall count as pending, not failed, so a freshly decomposed index shows no failures. (A18; design issue 1 resolved)
-- **3.4** The subtask indicator shall be grey before phase 4, yellow while running, and green only when the total is greater than zero and every subtask is complete; the absence of failures alone shall not turn it green. (A19; design issue 6a resolved)
+- **3.4** The subtask indicator shall be grey before Implementation, yellow while running, and green only when the total is greater than zero and every subtask is complete; the absence of failures alone shall not turn it green. (A19; design issue 6a resolved)
 - **3.5** When automatic execution establishes that every subtask is complete, the application shall record implementation as completed and show both indicators green. (A14)
 - **3.6** If automatic execution finishes with failures, the application shall leave implementation incomplete, show its indicator yellow, and retain the task for recovery. (A15)
 - **3.7** When a subtask has a failure reason, the application shall carry the ordered subtask states in its progress payload and make each failed entry's title and reason available in the indicator tooltip, for both live progress and progress restored on recovery. (SPEC 6.2, 11.3; design issue 7 resolved)
@@ -90,7 +90,7 @@ Source A1–A27 and E1–E17 below are provenance labels only. Canonical require
 #### Acceptance Criteria
 
 - **5.1** The application shall remove the `Phase abschliessen` action from all phase indicators. (A23)
-- **5.2** While phases 1–3 run, the application shall advance only on their artifact conditions, with the terminal remaining interactive if no artifact arrives. (SPEC 12.1)
+- **5.2** While the phases before Implementation run, the application shall advance only on their artifact conditions, with the terminal remaining interactive if no artifact arrives. (SPEC 12.1)
 - **5.3** When the user invokes `Task abschliessen` during implementation, the application shall signal the run, await its end, record the completion as an explicit manual override distinguishable from automatic completion, and then close the task tab. (A24; design issue 6b resolved)
 - **5.4** When a subtask-mode task was completed manually, recovery shall honour that completion without consulting the ledger, and the indicator shall continue to show the real subtask counts rather than a green all-complete state. (design issues 6b and 9 resolved)
 

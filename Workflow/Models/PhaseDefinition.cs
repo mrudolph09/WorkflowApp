@@ -6,9 +6,11 @@ namespace Workflow.Models;
 /// <param name="Launcher">Command typed into the shell to start the CLI.</param>
 /// <param name="PromptFile">File name inside the Prompt directory.</param>
 /// <param name="Completion">How the phase is detected as finished.</param>
+/// <param name="SubmissionMode">How this launcher's prompt submission is verified.</param>
 public sealed record PhaseDefinition(
     WorkflowPhase Phase,
     string DisplayName,
     string Launcher,
     string PromptFile,
-    CompletionRule Completion);
+    CompletionRule Completion,
+    PromptSubmissionMode SubmissionMode);

@@ -21,6 +21,7 @@ public sealed class AutoAnswerService : IAutoAnswerService
     private readonly List<(AutoAnswerRule Rule, Regex? Regex)> _compiled = [];
     private readonly Regex? _readyRegex;
     private readonly Regex? _pastePendingRegex;
+    private readonly Regex? _submittedRegex;
 
     /// <summary>Creates the service.</summary>
     /// <param name="shippedRulesPath">Path to Assets\autoanswer.rules.json in the output directory.</param>
@@ -75,6 +76,20 @@ public sealed class AutoAnswerService : IAutoAnswerService
                 // its output-count verification.
             }
         }
+
+        if (!string.IsNullOrWhiteSpace(RuleSet.SubmittedPattern))
+        {
+            try
+            {
+                _submittedRegex = new Regex(RuleSet.SubmittedPattern, RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
+            }
+            catch (ArgumentException)
+            {
+                // A broken pattern must not take the app down. RuleSet.SubmittedPattern stays as
+                // configured, so the orchestrator keeps the fail-safe evidence path: it simply never
+                // sees evidence and reports the submission as unconfirmed after a single Enter.
+            }
+        }
     }
 
     /// <inheritdoc />
@@ -111,6 +126,24 @@ public sealed class AutoAnswerService : IAutoAnswerService
         try
         {
             return _pastePendingRegex.IsMatch(screenText);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
+    public bool IsSubmitted(string screenText)
+    {
+        if (_submittedRegex is null || string.IsNullOrEmpty(screenText))
+        {
+            return false;
+        }
+
+        try
+        {
+            return _submittedRegex.IsMatch(screenText);
         }
         catch (RegexMatchTimeoutException)
         {
@@ -170,7 +203,7 @@ public sealed class AutoAnswerService : IAutoAnswerService
             .ToList();
 
         // A zero or negative value is either an explicit 0 in the file or a typo; each of the
-        // four is a duration or an attempt count where that is meaningless, so the shipped
+        // six is a duration or an attempt count where that is meaningless, so the shipped
         // default wins (SPEC section 9.4, S5).
         return new AutoAnswerRuleSet(
             dto.Version,
@@ -183,7 +216,10 @@ public sealed class AutoAnswerService : IAutoAnswerService
             dto.SubmitVerifyMs > 0 ? dto.SubmitVerifyMs : 1500,
             dto.MaxSubmitAttempts > 0 ? dto.MaxSubmitAttempts : 4,
             dto.ReadyPattern ?? string.Empty,
-            dto.PastePendingPattern ?? string.Empty);
+            dto.PastePendingPattern ?? string.Empty,
+            dto.SubmittedPattern ?? string.Empty,
+            dto.SubmitAfterPasteLandedMs > 0 ? dto.SubmitAfterPasteLandedMs : 8000,
+            dto.SubmittedVerifyTimeoutMs > 0 ? dto.SubmittedVerifyTimeoutMs : 10000);
     }
 
     private sealed class RuleSetDto
@@ -217,6 +253,15 @@ public sealed class AutoAnswerService : IAutoAnswerService
 
         [JsonPropertyName("pastePendingPattern")]
         public string? PastePendingPattern { get; set; }
+
+        [JsonPropertyName("submittedPattern")]
+        public string? SubmittedPattern { get; set; }
+
+        [JsonPropertyName("submitAfterPasteLandedMs")]
+        public int SubmitAfterPasteLandedMs { get; set; } = 8000;
+
+        [JsonPropertyName("submittedVerifyTimeoutMs")]
+        public int SubmittedVerifyTimeoutMs { get; set; } = 10000;
 
         [JsonPropertyName("rules")]
         public List<RuleDto>? Rules { get; set; }

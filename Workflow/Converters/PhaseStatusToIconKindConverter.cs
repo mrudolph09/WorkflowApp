@@ -14,6 +14,7 @@ public sealed class PhaseStatusToIconKindConverter : IValueConverter
         {
             PhaseStatus.Active => PackIconKind.ProgressClock,
             PhaseStatus.Completed => PackIconKind.CheckCircle,
+            PhaseStatus.Skipped => PackIconKind.SkipNextCircle,
             _ => PackIconKind.CircleOutline,
         };
 

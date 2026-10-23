@@ -12,11 +12,22 @@ namespace Workflow;
 public partial class App : Application
 {
     private MainWindowViewModel? _shell;
+    private SingleInstanceGuard? _singleInstance;
 
     /// <inheritdoc />
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // One instance per Windows session: the execution gate below is app-wide only if the app
+        // is. A second start hands over to the first and ends before building anything.
+        _singleInstance = SingleInstanceGuard.TryAcquire(SingleInstanceGuard.ApplicationMutexName);
+        if (_singleInstance is null)
+        {
+            SingleInstanceGuard.ActivateOtherInstance();
+            Shutdown();
+            return;
+        }
 
         DispatcherUnhandledException += OnDispatcherUnhandledException;
 
@@ -31,13 +42,25 @@ public partial class App : Application
 
         var stateStore = new TaskStateStore();
 
+        // One gate and one desktop job runner for the whole application: every tab shares the
+        // orchestrator, so every agent session holds this gate shared and every desktop job holds
+        // it exclusively. The window yield resolves MainWindow when a job runs, not now.
+        var desktopJobs = new DesktopJobRunner(
+            new Win32UserActivityMonitor(),
+            new SystemCpuLoadProbe(),
+            new PwshDesktopJobProcessStarter(),
+            new SystemDesktopJobClock(),
+            new WindowForegroundYield(Dispatcher, () => MainWindow));
+
         var orchestrator = new WorkflowOrchestrator(
             prompts,
             autoAnswer,
             new ArtifactWatcherFactory(),
             stateStore,
             TimeSpan.FromMilliseconds(750),
-            TimeSpan.FromSeconds(1));
+            TimeSpan.FromSeconds(1),
+            gate: new ExecutionGate(),
+            desktopJobs: desktopJobs);
 
         // Turns a silent runtime FileNotFoundException into an actionable startup message.
         // Validated BEFORE the factory is built: the factory hands the result to every tab it
@@ -48,12 +71,20 @@ public partial class App : Application
         // for 'Task laden'. It holds no state.
         var picker = new DirectoryPickerService();
 
+        // One folder service as well: the tabs create and rename their task folders with it, and the
+        // shell adopts a misnamed spec and plan on 'Task laden' (Workflow_LoadFix spec 6). Stateless.
+        var folders = new TaskFolderService();
+
+        // One message box service: the shell reports errors with it, the tabs ask their Ja/Nein
+        // questions with it. Stateless.
+        var messages = new MessageDialogService();
+
         // CA2000: WebViewEnvironmentProvider is a deliberate app-wide singleton (spec 5.3/6.4 -
         // "one CoreWebView2Environment for the whole application") that lives for the process
         // lifetime; nothing in this composition root disposes any of its long-lived services.
 #pragma warning disable CA2000
         var factory = new TaskTabViewModelFactory(
-            new TaskFolderService(),
+            folders,
             orchestrator,
             settings,
             stateStore,
@@ -61,7 +92,8 @@ public partial class App : Application
             new WebViewEnvironmentProvider(),
             new ConPtySessionFactory(),
             Dispatcher,
-            startupErrors);
+            startupErrors,
+            messages);
 #pragma warning restore CA2000
 
         var scanner = new TaskRecoveryScanner(
@@ -72,7 +104,15 @@ public partial class App : Application
             maxSubdirectoriesPerRoot: 2000,
             scanTimeout: TimeSpan.FromSeconds(5));
 
-        _shell = new MainWindowViewModel(factory, scanner, picker, new MessageDialogService(), startupErrors);
+        _shell = new MainWindowViewModel(
+            factory,
+            scanner,
+            picker,
+            new FilePickerService(),
+            folders,
+            messages,
+            settings,
+            startupErrors);
 
         var window = new MainWindow { DataContext = _shell };
         window.Closing += (_, _) => _shell.ShutdownAll();
@@ -103,6 +143,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _shell?.ShutdownAll();
+        _singleInstance?.Dispose();
         base.OnExit(e);
     }
 

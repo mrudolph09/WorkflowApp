@@ -88,6 +88,23 @@ Eine Subtask darf nicht:
 Wenn eine Aufgabe voraussichtlich mehr als eine Claude-Code-Session benötigt, teile sie weiter auf.
 Bevorzuge kleine Aufgaben gegenüber großen Aufgaben.
 
+## Unbeaufsichtigter Lauf
+
+Die Subtasks laufen ohne Menschen. Daraus folgt:
+
+- Es gibt **keine Menschenaufgaben**. Alles, was eine Desktop-Anwendung oder einen UI-Test startet, ist ein
+  Desktop-Job: Die Subtask beschreibt die Schritte als PowerShell-Skripte, die Session fordert sie über
+  `desktopjob.json` an und prüft in einer Folgesession die Lieferung. Teile lange Abläufe in Schritte mit eigenem
+  Marker und eigener Zeitgrenze (höchstens 240 Minuten je Schritt).
+- Jedes Gate, jede Freigabe und jede Frage an den User bekommt einen Eintrag in `{task_path}/decisions.md`. Die
+  Subtask verweist auf die Eintrags-ID (`D-NNN`) und beschreibt, wie die Session die Antwort anwendet. Die Anwendung
+  erzeugt `decisions.md` nach der Zerlegung und lässt sie vom User einmal freigeben.
+- Eine Subtask setzt nie `waiting_for_human` oder `waiting_for_user`. Zulässig sind `complete`, `failed`,
+  `deferred` (Desktop-Job angefordert), `blocked`, `pending` und `in_progress`.
+- Die Anwendung startet eine Subtask erst, wenn alle ihre Abhängigkeiten `complete` sind. Eine eigene
+  Vorgängerprüfung in `subtask.md` ist nicht nötig; wer sie trotzdem einbaut, liest den Index im Format von
+  Version 2 (Einträge sind Text oder Objekt).
+
 Verwende dieses Format für jede `subtask.md`:
 
 # ST-XXX: Titel
@@ -128,19 +145,29 @@ Flag-Datei `{task_path}/result.json`. Sie liegt im Task-Ordner, nicht im Workflo
 Workflows-Ordner ist von allen Tasks gemeinsam benutzt, und eine dort liegengebliebene Flag-Datei
 würde den nächsten Task sofort als fertig melden.
 
-Diese Datei ist gleichzeitig der verbindliche Index in **Ausführungsreihenfolge** und **darf nicht
-leer sein** — eine Datei mit 0 Byte erkennt die Anwendung als nicht vorhanden:
+Diese Datei ist gleichzeitig der verbindliche Index in **Ausführungsreihenfolge** und **darf nicht leer sein**
+— eine Datei mit 0 Byte erkennt die Anwendung als nicht vorhanden:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "task": "{tasktitel}",
   "subtasks": [
     "ST-001-erster-titel",
-    "ST-002-zweiter-titel"
+    { "title": "ST-002-zweiter-titel", "dependsOn": [] },
+    { "title": "ST-003-dritter-titel", "dependsOn": ["ST-001-erster-titel"] }
   ]
 }
 ```
+
+Ein Eintrag ist entweder der Ordnername als Text oder ein Objekt mit `title` und `dependsOn`.
+
+- Ohne `dependsOn` hängt die Aufgabe von **allen** vorher stehenden ab. Das ist der sichere Standard.
+- `dependsOn: []` heißt unabhängig.
+- `dependsOn` darf nur vorher stehende Titel nennen.
+
+Setze `dependsOn` nur, wenn die Aufgabe nachweislich nicht von Reihenfolge, gemeinsamem Arbeitsstand oder früheren
+Messungen abhängt. Im Zweifel lässt du das Feld weg.
 
 Das Feld `"subtasks"` ist Pflicht und muss jeden erzeugten Ordnernamen genau einmal enthalten, in
 genau der Reihenfolge, in der die Aufgaben abgearbeitet werden sollen. Die Anwendung leitet keine

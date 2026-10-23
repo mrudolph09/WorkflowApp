@@ -103,14 +103,103 @@ Do not declare the overall feature complete merely because the code has been wri
 Completion requires:
 
 * all canonical plan tasks completed
-* acceptance criteria satisfied
-* required tests passing
-* the acceptance gate `Workflow\verify.ps1` exits 0
+* every acceptance criterion verified, or - when it needs a human or interactive check - listed as an open item
+* every required test that ran passed; a required test that cannot run for an allowed reason (see below) is an open item
+* every step of the acceptance gate the plan names (in this repository `Workflow\verify.ps1` and its V steps) is `passed` or `not_run` with an allowed reason; no step is `failed`
 * type checking passing
 * lint/static analysis passing where applicable
-* no unresolved implementation blockers
+* no unresolved implementation blockers - an open item is not a blocker, a `failed` gate step is
 * final implementation reviewed against the canonical specification and plan
 * PWF execution state accurately reflecting completion
+
+An open item is never presented as satisfied.
+
+## Gate results and open items
+
+Every step of the acceptance gate gets exactly one result:
+
+* `passed` - with the command and its exit code.
+* `failed` - with the command, its exit code and the names of the failing tests.
+* `not_run` - with one of the allowed reasons below.
+
+Allowed reasons for `not_run` (this list is exhaustive):
+
+1. the gate itself lists the step as manual or as a human checkpoint
+2. the step needs the interactive desktop or UI interaction
+3. required hardware, an external system or an approval is not available
+4. the named gate script does not exist in the target repository
+
+No other reason is allowed. "Takes too long", "flaky" or "probably fine" is not a reason: run the
+step, and if it fails it is `failed`.
+
+* When the gate exits 0 but reports skipped checks (for example `-SkipConPtyTests` or a missing
+  `-WorkflowDirectory`), every skipped check is `not_run` and an open item.
+* Record every gate run in `{subtask_path}/{subtask_title}/progress.md` with command, exit code and
+  result. A step that was `failed` once in this subtask stays `failed` until a later run of the
+  same step is `passed`; it is never relabelled `not_run`.
+* A `failed` step blocks completion: fix the cause and run the step again. Without a fix the
+  subtask finishes `failed`.
+* Reason 2 applies only when a desktop job (see "Desktop jobs") cannot do the step either, for
+  example because a human has to watch the result. Work a desktop job can do is requested as one,
+  never recorded as an open item.
+* A `not_run` step does not block completion. It becomes an open item in the `openGateItems` array
+  of `status.json`: `"<step id>: <what a human has to do or check, and what they should observe>"`.
+  A subtask with open items is still `complete`.
+
+## Unattended run
+
+There is no human in the loop. The application runs every subtask unattended, possibly overnight.
+
+* Never ask. `AskUserQuestion` is disabled; text questions in the terminal are never answered.
+* Gate decisions, approvals and every other question meant for a human are answered in advance in
+  `{task_path}/decisions.md`. For these questions that file outranks the specification, the plan and
+  `subtask.md`. Cite the entry ID (`D-NNN`) wherever you apply a decision.
+* No matching entry: finish with `status = "failed"` and
+  `failreason = "Entscheidung fehlt in decisions.md: <question>"`. Do not guess.
+* Do not check predecessor subtasks yourself beyond what `subtask.md` prescribes: the application starts this
+  session only after every dependency of this subtask is `complete`.
+
+## Desktop jobs
+
+You never start a desktop application, a UI test or anything else that needs the interactive desktop. When the
+subtask needs that, request a **desktop job**; the application runs it when the user is idle and nothing else runs.
+
+1. Write one PowerShell 7 script per step into `{subtask_path}/{subtask_title}/`, named `desktopjob.<id>.ps1`
+   (`<id>` matches `^[a-z0-9_-]{1,32}$`). A step succeeds only with exit code 0 **and** an existing marker file,
+   so write the marker as the step's last action.
+2. Then write `desktopjob.json` (atomically, last):
+
+   ```json
+   {
+     "version": 2,
+     "requestId": "<new GUID>",
+     "idleMinutes": 15,
+     "steps": [
+       { "id": "<id>", "script": "desktopjob.<id>.ps1", "timeoutMinutes": 45, "marker": "<absolute path>" }
+     ]
+   }
+   ```
+
+   Steps run strictly in order; an aborted step is repeated later from that step on. `timeoutMinutes` (1-240) must
+   cover the step's worst case with margin; split long work into several steps.
+3. Write `status.json` with `"status": "deferred"` and `"failreason": "Desktop-Job wartet auf Leerlauffenster"`,
+   then the flag `result.json`, and end the session.
+
+When the job has run, the application starts a fresh session for this subtask. It finds
+`desktopjob.result.json` (per step: `outcome`, `exitCode`, `markerFound`, attempts) and `desktopjob.<id>.log`.
+
+* Every step `completed` and the delivery checks pass: `complete`.
+* Otherwise: rename `desktopjob.result.json` to `desktopjob.result.<requestId>.consumed.json`, write a **new**
+  request with a **new** `requestId` containing only the steps to repeat, and finish `deferred` again. A result
+  whose `requestId` differs from the current request is never valid evidence. After a `timeout`, give that step a
+  larger `timeoutMinutes` or a changed script (for example split into several steps): the application does not
+  start the same script with the same `timeoutMinutes` again in this run.
+
+## Status values
+
+`status.json` accepts `complete` (success), `failed` (failure, reason in `failreason`), `deferred` (desktop job
+requested), `blocked` (a prerequisite outside this subtask is missing), `pending` and `in_progress`. Do not use
+`waiting_for_human` or `waiting_for_user`: no human will answer.
 
 ## Signalling completion
 
@@ -131,14 +220,19 @@ Write the outcome into `{subtask_path}/{subtask_title}/status.json`:
   "openFindings": 0,
   "workflowRelevantFindings": [],
   "testsPassed": true,
-  "readyForVerification": true
+  "readyForVerification": true,
+  "openGateItems": []
 }
 ```
 
-The application reads only `status` and `failreason` from this file. `status` counts as success
+The application reads only `status`, `failreason` and `openGateItems` from this file.
+`openGateItems` is mandatory: a JSON array of strings, one per open item (see "Gate results and
+open items"), and `[]` when nothing is open. The application lists these items to the user; a
+value that is not an array of strings is shown as unreadable. `status` counts as success
 solely with the value `complete`; use `"failed"` when the subtask could not be finished, and then
-state the cause in `failreason` as one short sentence — that text is what the user sees. Any other
-value, including the initial `pending`, means "not finished yet".
+state the cause in `failreason` as one short sentence — that text is what the user sees. `deferred`
+and `blocked` mean what "Status values" above says; any other value, including the initial
+`pending`, means "not finished yet".
 
 ### 2. The flag
 

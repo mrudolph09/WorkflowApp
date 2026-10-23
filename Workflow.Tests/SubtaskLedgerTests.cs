@@ -105,16 +105,17 @@ public sealed class SubtaskLedgerTests : IDisposable
         Assert.Null(SubtaskLedger.TryReadIndex(_paths));
     }
 
-    // "optional version absent or at most 1": 1 and absent are usable, 2 is not. Asymmetric on
-    // purpose - an implementation that ignored the version entirely passes the first two rows and
-    // fails the third, and one that rejected version 1 fails the second.
+    // "optional version absent or at most 2": 1, 2 and absent are usable, 3 is not. Asymmetric on
+    // purpose - an implementation that ignored the version entirely passes the first three rows and
+    // fails the fourth, and one that rejected version 1 or 2 fails the second or third.
     [Theory]
     [InlineData("{ \"subtasks\": [\"ST-001-parse\"] }", true)]
     [InlineData("{ \"version\": 1, \"subtasks\": [\"ST-001-parse\"] }", true)]
-    [InlineData("{ \"version\": 2, \"subtasks\": [\"ST-001-parse\"] }", false)]
+    [InlineData("{ \"version\": 2, \"subtasks\": [\"ST-001-parse\"] }", true)]
+    [InlineData("{ \"version\": 3, \"subtasks\": [\"ST-001-parse\"] }", false)]
     [InlineData("{ \"version\": 17, \"subtasks\": [\"ST-001-parse\"] }", false)]
     [InlineData("{ \"version\": \"1\", \"subtasks\": [\"ST-001-parse\"] }", false)]
-    public void TryReadIndex_AcceptsOnlyAVersionOfAtMostOne(string json, bool usable)
+    public void TryReadIndex_AcceptsOnlyAVersionOfAtMostTwo(string json, bool usable)
     {
         WriteIndex(json);
 
@@ -779,7 +780,7 @@ public sealed class SubtaskLedgerTests : IDisposable
     [Theory]
     [InlineData("")]
     [InlineData("{ \"subtasks\": [] }")]
-    [InlineData("{ \"version\": 2, \"subtasks\": [\"ST-001-parse\"] }")]
+    [InlineData("{ \"version\": 3, \"subtasks\": [\"ST-001-parse\"] }")]
     public void TryRead_ReportsAnUnusableIndexAsNull(string json)
     {
         WriteIndex(json);
@@ -831,7 +832,7 @@ public sealed class SubtaskLedgerTests : IDisposable
     [InlineData("""{ "subtasks": ["..", ""] }""", true)]
     [InlineData("""{ "subtasks": [] }""", false)]
     [InlineData("""{ "task": "demo" }""", false)]
-    [InlineData("""{ "version": 2, "subtasks": ["ST-001-parse"] }""", false)]
+    [InlineData("""{ "version": 3, "subtasks": ["ST-001-parse"] }""", false)]
     [InlineData("""{ "subtasks": ["ST-001-parse" """, false)]
     public void IsDecomposed_FollowsTheIndexAlone(string json, bool expected)
     {
@@ -904,7 +905,7 @@ public sealed class SubtaskLedgerTests : IDisposable
 
         Assert.False(SubtaskLedger.AllComplete(_paths));
 
-        WriteIndex("""{ "version": 2, "subtasks": ["ST-001-parse", "ST-002-render"] }""");
+        WriteIndex("""{ "version": 3, "subtasks": ["ST-001-parse", "ST-002-render"] }""");
 
         Assert.False(SubtaskLedger.AllComplete(_paths));
     }
@@ -934,5 +935,376 @@ public sealed class SubtaskLedgerTests : IDisposable
         Assert.NotNull(after);
         Assert.Equal(2, after.Completed);
         Assert.True(SubtaskLedger.AllComplete(_paths));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Index version 2: an entry may be an object carrying "dependsOn". A missing dependsOn is
+    // null (every previous entry), an empty array is "independent", and a dependency may only
+    // name an EARLIER entry - anything else fails that entry alone.
+    // ---------------------------------------------------------------------------------------
+
+    [Fact]
+    public void TryReadIndex_ReadsPlainStringEntriesAsDependingOnEveryPreviousEntry()
+    {
+        WriteIndexOf("ST-001-parse", "ST-002-render");
+
+        var entries = SubtaskLedger.TryReadIndex(_paths);
+
+        Assert.NotNull(entries);
+        Assert.All(entries, entry => Assert.Null(entry.DependsOn));
+    }
+
+    [Fact]
+    public void TryReadIndex_ReadsObjectEntriesWithTheirDependencies()
+    {
+        WriteIndex(
+            """
+            {
+              "version": 2,
+              "subtasks": [
+                { "title": "ST-001-parse" },
+                { "title": "ST-002-render", "dependsOn": [] },
+                { "Title": "ST-003-persist", "DependsOn": ["ST-001-parse"] }
+              ]
+            }
+            """);
+
+        var entries = SubtaskLedger.TryReadIndex(_paths);
+
+        Assert.NotNull(entries);
+        Assert.Equal(["ST-001-parse", "ST-002-render", "ST-003-persist"], entries.Select(entry => entry.Title));
+        Assert.All(entries, entry => Assert.Equal(SubtaskStatus.Pending, entry.Status));
+
+        Assert.Null(entries[0].DependsOn);
+        Assert.NotNull(entries[1].DependsOn);
+        Assert.Empty(entries[1].DependsOn!);
+        Assert.Equal(["ST-001-parse"], entries[2].DependsOn!);
+    }
+
+    [Fact]
+    public void TryReadIndex_AcceptsAMixOfStringAndObjectEntries()
+    {
+        WriteIndex(
+            """
+            { "version": 2, "subtasks": ["ST-001-parse", { "title": "ST-002-render", "dependsOn": [] }, "ST-003-persist"] }
+            """);
+
+        var entries = SubtaskLedger.TryReadIndex(_paths);
+
+        Assert.NotNull(entries);
+        Assert.Equal(["ST-001-parse", "ST-002-render", "ST-003-persist"], entries.Select(entry => entry.Title));
+        Assert.Null(entries[0].DependsOn);
+        Assert.Empty(entries[1].DependsOn!);
+        Assert.Null(entries[2].DependsOn);
+    }
+
+    // Trimmed, matched case-insensitively and normalised to the referenced entry's own spelling,
+    // then de-duplicated keeping the first occurrence.
+    [Fact]
+    public void TryReadIndex_NormalisesDependenciesToTheReferencedTitles()
+    {
+        WriteIndex(
+            """
+            {
+              "version": 2,
+              "subtasks": [
+                "ST-001-parse",
+                "ST-002-render",
+                { "title": "ST-003-persist", "dependsOn": ["  st-002-RENDER ", "ST-001-parse", "ST-002-render"] }
+              ]
+            }
+            """);
+
+        var entries = SubtaskLedger.TryReadIndex(_paths);
+
+        Assert.NotNull(entries);
+        Assert.Equal(SubtaskStatus.Pending, entries[2].Status);
+        Assert.Equal(["ST-002-render", "ST-001-parse"], entries[2].DependsOn!);
+    }
+
+    // An unknown name, a LATER entry and the entry itself are all invalid; each fails only its own
+    // entry and names the offending dependency. The surrounding entries stay usable.
+    [Theory]
+    [InlineData("ST-999-unknown")]
+    [InlineData("ST-004-verify")]
+    [InlineData("st-002-render")]
+    public void TryReadIndex_FailsOnlyTheEntryWithAnInvalidDependency(string dependency)
+    {
+        WriteIndex(
+            $$"""
+            {
+              "version": 2,
+              "subtasks": [
+                "ST-001-parse",
+                { "title": "ST-002-render", "dependsOn": ["ST-001-parse", {{System.Text.Json.JsonSerializer.Serialize(dependency)}}] },
+                "ST-003-persist",
+                { "title": "ST-004-verify", "dependsOn": ["ST-001-parse"] }
+              ]
+            }
+            """);
+
+        var entries = SubtaskLedger.TryReadIndex(_paths);
+
+        Assert.NotNull(entries);
+        Assert.Equal(
+            [SubtaskStatus.Pending, SubtaskStatus.Failed, SubtaskStatus.Pending, SubtaskStatus.Pending],
+            entries.Select(entry => entry.Status));
+        Assert.Contains($"Ung{(char)0xFC}ltige Abh{(char)0xE4}ngigkeit", entries[1].FailReason, StringComparison.Ordinal);
+        Assert.Contains(dependency, entries[1].FailReason, StringComparison.Ordinal);
+        Assert.Null(entries[0].FailReason);
+        Assert.Null(entries[3].FailReason);
+    }
+
+    // The failed entry keeps the evidence it was failed on when TryRead derives the rest: its
+    // index-level reason, not whatever its status payload says.
+    [Fact]
+    public void TryRead_PassesAnEntryWithAnInvalidDependencyThroughAsFailed()
+    {
+        WriteIndex(
+            """{ "version": 2, "subtasks": ["ST-001-parse", { "title": "ST-002-render", "dependsOn": ["ST-404"] }] }""");
+        WriteDescription("ST-001-parse");
+        WriteDescription("ST-002-render");
+
+        var snapshot = SubtaskLedger.TryRead(_paths);
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(SubtaskStatus.Pending, snapshot.States[0].Status);
+        Assert.Equal(SubtaskStatus.Failed, snapshot.States[1].Status);
+        Assert.Contains("ST-404", snapshot.States[1].FailReason, StringComparison.Ordinal);
+    }
+
+    // DependsOn has to survive the derivation step, whatever the evidence turns the entry into.
+    [Fact]
+    public void TryRead_KeepsEachEntrysDependenciesThroughTheDerivation()
+    {
+        WriteIndex(
+            """
+            {
+              "version": 2,
+              "subtasks": [
+                "ST-001-parse",
+                { "title": "ST-002-render", "dependsOn": [] },
+                { "title": "ST-003-persist", "dependsOn": ["ST-001-parse"] }
+              ]
+            }
+            """);
+        WriteStatus("ST-001-parse", """{ "status": "complete" }""");
+        WriteStatus("ST-002-render", """{ "status": "waiting_for_human", "failreason": "Freigabe" }""");
+        WriteDescription("ST-002-render");
+        WriteDescription("ST-003-persist");
+
+        var snapshot = SubtaskLedger.TryRead(_paths);
+
+        Assert.NotNull(snapshot);
+        Assert.Null(snapshot.States[0].DependsOn);
+        Assert.Empty(snapshot.States[1].DependsOn!);
+        Assert.Equal(["ST-001-parse"], snapshot.States[2].DependsOn!);
+        Assert.Equal(SubtaskStatus.WaitingForHuman, snapshot.States[1].Status);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The non-terminal waiting statuses. Case-insensitive like the decisive ones; their
+    // failreason is kept so the indicator can show WHY an entry waits.
+    // ---------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData("blocked", SubtaskStatus.Blocked)]
+    [InlineData("BLOCKED", SubtaskStatus.Blocked)]
+    [InlineData("waiting_for_human", SubtaskStatus.WaitingForHuman)]
+    [InlineData("Waiting_For_Human", SubtaskStatus.WaitingForHuman)]
+    [InlineData("waiting_for_user", SubtaskStatus.WaitingForHuman)]
+    [InlineData("WAITING_FOR_USER", SubtaskStatus.WaitingForHuman)]
+    [InlineData("deferred", SubtaskStatus.Deferred)]
+    [InlineData("Deferred", SubtaskStatus.Deferred)]
+    public void TryRead_MapsTheWaitingStatusesAndKeepsTheirReason(string value, SubtaskStatus expected)
+    {
+        WriteIndexOf("ST-001-parse");
+        WriteStatus(
+            "ST-001-parse",
+            $$"""{ "status": {{System.Text.Json.JsonSerializer.Serialize(value)}}, "failreason": "Freigabe fehlt." }""");
+        WriteDescription("ST-001-parse");
+
+        var snapshot = SubtaskLedger.TryRead(_paths);
+
+        Assert.NotNull(snapshot);
+        var state = Assert.Single(snapshot.States);
+        Assert.Equal(expected, state.Status);
+        Assert.Equal("Freigabe fehlt.", state.FailReason);
+        Assert.Equal(0, snapshot.Failed);
+        Assert.Equal(0, snapshot.Completed);
+    }
+
+    [Fact]
+    public void TryRead_LeavesAWaitingStatusWithoutAReasonUnexplained()
+    {
+        WriteIndexOf("ST-001-parse");
+        WriteStatus("ST-001-parse", """{ "status": "blocked", "failreason": "  " }""");
+        WriteDescription("ST-001-parse");
+
+        var snapshot = SubtaskLedger.TryRead(_paths);
+
+        Assert.NotNull(snapshot);
+        var state = Assert.Single(snapshot.States);
+        Assert.Equal(SubtaskStatus.Blocked, state.Status);
+        Assert.Null(state.FailReason);
+    }
+
+    // A waiting entry is unfinished, so it is held to the description rule like every other one.
+    [Fact]
+    public void TryRead_FailsAWaitingEntryWithoutAUsableDescription()
+    {
+        WriteIndexOf("ST-001-parse");
+        WriteStatus("ST-001-parse", """{ "status": "waiting_for_human", "failreason": "Freigabe" }""");
+
+        var snapshot = SubtaskLedger.TryRead(_paths);
+
+        Assert.NotNull(snapshot);
+        var state = Assert.Single(snapshot.States);
+        Assert.Equal(SubtaskStatus.Failed, state.Status);
+        Assert.Contains("ST-001-parse", state.FailReason, StringComparison.Ordinal);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // JobResultReady: a deferred entry whose desktop job delivered a complete result for the
+    // CURRENT request, config and scripts. Anything stale keeps it waiting.
+    // ---------------------------------------------------------------------------------------
+
+    /// <summary>Stages a deferred entry with a two-step desktop job request and its scripts.</summary>
+    private DesktopJobRequest StageDeferredJob(string title, Guid requestId)
+    {
+        WriteIndexOf(title);
+        WriteStatus(title, """{ "status": "deferred", "failreason": "Desktop-Job" }""");
+        WriteDescription(title);
+
+        var directory = _paths.SubtaskDirectory(title);
+        File.WriteAllText(Path.Combine(directory, "desktopjob.eins.ps1"), "Write-Output 1", Utf8);
+        File.WriteAllText(Path.Combine(directory, "desktopjob.zwei.ps1"), "Write-Output 2", Utf8);
+        File.WriteAllText(
+            Path.Combine(directory, DesktopJobFiles.RequestFileName),
+            $$"""
+            {
+              "version": 2, "requestId": "{{requestId}}", "idleMinutes": 15,
+              "steps": [
+                { "id": "eins", "script": "desktopjob.eins.ps1", "timeoutMinutes": 10, "marker": "C:\\marker\\eins.txt" },
+                { "id": "zwei", "script": "desktopjob.zwei.ps1", "timeoutMinutes": 10, "marker": "C:\\marker\\zwei.txt" }
+              ]
+            }
+            """,
+            Utf8);
+
+        var read = DesktopJobFiles.ReadRequest(directory);
+        Assert.NotNull(read.Request);
+        return read.Request;
+    }
+
+    private void WriteJobResult(
+        string title,
+        DesktopJobRequest request,
+        string? requestId = null,
+        string secondOutcome = DesktopJobOutcome.Completed,
+        string? secondScriptSha = null)
+    {
+        var directory = _paths.SubtaskDirectory(title);
+        var now = DateTimeOffset.UtcNow;
+
+        DesktopJobStepResult Step(string id, string outcome, string? sha) => new(
+            id,
+            sha ?? DesktopJobFiles.ScriptSha256(directory, $"desktopjob.{id}.ps1"),
+            outcome,
+            0,
+            true,
+            now,
+            now,
+            1);
+
+        DesktopJobFiles.WriteResult(
+            directory,
+            new DesktopJobResult(
+                requestId ?? request.RequestId.ToString(),
+                DesktopJobFiles.ConfigSha256(request),
+                [Step("eins", DesktopJobOutcome.Completed, null), Step("zwei", secondOutcome, secondScriptSha)]));
+    }
+
+    private SubtaskState ReadSingle()
+    {
+        var snapshot = SubtaskLedger.TryRead(_paths);
+        Assert.NotNull(snapshot);
+        return Assert.Single(snapshot.States);
+    }
+
+    [Fact]
+    public void TryRead_MarksADeferredEntryWithAMatchingCompleteResultAsReady()
+    {
+        var request = StageDeferredJob("ST-001-parse", Guid.NewGuid());
+        WriteJobResult("ST-001-parse", request);
+
+        var state = ReadSingle();
+
+        Assert.Equal(SubtaskStatus.Deferred, state.Status);
+        Assert.True(state.JobResultReady);
+    }
+
+    [Fact]
+    public void TryRead_KeepsADeferredEntryWithoutAResultWaiting() =>
+        Assert.False(StageAndRead(_ => { }).JobResultReady);
+
+    [Fact]
+    public void TryRead_KeepsADeferredEntryWaitingWhenAStepIsNotComplete() =>
+        Assert.False(StageAndRead(request => WriteJobResult("ST-001-parse", request, secondOutcome: DesktopJobOutcome.Timeout)).JobResultReady);
+
+    [Fact]
+    public void TryRead_KeepsADeferredEntryWaitingWhenAScriptChangedSinceItRan() =>
+        Assert.False(StageAndRead(request => WriteJobResult("ST-001-parse", request, secondScriptSha: "00")).JobResultReady);
+
+    [Fact]
+    public void TryRead_KeepsADeferredEntryWaitingWhenTheResultBelongsToAnotherRequest() =>
+        Assert.False(StageAndRead(request => WriteJobResult("ST-001-parse", request, requestId: Guid.NewGuid().ToString())).JobResultReady);
+
+    [Fact]
+    public void TryRead_NeverMarksAnEntryThatIsNotDeferredAsReady()
+    {
+        var request = StageDeferredJob("ST-001-parse", Guid.NewGuid());
+        WriteJobResult("ST-001-parse", request);
+        WriteStatus("ST-001-parse", """{ "status": "pending" }""");
+
+        Assert.False(ReadSingle().JobResultReady);
+    }
+
+    [Fact]
+    public void TryRead_MarksADeferredEntryWhoseStepTimedOutAsNeedingRepair()
+    {
+        var state = StageAndRead(request => WriteJobResult("ST-001-parse", request, secondOutcome: DesktopJobOutcome.Timeout));
+
+        Assert.True(state.JobNeedsRepair);
+        Assert.False(state.JobResultReady);
+    }
+
+    [Fact]
+    public void TryRead_NeverMarksACompleteResultAsNeedingRepair()
+    {
+        var state = StageAndRead(request => WriteJobResult("ST-001-parse", request));
+
+        Assert.True(state.JobResultReady);
+        Assert.False(state.JobNeedsRepair);
+    }
+
+    [Fact]
+    public void TryRead_NeverMarksAnEntryThatIsNotDeferredAsNeedingRepair()
+    {
+        var request = StageDeferredJob("ST-001-parse", Guid.NewGuid());
+        WriteJobResult("ST-001-parse", request, secondOutcome: DesktopJobOutcome.Timeout);
+        WriteStatus("ST-001-parse", """{ "status": "pending" }""");
+
+        Assert.False(ReadSingle().JobNeedsRepair);
+    }
+
+    private SubtaskState StageAndRead(Action<DesktopJobRequest> arrange)
+    {
+        var request = StageDeferredJob("ST-001-parse", Guid.NewGuid());
+        arrange(request);
+
+        var state = ReadSingle();
+        Assert.Equal(SubtaskStatus.Deferred, state.Status);
+        return state;
     }
 }

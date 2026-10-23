@@ -247,6 +247,31 @@ public sealed partial class TerminalViewModel : ObservableObject, ITerminalContr
     }
 
     /// <inheritdoc />
+    public async Task<bool> StopSessionAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        // As in DisposeSession: no pending paste submit may reach anything after this point.
+        var lifetime = Interlocked.Exchange(ref _sessionLifetime, new CancellationTokenSource());
+        await lifetime.CancelAsync();
+        lifetime.Dispose();
+
+        var session = Interlocked.Exchange(ref _session, null);
+        if (session is null)
+        {
+            return true;
+        }
+
+        session.OutputReceived -= OnOutputReceived;
+        try
+        {
+            return await session.StopAsync(timeout, cancellationToken);
+        }
+        finally
+        {
+            session.Dispose();
+        }
+    }
+
+    /// <inheritdoc />
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

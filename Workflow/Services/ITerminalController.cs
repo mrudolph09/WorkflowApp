@@ -53,5 +53,18 @@ public interface ITerminalController
     public void SendPaste(string body);
 
     /// <summary>Disposes the current session, killing its process tree.</summary>
+    /// <remarks>Fire and forget: nothing confirms the tree is gone. Use <see cref="StopSessionAsync"/> where that matters.</remarks>
     public void DisposeSession();
+
+    /// <summary>
+    /// Stops the current session and confirms it: kills its process tree, waits until the shell has
+    /// exited and nothing of the tree could be found alive, then disposes the session.
+    /// </summary>
+    /// <param name="timeout">How long to keep killing and waiting.</param>
+    /// <param name="cancellationToken">Ends the wait with an <see cref="OperationCanceledException"/>.</param>
+    /// <returns>
+    /// True when the process tree is confirmed gone - or there was no session; false when the
+    /// timeout passed first. The session is disposed either way.
+    /// </returns>
+    public Task<bool> StopSessionAsync(TimeSpan timeout, CancellationToken cancellationToken);
 }

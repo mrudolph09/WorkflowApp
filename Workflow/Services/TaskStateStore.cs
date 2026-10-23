@@ -86,6 +86,43 @@ public sealed class TaskStateStore : ITaskStateStore
     }
 
     /// <inheritdoc />
+    public bool TryCreate(TaskPaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+
+        // Not Save: Save recreates the folder and publishes with overwrite: true through the fixed
+        // "<journal>.tmp", which another creator or Save itself may share. A per-call name keeps
+        // every publisher on its own file (Workflow_LoadFix spec 5.3, D3).
+        var temporary = $"{paths.StateAbsolute}.{Guid.NewGuid():N}.tmp";
+        var state = CreateEmpty();
+        state.UpdatedUtc = state.CreatedUtc;
+
+        try
+        {
+            // No Directory.Exists/File.Exists probe and no CreateDirectory: a vanished folder makes
+            // this write throw DirectoryNotFoundException, and the move's atomic refusal of an
+            // occupied target IS the existence check - there is no check-then-act window.
+            File.WriteAllText(temporary, JsonSerializer.Serialize(state, WriteOptions));
+            File.Move(temporary, paths.StateAbsolute, overwrite: false);
+            return true;
+        }
+        catch (IOException)
+        {
+            // Already exists, folder missing, or the write failed: never overwritten, never thrown.
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        finally
+        {
+            // A no-op after a successful move; otherwise no *.tmp may survive.
+            TryDelete(temporary);
+        }
+    }
+
+    /// <inheritdoc />
     public void SaveDescription(TaskPaths paths, string taskDescription)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -109,12 +146,57 @@ public sealed class TaskStateStore : ITaskStateStore
             return;
         }
 
+        // A skip is stamped like a completion: its time is the baseline the next phase's evidence is
+        // compared against (PhaseReconciliation.Promote, Workflow_LoadFix spec 7.2).
         state.Phases[index] = new TaskPhaseState(
             phase,
             status,
-            status == PhaseStatus.Completed ? DateTimeOffset.UtcNow : null);
+            status is PhaseStatus.Completed or PhaseStatus.Skipped ? DateTimeOffset.UtcNow : null);
 
         Save(paths, state);
+    }
+
+    /// <inheritdoc />
+    public TaskState? TrySkipPhases(TaskPaths paths, IReadOnlyCollection<WorkflowPhase> phases)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        ArgumentNullException.ThrowIfNull(phases);
+
+        var state = TryLoad(paths);
+        if (state is null)
+        {
+            // No journal or an unreadable one: never invented, never overwritten.
+            return null;
+        }
+
+        // One stamp for every skip: the shared time is the baseline the next phase's evidence is
+        // compared against (PhaseReconciliation.Promote, Workflow_LoadFix spec 7.2).
+        var now = DateTimeOffset.UtcNow;
+        var changed = false;
+
+        foreach (var phase in phases)
+        {
+            var index = (int)phase;
+
+            // Judged by the status just read, never by an earlier snapshot: a Review another writer
+            // recorded Completed before this read stays Completed (spec 8.4, F24).
+            if (index < 0 || index >= state.Phases.Count || IsDone(state, phase))
+            {
+                continue;
+            }
+
+            state.Phases[index] = new TaskPhaseState(phase, PhaseStatus.Skipped, now);
+            changed = true;
+        }
+
+        if (changed)
+        {
+            Save(paths, state);
+        }
+
+        // Save swallows a failed write, so the read-back is the only proof that the skip landed.
+        var readBack = TryLoad(paths);
+        return readBack is not null && phases.All(phase => IsDone(readBack, phase)) ? readBack : null;
     }
 
     /// <inheritdoc />
@@ -179,6 +261,13 @@ public sealed class TaskStateStore : ITaskStateStore
         Save(paths, state);
     }
 
+    // Range-checked: an undefined phase value is never done, so it fails the proof instead of throwing.
+    private static bool IsDone(TaskState state, WorkflowPhase phase)
+    {
+        var index = (int)phase;
+        return index >= 0 && index < state.Phases.Count && PhaseReconciliation.IsDone(state.Phases[index].Status);
+    }
+
     private static TaskState CreateEmpty() => new()
     {
         CreatedUtc = DateTimeOffset.UtcNow,
@@ -205,7 +294,7 @@ public sealed class TaskStateStore : ITaskStateStore
 
     // A journal may be hand-edited, truncated, or written by an older build. Everything
     // downstream indexes Phases by (int)WorkflowPhase, so the array is rebuilt to exactly the
-    // four catalogue phases in order before anyone sees it.
+    // catalogue phases in order before anyone sees it.
     private static Collection<TaskPhaseState> Normalise(IEnumerable<TaskPhaseState?>? existing)
     {
         var byPhase = new Dictionary<WorkflowPhase, TaskPhaseState>();

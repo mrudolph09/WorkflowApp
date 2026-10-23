@@ -4,7 +4,7 @@
     Acceptance gate for the Workflow application.
 .DESCRIPTION
     Automates criteria A1-A6, V1-V4 and the subtask checks V4a/V4b of the specification. Manual
-    steps V5-V27 are listed at the end and are not automated: they need a human watching a live
+    steps V5-V40 are listed at the end and are not automated: they need a human watching a live
     terminal.
 
     This script requires PowerShell 7 (pwsh), not Windows PowerShell 5.1 (powershell).
@@ -73,17 +73,18 @@ Assert-True ($LASTEXITCODE -eq 0) 'dotnet test exits 0'
 # Requirement 6.3/6.4: every shipped prompt is validated against ITS OWN token set, mirroring
 # PromptTemplateCatalog.AllowedTokens. A single flat list would accept {subtask} inside a phase
 # prompt and, before this catalog existed, rejected {tasktitel} in the two code-unreferenced
-# prompts. Keep the three layers and the eight entries below in step with
+# prompts. Keep the three layers and the eleven entries below in step with
 # Workflow\Services\PromptTemplateCatalog.cs and Workflow\Services\PromptTemplateService.cs; V4
 # now checks that agreement mechanically instead of trusting it.
 # Defined here rather than in V4 because V3 derives its prompt manifest from the same catalog.
 $promptDir = Join-Path $repo 'Workflow\Prompt'
-$baseTokens = @('taskbezeichnung', 'taskbeschreibung', 'AppDirectory', 'spec_path', 'plan_path', 'review_path', 'done_path')
+$baseTokens = @('taskbezeichnung', 'taskbeschreibung', 'AppDirectory', 'spec_path', 'plan_path', 'review_path', 'simplified_path', 'done_path')
 $creationTokens = $baseTokens + @('workflow_path', 'tasktitel', 'task_path', 'subtask_path')
 $runTokens = $creationTokens + @('subtask_title', 'subtask')
 
 $promptCatalog = [ordered] @{
     'initial_prompt.md'        = $baseTokens
+    'simplifier_prompt.md'     = $baseTokens
     'review_prompt.md'         = $baseTokens
     'resolve_review_prompt.md' = $baseTokens
     'implementation_prompt.md' = $baseTokens
@@ -91,6 +92,8 @@ $promptCatalog = [ordered] @{
     'counter_prompt.md'        = $creationTokens
     'evidence_gate.md'         = $creationTokens
     'run_subtask.md'           = $runTokens
+    'create_decisions.md'      = $creationTokens
+    'no_human.md'              = @()
 }
 
 Write-Host 'V3  Output directory manifest'
@@ -331,9 +334,9 @@ else {
     Write-Host 'All automated checks passed.' -ForegroundColor Green
 }
 Write-Host ''
-Write-Host 'Remaining manual steps (V5-V27) - see specification section 15.3 (V22: workflow_border\workflow_border_spec.md section 11.2; V23-V27: Workflow_LOAD_AND_PAUSE\Workflow_LOAD_AND_PAUSE_spec.md section 11.2):'
-Write-Host '  V5  Run the full four-phase pipeline against a scratch directory.'
-Write-Host '  V6  Kill claude.exe mid-phase-1; the app must stay responsive and must not advance.'
+Write-Host 'Remaining manual steps (V5-V40) - see specification section 15.3 (V22: workflow_border\workflow_border_spec.md section 11.2; V23-V27: Workflow_LOAD_AND_PAUSE\Workflow_LOAD_AND_PAUSE_spec.md section 11.2; V24 and V28-V32: Workflow_LoadFix\Workflow_LoadFix_spec.md section 11.2; V33: Vereinfachen phase; V34: WF_REPAIR\WF_REPAIR_spec.md section 4.7; V35: WF_MESSAGE\WF_MESSAGE_spec.md section 9; V36: WF_TABZUVIEL\WF_TABZUVIEL_spec.md section 9; V37: WF_DESKTOPJOBBUTTON\WF_DESKTOPJOBBUTTON_spec.md section 4.8; V38: WF_QUEUE\WF_QUEUE_spec.md section 9; V39: WF_REVIEWENTER\WF_REVIEWENTER_spec.md section 9; V40: open gate items, see the step text):'
+Write-Host '  V5  Run the full five-phase pipeline against a scratch directory.'
+Write-Host '  V6  Kill claude.exe mid-Spezifikation; the app must stay responsive and must not advance.'
 Write-Host '  V7  Break the auto-answer pattern in %APPDATA%\Workflow\autoanswer.rules.json;'
 Write-Host '      no answer is sent; the prompt is still pasted PROMPTLY once the screen goes quiet'
 Write-Host '      (NOT after 60s - the ceiling is not a mandatory wait; spec 7.3 / D13), terminal usable.'
@@ -342,45 +345,107 @@ Write-Host '  V9  Covered by dotnet test: a throwing orchestrator must surface a
 Write-Host '      unobserved task exception.'
 Write-Host '  V10 Two tabs, both running: switch between them three times; both must keep streaming.'
 Write-Host '  V11 Pick a drive root (C:\) as the working directory; the folder must land at C:\<name>.'
-Write-Host '  V12 Run a task to the end. .workflow-state.json must hold four Completed phases,'
+Write-Host '  V12 Run a task to the end. .workflow-state.json must hold five Completed phases,'
 Write-Host '      plausible timestamps and the Taskbeschreibung verbatim.'
-Write-Host '  V13 Kill Workflow.exe while phase 2 is yellow, restart: a prefilled tab appears with'
-Write-Host '      "Continue workflow"; clicking it re-sends the PHASE 2 prompt and does not re-run phase 1.'
-Write-Host '  V14 During phase 3, touch only T_spec.md - the phase must stay yellow. Then touch'
+Write-Host '  V13 Kill Workflow.exe while Review is yellow, restart: a prefilled tab appears with'
+Write-Host '      "Continue workflow"; clicking it re-sends the REVIEW prompt and does not re-run Spezifikation.'
+Write-Host '  V14 During Review umsetzen, touch only T_spec.md - the phase must stay yellow. Then touch'
 Write-Host '      T_plan.md - it must go green.'
-Write-Host '  V15 Phase 4 must turn green on its own once T-done.md exists and is non-empty.'
+Write-Host '  V15 Implementierung must turn green on its own once T-done.md exists and is non-empty.'
 Write-Host '  V16 Every phase must submit its prompt without the user pressing Enter.'
-Write-Host '  V17 Delete T_plan.md from a task whose journal says phase 1 is complete, restart:'
-Write-Host '      the recovered tab must show phase 1 grey and resume at phase 1.'
+Write-Host '  V17 Delete T_plan.md from a task whose journal says Spezifikation is complete, restart:'
+Write-Host '      the recovered tab must show Spezifikation grey and resume at Spezifikation.'
 Write-Host '  V18 Put a disconnected network share in the directory MRU: the window must still'
 Write-Host '      appear promptly, the app must stay usable, and the recovered tabs for the'
 Write-Host '      reachable MRU entries must still appear within roughly five seconds.'
-Write-Host '  V19 Pick a different working directory in the blank tab while the startup scan is'
+Write-Host '  V19 Pick a different working directory in a "Neuer Task" tab while the startup scan is'
 Write-Host '      still running: nothing may fault and no error label may appear. Then switch a'
-Write-Host '      tab showing a green phase 1 to a directory where that name has no journal:'
-Write-Host '      all four indicators must go grey.'
-Write-Host '  V20 Type a finished task name into a fresh tab: all four indicators grey and the'
+Write-Host '      tab showing a green Spezifikation to a directory where that name has no journal:'
+Write-Host '      all five indicators must go grey.'
+Write-Host '  V20 Type a finished task name into a fresh tab: all five indicators grey and the'
 Write-Host '      button reading "Start workflow".'
-Write-Host '  V21 Re-run that finished task and kill Workflow.exe during phase 1: the recovered'
-Write-Host '      tab must show all four indicators grey, not phases 2-4 green.'
+Write-Host '  V21 Re-run that finished task and kill Workflow.exe during Spezifikation: the recovered'
+Write-Host '      tab must show all five indicators grey, not the later phases green.'
 Write-Host '  V22 Every tab''s terminal sits inside the gold frame: corners and ornaments keep their'
 Write-Host '      shape from minimum to maximised size, no hairline shows at any cut or along the'
 Write-Host '      opening at this monitor''s scaling, no grey outline inside the gold, and typing,'
 Write-Host '      selection, scrolling and the auto-answers work as before.'
 Write-Host '  V23 Click "Task laden" (top right, under the version number) and pick <repo>\workflow_border:'
-Write-Host '      a new tab opens with phases 1-3 green, phase 4 grey, "Continue workflow" and a read-only'
-Write-Host '      name. Pick it again: no second tab, the open one is selected. Load a finished task (four'
+Write-Host '      a new tab opens with Spezifikation, Review and Review umsetzen green, Vereinfachen skipped, Implementierung grey, "Continue workflow" and a read-only'
+Write-Host '      name. Pick it again: no second tab, the open one is selected. Load a finished task (five'
 Write-Host '      green, info line) and a subtask task (checkbox, directory, counts). "Neuer Task" looks as'
 Write-Host '      before. Overflow: at the minimum width (1100) open tabs until the headers no longer fit -'
 Write-Host '      the "Task laden" chip stays fully visible, uncovered and clickable; then maximise and'
 Write-Host '      check again.'
-Write-Host '  V24 "Task laden" on the repository root and on C:\: one error dialog each, no tab added.'
-Write-Host '  V25 Press Pause during phase 1: Play appears; phase 1 turns green, phase 2 does not start,'
-Write-Host '      the terminal stays usable. Press Play: phase 2 starts at once. Pause then Play while'
-Write-Host '      phase 2 runs: phase 3 follows without a hold.'
-Write-Host '  V26 (tab) Hold a scratch task''s run after phase 1, then close its tab: no error message;'
+Write-Host '  V24 "Task laden" on C:\: one error dialog, no tab added. (A folder without a journal is now'
+Write-Host '      loaded and gets one - see V28.)'
+Write-Host '  V25 Press Pause during Spezifikation: Play appears; it turns green, Vereinfachen does not start,'
+Write-Host '      the terminal stays usable. Press Play: Vereinfachen starts at once. Pause then Play while'
+Write-Host '      Vereinfachen runs: Review follows without a hold.'
+Write-Host '  V26 (tab) Hold a scratch task''s run after Spezifikation, then close its tab: no error message;'
 Write-Host '      Task Manager shows no pwsh/node/claude/codex left from that tab.'
-Write-Host '  V27 (application) Hold a run after phase 1, then close the application: no orphan'
+Write-Host '  V27 (application) Hold a run after Spezifikation, then close the application: no orphan'
 Write-Host '      pwsh/node/claude/codex; after a restart the task is offered with "Continue workflow"'
-Write-Host '      at phase 2.'
+Write-Host '      at Vereinfachen.'
+Write-Host '  V28 Copy a task folder holding <T>_spec.md and <T>_plan.md, delete its .workflow-state.json'
+Write-Host '      and "Task laden" it: no dialog; Spezifikation green, "Continue workflow", info line'
+Write-Host '      "Neue .workflow-state.json angelegt. Nächste Phase: Vereinfachen."; the journal exists afterwards.'
+Write-Host '  V29 On a BYTE COPY of ...\Modul\QService\VSDM2 - never the real folder (copy and hash commands:'
+Write-Host '      Workflow_LoadFix\Workflow_LoadFix_spec.md section 11.2): "Task laden" on the copy; the Ja/Nein'
+Write-Host '      question names VSDM2_spec.md, VSDM2_plan.md; Ja, pick the -design.md file, then the other:'
+Write-Host '      both renamed, Spezifikation green, resume Vereinfachen; Subtasks ticked and both start buttons'
+Write-Host '      disabled until a Workflow-Verzeichnis is chosen. Close the tab: the three hash checks print'
+Write-Host '      True (the real VSDM2 is unchanged). On a fresh copy cancel the first file dialog: nothing'
+Write-Host '      renamed, no tab, the journal bytes unchanged. Delete the copies.'
+Write-Host '  V30 On the V28 tab press "Implementierung beginnen": Vereinfachen, Review and Review umsetzen show the'
+Write-Host '      blue-grey skip icon, Implementierung turns yellow, the implementation prompt is sent; with'
+Write-Host '      Subtasks ticked and a valid directory the decomposition session starts instead.'
+Write-Host '  V31 "Continue workflow" on a scratch task at Review; while Codex works, note the PIDs of the'
+Write-Host '      review session under THIS Workflow window (process-tree commands: spec section 11.2), then'
+Write-Host '      press "Implementierung beginnen": none of the noted PIDs is still running, Implementierung starts'
+Write-Host '      under new PIDs, and .workflow-state.json reads "Skipped" for Simplifier, Review and ResolveReview.'
+Write-Host '  V32 Kill Workflow.exe during the Implementierung of V30 and restart: the recovered tab shows Spezifikation'
+Write-Host '      green, Vereinfachen, Review and Review umsetzen with the skip icon, and "Continue workflow" resumes Implementierung.'
+Write-Host '  V33 Run a scratch task past Spezifikation: Vereinfachen turns yellow, a Claude session gets the'
+Write-Host '      simplifier prompt, spec and plan are edited in place (or stay byte-identical when the report'
+Write-Host '      says "No simplification required"), <T>-simplified.md is written last, the phase turns green'
+Write-Host '      and Review starts. The task folder diff holds only <T>_spec.md, <T>_plan.md and'
+Write-Host '      <T>-simplified.md. A task loaded from before this phase existed shows Vereinfachen with the'
+Write-Host '      skip icon and keeps its later phases.'
+Write-Host '  V34 On a scratch task with Subtasks ticked, let a subtask request a one-step desktop job whose script exits 1.'
+Write-Host '      Once the job has run (one desktopjob.<id>.log header only), a new session starts for that subtask without a'
+Write-Host '      second job run; it renames desktopjob.result.json to desktopjob.result.<requestId>.consumed.json and writes'
+Write-Host '      a desktopjob.json with a new requestId.'
+Write-Host '  V35 On a scratch task with Subtasks ticked, let a subtask defer to a one-step desktop job with'
+Write-Host '      idleMinutes 1 whose script sleeps 5 minutes. Stay away until the step starts, then move the mouse:'
+Write-Host '      the step ends aborted_user_input. While you keep working, the status line reads'
+Write-Host '      "... min nötig; letzter Versuch: aborted_user_input nach <N> min, 1 Versuch)." (hover shows the'
+Write-Host '      whole line if it is trimmed). A subtask that never ran a job shows the line without the note.'
+Write-Host '  V36 Start with no unfinished task: the tab strip shows only "Neuer Task" and "Task laden", no tab.'
+Write-Host '      Press "Neuer Task": one tab "(Bezeichnung)" opens and is selected; close it: no tab again.'
+Write-Host '      Start with unfinished tasks: exactly those tabs, the first selected, no blank tab beside them.'
+Write-Host '      With no tab open, press "Task laden": the folder dialog starts in the last working directory.'
+Write-Host '  V37 On a scratch task with Subtasks ticked, let a subtask request a one-step desktop job (idleMinutes 15)'
+Write-Host '      whose script waits 30 s and creates its marker. While "wartet auf Leerlauf" shows, the button "Desktop-Job jetzt starten"'
+Write-Host '      is enabled (disabled while paused). Press it and move the mouse within the next minute: the status returns to'
+Write-Host '      "wartet auf Leerlauf", nothing is recorded and the button is enabled again. Press it again and take the hands off:'
+Write-Host '      after about a minute the status reads "Desktop-Job läuft", the window minimises, the job completes and the'
+Write-Host '      verification session starts. Repeat, keep still for the minute, then move the mouse: the job ends aborted_user_input.'
+Write-Host '  V38 Open two scratch tasks A and B as tabs. In B''s "Queue" box the list shows A (and every other tab), never B.'
+Write-Host '      Pick A; start A and let it reach Implementierung, then press "Task abschliessen" on A (or let A finish):'
+Write-Host '      B starts by itself and its Queue box is empty. Queue B after A again, then close A''s tab instead: B''s box'
+Write-Host '      clears and its info line reads "Queue aufgehoben: ''A'' wurde geschlossen.". With a third tab C in the same'
+Write-Host '      working directory, queue B and C both after A and finish A: only B starts, C''s box shows B and its info'
+Write-Host '      line says it waits for B. The clear button (x) empties the box; while B runs the box is disabled; the'
+Write-Host '      bottom bar still fits at a narrow window width.'
+Write-Host '  V39 Run a scratch task to the Review phase five times (or re-run Review via "Task laden"). Each time Codex must'
+Write-Host '      start working on the review prompt by itself, within about 15 s of the prompt appearing in its input -'
+Write-Host '      nobody presses Enter. If the yellow line "Das automatische Absenden des Prompts konnte nicht bestätigt'
+Write-Host '      werden..." appears, note the time and the last entries of %USERPROFILE%\.codex\history.jsonl.'
+Write-Host '  V40 Load a finished scratch task whose T-done.md has a "## Offene Punkte" section with two bullets: an orange'
+Write-Host '      icon appears right after "Implementierung". Clicking it opens a popup above it listing both items under'
+Write-Host '      "Implementierung"; "Alles kopieren" puts the same text on the clipboard and its icon returns from the'
+Write-Host '      check mark after about 1.5 s. A click beside the popup closes it and the icon is unpressed again. With'
+Write-Host '      "- keine" as the only bullet there is no icon. A subtask task whose completed status.json carries'
+Write-Host '      "openGateItems" lists them under the subtask title; "openGateItems": 42 shows the read-error icon.'
 exit 0

@@ -23,12 +23,14 @@ public sealed class TaskPaths
         SpecAbsolute = Path.Combine(TaskDirectory, $"{TaskName}_spec.md");
         PlanAbsolute = Path.Combine(TaskDirectory, $"{TaskName}_plan.md");
         ReviewAbsolute = Path.Combine(TaskDirectory, $"{TaskName}-review.md");
+        SimplifiedAbsolute = Path.Combine(TaskDirectory, $"{TaskName}-simplified.md");
         DoneAbsolute = Path.Combine(TaskDirectory, $"{TaskName}-done.md");
         StateAbsolute = Path.Combine(TaskDirectory, ".workflow-state.json");
 
         SpecRelative = $"./{TaskName}/{TaskName}_spec.md";
         PlanRelative = $"./{TaskName}/{TaskName}_plan.md";
         ReviewRelative = $"./{TaskName}/{TaskName}-review.md";
+        SimplifiedRelative = $"./{TaskName}/{TaskName}-simplified.md";
         DoneRelative = $"./{TaskName}/{TaskName}-done.md";
     }
 
@@ -127,7 +129,16 @@ public sealed class TaskPaths
     /// <summary>Value substituted for the {review_path} token.</summary>
     public string ReviewRelative { get; }
 
-    /// <summary>Absolute path of the phase-4 completion marker written by the CLI.</summary>
+    /// <summary>
+    /// Absolute path of the simplifier's report. Written as the simplifier's last action, so it is
+    /// also that phase's completion marker. Hyphen, like <see cref="ReviewAbsolute"/>.
+    /// </summary>
+    public string SimplifiedAbsolute { get; }
+
+    /// <summary>Value substituted for the {simplified_path} token.</summary>
+    public string SimplifiedRelative { get; }
+
+    /// <summary>Absolute path of the implementation phase's completion marker written by the CLI.</summary>
     /// <remarks>
     /// Hyphen, not underscore - it matches <see cref="ReviewAbsolute"/>. The spec and plan
     /// artefacts use underscores; that inconsistency is pre-existing and the token values are

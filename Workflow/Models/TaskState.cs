@@ -6,11 +6,11 @@ namespace Workflow.Models;
 /// <summary>One phase's recorded outcome inside the workflow journal.</summary>
 /// <param name="Phase">The phase this entry describes.</param>
 /// <param name="Status">The phase's last recorded status.</param>
-/// <param name="CompletedUtc">When the phase finished, or null while it has not.</param>
+/// <param name="CompletedUtc">When the phase finished or was skipped, or null while it has neither.</param>
 public sealed record TaskPhaseState(WorkflowPhase Phase, PhaseStatus Status, DateTimeOffset? CompletedUtc);
 
 /// <summary>
-/// The workflow journal: what the application knows about one task's progress through the four
+/// The workflow journal: what the application knows about one task's progress through the
 /// phases. Written to <see cref="TaskPaths.StateAbsolute"/>.
 /// </summary>
 /// <remarks>
@@ -69,6 +69,6 @@ public sealed class TaskState
     /// </remarks>
     public bool ImplementationCompletedManually { get; set; }
 
-    /// <summary>The four phases, always in <see cref="PhaseCatalog"/> order.</summary>
+    /// <summary>Every phase, always in <see cref="PhaseCatalog"/> order.</summary>
     public Collection<TaskPhaseState> Phases { get; set; } = [];
 }

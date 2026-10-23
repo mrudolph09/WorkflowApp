@@ -22,8 +22,8 @@ namespace Workflow.ViewModels;
 /// <see cref="SubtaskStage.Running"/> - it shows the counts and is judged by them, so a finished run
 /// with outstanding or failed work stays yellow (requirement 3.6) and a finished run whose entries
 /// are all complete is already green by the rule above (requirement 3.5). The stage needs no branch
-/// of its own: the only colour distinction requirement 3.4 draws besides green is grey before phase
-/// 4, and a finished run is not before phase 4.
+/// of its own: the only colour distinction requirement 3.4 draws besides green is grey before
+/// Implementation, and a finished run is not before Implementation.
 /// </para>
 /// </remarks>
 public sealed partial class SubtaskIndicatorViewModel : ObservableObject
@@ -46,7 +46,18 @@ public sealed partial class SubtaskIndicatorViewModel : ObservableObject
     [ObservableProperty]
     private bool _hasFailures;
 
-    /// <summary>Title and reason of every failed entry, or null when there is nothing to explain.</summary>
+    /// <summary><c>{W} wartend · {D} Desktop-Job</c>, either part only when non-zero, or empty.</summary>
+    [ObservableProperty]
+    private string _waitingText = string.Empty;
+
+    /// <summary>Whether the waiting text is shown; bound through the visibility converter.</summary>
+    [ObservableProperty]
+    private bool _hasWaiting;
+
+    /// <summary>
+    /// Title and reason of every failed entry, then of every waiting entry, then the reason the run
+    /// stopped, or null when there is nothing to explain.
+    /// </summary>
     [ObservableProperty]
     private string? _failureTooltip;
 
@@ -74,7 +85,10 @@ public sealed partial class SubtaskIndicatorViewModel : ObservableObject
             ? string.Format(CultureInfo.CurrentCulture, "{0} fehlgeschlagen", progress.Failed)
             : string.Empty;
 
-        FailureTooltip = Tooltip(progress.States);
+        WaitingText = Waiting(progress.Waiting, progress.Deferred);
+        HasWaiting = WaitingText.Length > 0;
+
+        FailureTooltip = Tooltip(progress.States, progress.BlockedReason);
     }
 
     /// <summary>
@@ -87,11 +101,30 @@ public sealed partial class SubtaskIndicatorViewModel : ObservableObject
         ProgressText = Counts(0, 0);
         FailedText = string.Empty;
         HasFailures = false;
+        WaitingText = string.Empty;
+        HasWaiting = false;
         FailureTooltip = null;
     }
 
     private static string Counts(int completed, int total) =>
         string.Format(CultureInfo.CurrentCulture, "{0} von {1}", completed, total);
+
+    private static string Waiting(int waiting, int deferred)
+    {
+        var parts = new List<string>(2);
+
+        if (waiting > 0)
+        {
+            parts.Add(string.Format(CultureInfo.CurrentCulture, "{0} wartend", waiting));
+        }
+
+        if (deferred > 0)
+        {
+            parts.Add(string.Format(CultureInfo.CurrentCulture, "{0} Desktop-Job", deferred));
+        }
+
+        return string.Join(" · ", parts);
+    }
 
     private static PhaseStatus Colour(SubtaskProgress progress)
     {
@@ -103,7 +136,7 @@ public sealed partial class SubtaskIndicatorViewModel : ObservableObject
         return progress.Stage == SubtaskStage.Idle ? PhaseStatus.Pending : PhaseStatus.Active;
     }
 
-    private static string? Tooltip(IReadOnlyList<SubtaskState> states)
+    private static string? Tooltip(IReadOnlyList<SubtaskState> states, string? blockedReason)
     {
         List<string>? lines = null;
 
@@ -123,6 +156,38 @@ public sealed partial class SubtaskIndicatorViewModel : ObservableObject
                 : string.Concat(state.Title, ": ", state.FailReason));
         }
 
+        // Waiting entries are not failures, so they follow the failures, labelled with what they
+        // wait for - that label is the point of listing them.
+        foreach (var state in states)
+        {
+            var label = WaitingLabel(state.Status);
+            if (label is null)
+            {
+                continue;
+            }
+
+            var line = string.Concat(state.Title, " (", label, ")");
+
+            lines ??= [];
+            lines.Add(string.IsNullOrWhiteSpace(state.FailReason)
+                ? line
+                : string.Concat(line, ": ", state.FailReason));
+        }
+
+        if (!string.IsNullOrWhiteSpace(blockedReason))
+        {
+            lines ??= [];
+            lines.Add(blockedReason);
+        }
+
         return lines is null ? null : string.Join(Environment.NewLine, lines);
     }
+
+    private static string? WaitingLabel(SubtaskStatus status) => status switch
+    {
+        SubtaskStatus.Blocked => "blockiert",
+        SubtaskStatus.WaitingForHuman => "wartet auf Eingabe",
+        SubtaskStatus.Deferred => "Desktop-Job",
+        _ => null,
+    };
 }

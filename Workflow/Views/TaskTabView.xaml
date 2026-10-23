@@ -75,7 +75,7 @@
                         </StackPanel>
                     </Button>
 
-                    <!-- Takes the Start button's place once phase 4 has written its done file: there
+                    <!-- Takes the Start button's place once Implementation has written its done file: there
                          is nothing left to continue, so the one action left is to close the task. -->
                     <Button DockPanel.Dock="Left"
                             VerticalAlignment="Center"
@@ -88,6 +88,26 @@
                         </StackPanel>
                     </Button>
 
+                    <!-- WF_QUEUE: right of Start. Picking another open task starts this workflow by itself once that
+                         task is finished (Implementierung green); the clear button empties the queue. Locked while this
+                         tab runs, hidden with Start once this task is finished. -->
+                    <ComboBox DockPanel.Dock="Left"
+                              Width="240"
+                              Margin="16,0,0,0"
+                              VerticalAlignment="Center"
+                              materialDesign:HintAssist.Hint="Queue"
+                              materialDesign:TextFieldAssist.HasClearButton="True"
+                              Style="{StaticResource MaterialDesignOutlinedComboBox}"
+                              FontSize="14"
+                              IsEditable="False"
+                              DisplayMemberPath="Header"
+                              ItemsSource="{Binding QueueCandidates}"
+                              SelectedItem="{Binding QueuedAfter, Mode=TwoWay}"
+                              IsEnabled="{Binding IsQueueEditable}"
+                              ToolTipService.ShowOnDisabled="True"
+                              ToolTip="Startet den Workflow dieses Tasks automatisch, sobald der gewählte Task fertig ist (Implementierung grün). Zur Auswahl stehen die anderen geöffneten Tasks, die noch nicht fertig sind."
+                              Visibility="{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}" />
+
                     <!-- The manual override steps aside once the task is finished, so the bar never
                          shows 'Task abschliessen' twice. -->
                     <Button DockPanel.Dock="Right"
@@ -96,6 +116,21 @@
                             Content="Task abschliessen"
                             Visibility="{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}"
                             Command="{Binding CompleteTaskCommand}" />
+
+                    <!-- Workflow_LoadFix spec 8.5: declared after 'Task abschliessen' with the same dock
+                         side, so it sits directly to its left. Skips Vereinfachen, Review and Review
+                         umsetzen - a running one is cancelled - and starts the implementation phase,
+                         with subtasks when the checkbox says so. Disabled until the specification
+                         phase is done. -->
+                    <Button DockPanel.Dock="Right"
+                            Margin="0,0,8,0"
+                            VerticalAlignment="Center"
+                            Style="{StaticResource MaterialDesignRaisedButton}"
+                            Content="Implementierung beginnen"
+                            ToolTipService.ShowOnDisabled="True"
+                            ToolTip="Vereinfachen, Review und Review umsetzen überspringen und sofort mit der Implementierung beginnen. Eine laufende Phase wird abgebrochen. Mit Subtasks, wenn 'Subtasks' ausgewählt ist."
+                            Visibility="{Binding IsTaskFinished, Converter={StaticResource InverseBooleanToVisibilityConverter}}"
+                            Command="{Binding StartImplementationCommand}" />
 
                     <!-- Requirements 1.1 and 3.1: the checkbox and the subtask indicator sit beside
                          the Implementierung indicator and wrap with it on a narrow window, so the
@@ -115,6 +150,85 @@
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
 
+                        <!-- Gate items the finished implementation left for a human (done file and
+                             every completed subtask's status.json). Directly after the phases, so it
+                             sits beside Implementierung, the last of them; shown only while there is
+                             something to do. Opening the overview re-reads the files. The toggle is
+                             not hit-testable while the popup is open, so the click that closes a
+                             StaysOpen=False popup cannot reopen it at once. -->
+                        <Grid Margin="0,0,24,0"
+                              VerticalAlignment="Center"
+                              Visibility="{Binding HasOpenGateItems, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <ToggleButton x:Name="OpenGateItemsToggle"
+                                          Width="32"
+                                          Height="32"
+                                          Command="{Binding RefreshOpenGateItemsOnOpenCommand}">
+                                <ToggleButton.Style>
+                                    <Style TargetType="ToggleButton" BasedOn="{StaticResource MaterialDesignFlatToggleButton}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsOpen, ElementName=OpenGateItemsPopup}" Value="True">
+                                                <Setter Property="IsHitTestVisible" Value="False" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </ToggleButton.Style>
+                                <ToggleButton.ToolTip>
+                                    <TextBlock Text="{Binding OpenGateItemCount, StringFormat='{}{0} offene Punkte - klicken für die Übersicht'}" />
+                                </ToggleButton.ToolTip>
+                                <materialDesign:PackIcon Width="20" Height="20" Foreground="#F57C00">
+                                    <materialDesign:PackIcon.Style>
+                                        <Style TargetType="materialDesign:PackIcon">
+                                            <Setter Property="Kind" Value="ClipboardAlertOutline" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasOpenGateReadErrors}" Value="True">
+                                                    <Setter Property="Kind" Value="FileAlertOutline" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </materialDesign:PackIcon.Style>
+                                </materialDesign:PackIcon>
+                            </ToggleButton>
+
+                            <Popup x:Name="OpenGateItemsPopup"
+                                   IsOpen="{Binding IsChecked, ElementName=OpenGateItemsToggle, Mode=TwoWay}"
+                                   PlacementTarget="{Binding ElementName=OpenGateItemsToggle}"
+                                   Placement="Top"
+                                   StaysOpen="False"
+                                   AllowsTransparency="True">
+                                <Border Width="560"
+                                        Padding="12"
+                                        Background="{DynamicResource MaterialDesignPaper}"
+                                        BorderBrush="{DynamicResource MaterialDesignDivider}"
+                                        BorderThickness="1"
+                                        CornerRadius="4">
+                                    <DockPanel>
+                                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8" LastChildFill="True">
+                                            <Button DockPanel.Dock="Right"
+                                                    Style="{StaticResource MaterialDesignFlatButton}"
+                                                    ToolTip="Alle offenen Punkte in die Zwischenablage kopieren"
+                                                    Click="CopyOpenGateItems_Click">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <materialDesign:PackIcon x:Name="OpenGateItemsCopyIcon" Kind="ContentCopy" VerticalAlignment="Center" />
+                                                    <TextBlock Margin="6,0,0,0" VerticalAlignment="Center" Text="Alles kopieren" />
+                                                </StackPanel>
+                                            </Button>
+                                            <TextBlock VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource MaterialDesignBody}"
+                                                       Style="{StaticResource MaterialDesignSubtitle1TextBlock}"
+                                                       Text="{Binding OpenGateItemCount, StringFormat='Offene Punkte ({0})'}" />
+                                        </DockPanel>
+                                        <TextBox x:Name="OpenGateItemsBox"
+                                                 MaxHeight="320"
+                                                 IsReadOnly="True"
+                                                 AcceptsReturn="True"
+                                                 TextWrapping="Wrap"
+                                                 VerticalScrollBarVisibility="Auto"
+                                                 Text="{Binding OpenGateItemsText, Mode=OneWay}" />
+                                    </DockPanel>
+                                </Border>
+                            </Popup>
+                        </Grid>
+
                         <CheckBox Margin="0,0,24,0"
                                   VerticalAlignment="Center"
                                   Content="Subtasks"
@@ -123,9 +237,10 @@
                                   ToolTip="Wenn die Aufgabe das Kontextfenster eines Agents übersteigt, aktiviere Subtasks" />
 
                         <!-- Workflow_LOAD_AND_PAUSE spec 6.5: beside the Subtasks checkbox. Pause lets
-                             the running phase finish and holds the next one; Play, shown only while
-                             paused, lifts the hold. Neither touches the running phase, so neither is
-                             tied to IsRunning or to the phase-4 lock. -->
+                             the running phase (or, in Implementation, the running subtask) finish and holds
+                             the next one; Play, shown only while paused, lifts the hold. Neither
+                             touches the running session, so neither is tied to IsRunning or to the
+                             Implementation lock. -->
                         <StackPanel Margin="0,0,24,0"
                                     VerticalAlignment="Center"
                                     Orientation="Horizontal">
@@ -133,7 +248,7 @@
                                     Height="32"
                                     Style="{StaticResource MaterialDesignIconButton}"
                                     ToolTipService.ShowOnDisabled="True"
-                                    ToolTip="Pausieren: Die laufende Phase läuft zu Ende, die nächste startet erst nach Fortsetzen"
+                                    ToolTip="Pausieren: Die laufende Phase bzw. der laufende Subtask läuft zu Ende, der nächste Schritt startet erst nach Fortsetzen"
                                     Command="{Binding PauseCommand}">
                                 <materialDesign:PackIcon Kind="Pause" Width="20" Height="20" />
                             </Button>
@@ -142,7 +257,7 @@
                                     Height="32"
                                     Margin="4,0,0,0"
                                     Style="{StaticResource MaterialDesignIconButton}"
-                                    ToolTip="Fortsetzen: Die nächste Phase startet wieder automatisch"
+                                    ToolTip="Fortsetzen: Der nächste Schritt startet wieder automatisch"
                                     Visibility="{Binding IsPaused, Converter={StaticResource BooleanToVisibilityConverter}}"
                                     Command="{Binding UnpauseCommand}">
                                 <materialDesign:PackIcon Kind="Play" Width="20" Height="20" />
@@ -151,11 +266,20 @@
 
                         <!-- The wrapper keeps the tab's DataContext for the Visibility binding while
                              the inner view receives the indicator view model; one element cannot do
-                             both. The indicator's contents belong to SubtaskIndicatorViewModel. -->
+                             both. The indicator's contents belong to SubtaskIndicatorViewModel.
+                             The 'Desktop-Job jetzt starten' button sits beside the indicator: desktop jobs
+                             exist only in subtask mode, and it is enabled only while a run waits for one. -->
                         <StackPanel Orientation="Horizontal"
                                     VerticalAlignment="Center"
                                     Visibility="{Binding SubtasksEnabled, Converter={StaticResource BooleanToVisibilityConverter}}">
                             <views:SubtaskIndicatorView DataContext="{Binding SubtaskIndicator}" />
+                            <Button Margin="16,0,0,0"
+                                    VerticalAlignment="Center"
+                                    Style="{StaticResource MaterialDesignOutlinedButton}"
+                                    Content="Desktop-Job jetzt starten"
+                                    ToolTipService.ShowOnDisabled="True"
+                                    ToolTip="Startet den wartenden Desktop-Job sofort, ohne die Leerlaufzeit abzuwarten. Danach Maus und Tastatur nicht berühren: jede Maus- oder Tastatureingabe und jede Sperre des Arbeitsplatzes bricht den Job ab. Nur aktiv, solange ein Desktop-Job auf Leerlauf wartet und nicht pausiert ist."
+                                    Command="{Binding StartDesktopJobNowCommand}" />
                         </StackPanel>
 
                     </WrapPanel>

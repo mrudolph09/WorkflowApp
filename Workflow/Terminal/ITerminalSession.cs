@@ -28,6 +28,16 @@ public interface ITerminalSession : IDisposable
     /// <param name="columns">New width in character cells.</param>
     /// <param name="rows">New height in character cells.</param>
     public void Resize(int columns, int rows);
+
+    /// <summary>
+    /// Kills the hosted process tree and waits until that is confirmed: the shell process has
+    /// exited and a final process-tree kill found nothing it could not end.
+    /// </summary>
+    /// <param name="timeout">How long to keep killing and waiting before giving up.</param>
+    /// <param name="cancellationToken">Ends the wait with an <see cref="OperationCanceledException"/>.</param>
+    /// <returns>True when the tree is confirmed gone, or nothing was ever started; false on timeout.</returns>
+    /// <remarks>Does not release the pseudo-console or the pipes; <see cref="IDisposable.Dispose"/> still must be called.</remarks>
+    public Task<bool> StopAsync(TimeSpan timeout, CancellationToken cancellationToken);
 }
 
 /// <summary>Creates terminal sessions.</summary>

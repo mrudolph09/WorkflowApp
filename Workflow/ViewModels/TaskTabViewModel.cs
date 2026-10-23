@@ -8,35 +8,63 @@ using Workflow.Services;
 
 namespace Workflow.ViewModels;
 
-/// <summary>One Task, one tab: metadata, the four indicators, and the terminal.</summary>
+/// <summary>One Task, one tab: metadata, the phase indicators, and the terminal.</summary>
 /// <remarks>
 /// The tab is the live, editable subtask configuration of design issue 3: it implements
 /// <see cref="ISubtaskConfiguration"/> so that <see cref="SubtaskConfiguration.Capture"/> can take
 /// the one snapshot the run carries. The run is handed that capture <em>deferred</em>
-/// (<see cref="SubtaskConfiguration.Deferred"/>), so it is taken at phase-4 entry and the user may
-/// still change the configuration while phases 1-3 run; from that moment on it is one immutable
-/// record. Nothing downstream ever holds the tab itself, so the enabled flag and the tracking
+/// (<see cref="SubtaskConfiguration.Deferred"/>), so it is taken at Implementation entry and the
+/// user may still change the configuration while the phases before Implementation run; from that
+/// moment on it is one immutable record. Nothing downstream ever holds the tab itself, so the enabled flag and the tracking
 /// directory cannot be observed at two different moments (requirement 1.6).
 /// </remarks>
 public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfiguration, IDisposable
 {
     /// <summary>
     /// The info line of a finished task opened with <c>Task laden</c> (Workflow_LOAD_AND_PAUSE spec
-    /// section 5.5): its four green indicators stay, and this says what Start will do with it.
+    /// section 5.5): its green phase indicators stay, and this says what Start will do with it.
     /// </summary>
     private const string FinishedTaskMessage =
         "Alle Phasen sind abgeschlossen. 'Start workflow' beginnt den Task von vorn.";
+
+    /// <summary>
+    /// The info line of a task completed by hand with subtasks still open, opened with <c>Task laden</c>:
+    /// every phase is done, but Start continues the implementation instead of restarting the task.
+    /// </summary>
+    private const string ReopenImplementationMessage =
+        "Implementierung wurde per 'Task abschliessen' beendet, Subtasks sind noch offen. 'Continue workflow' setzt die Implementierung fort.";
+
+    /// <summary>Asked before 'Start workflow' runs a finished task again from Specification.</summary>
+    private const string RestartQuestion =
+        "Task komplett von vorn beginnen? Spezifikation und alle Phasen werden neu ausgeführt.";
+
+    /// <summary>
+    /// The info line when <c>Implementierung beginnen</c> could not record its skips (Workflow_LoadFix
+    /// spec 8.3, D19): nothing was started, because Implementation must never run on a journal that
+    /// does not say the phases before it were skipped.
+    /// </summary>
+    private const string SkipNotRecordedMessage =
+        "Implementierung nicht gestartet: Das Überspringen der Review konnte nicht in .workflow-state.json gespeichert werden.";
+
+    /// <summary>The phases <c>Implementierung beginnen</c> skips (Workflow_LoadFix spec 8.3).</summary>
+    private static readonly WorkflowPhase[] SkippablePhases =
+        [WorkflowPhase.Simplifier, WorkflowPhase.Review, WorkflowPhase.ResolveReview];
 
     private readonly ITaskFolderService _folders;
     private readonly IWorkflowOrchestrator _orchestrator;
     private readonly ISettingsService _settings;
     private readonly ITaskStateStore _stateStore;
     private readonly IDirectoryPickerService _picker;
+    private readonly IMessageDialogService? _messages;
     private readonly ManualPhaseSignal _manualSignal = new();
 
     // The tab's pause switch (Workflow_LOAD_AND_PAUSE spec 6.4). One per tab for its whole lifetime,
     // so a pause armed before 'Start workflow', or left armed when a run ends, reaches the next run.
     private readonly PhasePauseGate _pauseGate = new();
+
+    // The tab's 'Desktop-Job jetzt starten' signal (WF_DESKTOPJOBBUTTON spec 4.6). One per tab for its
+    // whole lifetime, like the pause gate, so the button always talks to the signal the current run holds.
+    private readonly DesktopJobStartSignal _desktopJobStart = new();
     private readonly TimeSpan _folderDebounce;
 
     private readonly IReadOnlyList<string> _startupErrors;
@@ -53,9 +81,20 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     private bool _suppressFolderSync;
     private int _disposed;
 
+    // Workflow_LoadFix spec 8.3 (D13): true while 'Implementierung beginnen' is between cancelling the
+    // running phase and starting Implementation. CanStartWorkflow reads it, because the cancelled run's
+    // finally drops IsRunning before the new run exists.
+    private bool _isSwitchingToImplementation;
+
+    // 'Task laden' handed over a task completed by hand with subtasks still open: every phase is done,
+    // yet Start must continue the implementation rather than restart (it routes to
+    // StartImplementationAsync, which clears the flag). Cached so the label getter never reads the disk.
+    private bool _reopensImplementation;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(Header))]
     [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StartImplementationCommand))]
     private string _taskName = string.Empty;
 
     [ObservableProperty]
@@ -63,14 +102,25 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StartImplementationCommand))]
     private string? _workingDirectory;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StartImplementationCommand))]
+    [NotifyPropertyChangedFor(nameof(IsQueueEditable))]
     private bool _isRunning;
 
     [ObservableProperty]
     private bool _isNameLocked;
+
+    /// <summary>
+    /// The open tab whose finish starts this tab's workflow by itself, or <see langword="null"/> when
+    /// nothing is queued (WF_QUEUE). Not persisted: it lives and dies with the tab. Any start of this
+    /// tab, by click or by the queue, clears it (spec Q6).
+    /// </summary>
+    [ObservableProperty]
+    private TaskTabViewModel? _queuedAfter;
 
     /// <summary>
     /// True while this tab is the one shown. The tab template keeps every tab's view alive and
@@ -81,6 +131,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StartImplementationCommand))]
     private string? _validationMessage;
 
     [ObservableProperty]
@@ -116,6 +167,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     /// </remarks>
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StartImplementationCommand))]
     private string? _workflowDirectoryMessage;
 
     [ObservableProperty]
@@ -127,7 +179,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     /// <summary>
     /// Whether this task's implementation phase runs as subtasks (requirement 1.1). Editable while
-    /// phases 1-3 run; read exactly once, at capture time.
+    /// the phases before Implementation run; read exactly once, at capture time.
     /// </summary>
     [ObservableProperty]
     private bool _subtasksEnabled;
@@ -147,21 +199,50 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(PauseCommand))]
     [NotifyCanExecuteChangedFor(nameof(UnpauseCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StartDesktopJobNowCommand))]
     private bool _isPaused;
 
     /// <summary>
-    /// True once a run on this tab has ended with every phase completed - phase 4 wrote its done
+    /// True while a run waits for the desktop to become idle before starting a desktop job
+    /// (WF_DESKTOPJOBBUTTON spec 4.6). Mirrors the tab's start signal; not persisted.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(StartDesktopJobNowCommand))]
+    private bool _isDesktopJobWaiting;
+
+    /// <summary>
+    /// True once a run on this tab has ended with every phase completed - Implementation wrote its done
     /// file. The Start button then gives way to <c>Task abschliessen</c>, which closes the tab:
     /// there is nothing left to continue. Never cleared, because the name lock leaves this tab
     /// bound to the finished task; restarting it is what <c>Task laden</c> is for.
     /// </summary>
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartWorkflowCommand))]
+    [NotifyCanExecuteChangedFor(nameof(StartImplementationCommand))]
     private bool _isTaskFinished;
+
+    /// <summary>
+    /// Number of gate items this task left for a human - from the done file and from every completed
+    /// subtask's <c>status.json</c> - read errors included. Drives the icon beside the phases.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasOpenGateItems))]
+    private int _openGateItemCount;
+
+    /// <summary>True when at least one source of open gate items could not be read.</summary>
+    [ObservableProperty]
+    private bool _hasOpenGateReadErrors;
+
+    /// <summary>The open gate items as copyable text, grouped by source; empty when there are none.</summary>
+    [ObservableProperty]
+    private string _openGateItemsText = string.Empty;
+
+    /// <summary>True when the open-items icon is shown.</summary>
+    public bool HasOpenGateItems => OpenGateItemCount > 0;
 
     /// <summary>Creates the tab.</summary>
     /// <param name="folders">Task-folder service.</param>
-    /// <param name="orchestrator">The four-phase state machine.</param>
+    /// <param name="orchestrator">The phase state machine.</param>
     /// <param name="settings">Shared settings, used for the directory MRU.</param>
     /// <param name="stateStore">The per-task workflow journal, read to re-arm Continue.</param>
     /// <param name="picker">Folder-browser dialog.</param>
@@ -171,6 +252,11 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     /// Prompt-template problems found at startup. While this list is non-empty
     /// <c>StartWorkflowCommand</c> cannot execute on this tab (F17, spec section 9.4).
     /// </param>
+    /// <param name="messages">
+    /// Asks the two safety questions: completing a task with open subtasks, and restarting a
+    /// finished task from the specification. Null asks nothing and proceeds, as before the
+    /// questions existed; the application's factory always supplies one.
+    /// </param>
     public TaskTabViewModel(
         ITaskFolderService folders,
         IWorkflowOrchestrator orchestrator,
@@ -179,7 +265,8 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         IDirectoryPickerService picker,
         TerminalViewModel terminal,
         TimeSpan folderDebounce,
-        IReadOnlyList<string> startupErrors)
+        IReadOnlyList<string> startupErrors,
+        IMessageDialogService? messages = null)
     {
         ArgumentNullException.ThrowIfNull(startupErrors);
         ArgumentNullException.ThrowIfNull(settings);
@@ -190,6 +277,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         _settings = settings;
         _stateStore = stateStore;
         _picker = picker;
+        _messages = messages;
         _folderDebounce = folderDebounce;
         _startupErrors = startupErrors;
 
@@ -202,6 +290,16 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         Terminal = terminal;
         Phases = new ObservableCollection<PhaseIndicatorViewModel>(
             PhaseCatalog.All.Select(d => new PhaseIndicatorViewModel(d)));
+
+        // 'Implementierung beginnen' depends on the Spezifikation and Implementierung indicators,
+        // which ApplyJournal, ApplyProgress, ResetPhaseIndicators and the skip all write. Listening
+        // here covers every writer at once; the tab owns the indicators for its whole lifetime, so
+        // the handlers never outlive them (Workflow_LoadFix spec 8.2).
+        foreach (var indicator in Phases)
+        {
+            indicator.PropertyChanged += (_, _) => StartImplementationCommand.NotifyCanExecuteChanged();
+        }
+
         RecentDirectories = new ObservableCollection<string>(settings.Settings.RecentDirectories);
 
         // A settings file carrying "RecentWorkflowDirectories": null reaches us as a null
@@ -227,18 +325,143 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         {
             WorkflowDirectory = settings.Settings.LastWorkflowDirectory;
         }
+
+        // A run pauses the gate itself while it holds for the approval of its decisions (B7); the
+        // property follows, so Play appears. Posted when raised off the creating thread, because the
+        // property drives command state. The gate lives exactly as long as this tab, so the handler
+        // never outlives it.
+        var ui = SynchronizationContext.Current;
+        _pauseGate.Paused += (_, _) =>
+        {
+            if (ui is null || SynchronizationContext.Current == ui)
+            {
+                IsPaused = true;
+            }
+            else
+            {
+                ui.Post(_ => IsPaused = true, null);
+            }
+        };
+
+        // Same threading rule as the pause gate; the value is re-read on delivery so a posted update
+        // never applies a stale state.
+        _desktopJobStart.WaitingChanged += (_, _) =>
+        {
+            if (ui is null || SynchronizationContext.Current == ui)
+            {
+                IsDesktopJobWaiting = _desktopJobStart.IsWaiting;
+            }
+            else
+            {
+                ui.Post(_ => IsDesktopJobWaiting = _desktopJobStart.IsWaiting, null);
+            }
+        };
     }
 
     /// <summary>Raised when the tab's close button is clicked.</summary>
     public event EventHandler? CloseRequested;
 
+    /// <summary>
+    /// Raised when the task is finished (WF_QUEUE spec Q7): (a) at the end of a run that left every phase
+    /// completed, after <see cref="IsRunning"/> dropped, and (b) when 'Task abschliessen' completes the task,
+    /// before the tab closes. No one-shot guard: a second raise finds nothing queued after this tab.
+    /// </summary>
+    public event EventHandler? Finished;
+
     /// <summary>The tab header: the task name, or '(Bezeichnung)' while it is empty.</summary>
     public string Header => string.IsNullOrWhiteSpace(TaskName) ? "(Bezeichnung)" : TaskName.Trim();
 
-    /// <summary>The Start button's caption: 'Continue workflow' once a resume point is known.</summary>
-    public string StartButtonLabel => ResumePhase is null ? "Start workflow" : "Continue workflow";
+    /// <summary>
+    /// The Start button's caption: 'Continue workflow' once a resume point is known, or when a task
+    /// completed by hand with subtasks still open is continued at the implementation.
+    /// </summary>
+    public string StartButtonLabel =>
+        ResumePhase is null && !_reopensImplementation ? "Start workflow" : "Continue workflow";
 
-    /// <summary>The four station indicators.</summary>
+    /// <summary>
+    /// The open tabs this tab can queue after (WF_QUEUE). The shell keeps the list in step with the open
+    /// tabs; the Queue box binds to it.
+    /// </summary>
+    public ObservableCollection<TaskTabViewModel> QueueCandidates { get; } = [];
+
+    /// <summary>Whether the Queue box accepts a pick: it is locked while the tab's workflow runs (WF_QUEUE spec Q5).</summary>
+    public bool IsQueueEditable => !IsRunning;
+
+    /// <summary>
+    /// Starts this tab's workflow when it is queued after <paramref name="finished"/> (WF_QUEUE spec Q9).
+    /// The queue is cleared first - the predecessor cannot finish a second time - and the start goes through
+    /// <see cref="StartWorkflowCommand"/>, the same call a click makes, with every gate.
+    /// </summary>
+    /// <param name="finished">The tab that just finished.</param>
+    /// <returns><see langword="true"/> when a run began; <see langword="false"/> when this tab was not queued
+    /// after <paramref name="finished"/> or the start was refused (an info line says so).</returns>
+    public bool StartIfQueuedAfter(TaskTabViewModel finished)
+    {
+        ArgumentNullException.ThrowIfNull(finished);
+
+        if (!ReferenceEquals(QueuedAfter, finished))
+        {
+            return false;
+        }
+
+        QueuedAfter = null;
+
+        if (StartWorkflowCommand.CanExecute(null))
+        {
+            StartWorkflowCommand.Execute(null);
+        }
+
+        // Read AFTER the call: CanExecute is not evidence of a start, StartWorkflow can still refuse
+        // (restart question answered 'Nein', re-validated directory, unsaved description).
+        var started = IsRunning;
+        if (!started)
+        {
+            // Set after the call, so StartWorkflow's own InfoMessage writes cannot hide it.
+            InfoMessage = $"Queue: '{finished.Header}' ist fertig, der Workflow konnte aber nicht automatisch gestartet werden.";
+        }
+
+        return started;
+    }
+
+    /// <summary>
+    /// Re-queues this tab behind <paramref name="next"/> when it was queued after <paramref name="finished"/>:
+    /// both want the same working directory, so they run one after the other (WF_QUEUE spec Q10).
+    /// </summary>
+    /// <param name="finished">The tab that just finished.</param>
+    /// <param name="next">The tab that was started in its place and still runs.</param>
+    public void MoveQueueAfter(TaskTabViewModel finished, TaskTabViewModel next)
+    {
+        ArgumentNullException.ThrowIfNull(finished);
+        ArgumentNullException.ThrowIfNull(next);
+
+        if (!ReferenceEquals(QueuedAfter, finished))
+        {
+            return;
+        }
+
+        QueuedAfter = next;
+        InfoMessage = $"Queue: '{finished.Header}' ist fertig; wartet jetzt auf '{next.Header}' (gleiches Arbeitsverzeichnis).";
+    }
+
+    /// <summary>
+    /// Drops this tab's queue when it was queued after <paramref name="closed"/>, which the user closed
+    /// without finishing (WF_QUEUE spec Q11).
+    /// </summary>
+    /// <param name="closed">The tab that was closed.</param>
+    public void CancelIfQueuedAfter(TaskTabViewModel closed)
+    {
+        ArgumentNullException.ThrowIfNull(closed);
+
+        if (!ReferenceEquals(QueuedAfter, closed))
+        {
+            return;
+        }
+
+        QueuedAfter = null;
+        InfoMessage = $"Queue aufgehoben: '{closed.Header}' wurde geschlossen.";
+    }
+
+    /// <summary>The station indicators, one per phase.</summary>
     public ObservableCollection<PhaseIndicatorViewModel> Phases { get; }
 
     /// <summary>Working directories offered in the ComboBox.</summary>
@@ -254,14 +477,15 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     public ObservableCollection<string> RecentWorkflowDirectories { get; }
 
     /// <summary>
-    /// False while phase 4 is running, which is when requirement 1.6 freezes the subtask
+    /// False while Implementation is running, which is when requirement 1.6 freezes the subtask
     /// configuration: the checkbox, the tracking-directory selector and the folder-picker button.
     /// </summary>
     /// <remarks>
     /// Derived from the same <c>_activePhase</c> field the task-completion commands read, so
-    /// <see cref="ApplyProgress"/> - the only writer - raises the change notification for it. Phases
-    /// 1 to 3 deliberately leave the configuration editable: the snapshot the run carries is taken
-    /// at phase-4 entry, not at run entry, so an edit made while they run still reaches the run.
+    /// <see cref="ApplyProgress"/> - the only writer - raises the change notification for it. The
+    /// phases before Implementation deliberately leave the configuration editable: the snapshot the
+    /// run carries is taken at Implementation entry, not at run entry, so an edit made while they
+    /// run still reaches the run.
     /// </remarks>
     public bool IsSubtaskConfigurationEditable => _activePhase != WorkflowPhase.Implementation;
 
@@ -305,11 +529,22 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
         CompleteTaskCommand.NotifyCanExecuteChanged();
 
+        // _activePhase is set after the indicator, so the indicator's own notification above saw the
+        // old value.
+        StartImplementationCommand.NotifyCanExecuteChanged();
+
         // _activePhase is a plain field, so nothing else announces the editing lock. Without these
         // two lines the XAML IsEnabled bindings would be evaluated once and never again, and the
-        // phase-4 lock of requirement 1.6 would exist only inside this class.
+        // Implementation lock of requirement 1.6 would exist only inside this class.
         OnPropertyChanged(nameof(IsSubtaskConfigurationEditable));
         BrowseWorkflowDirectoryCommand.NotifyCanExecuteChanged();
+
+        // Implementation completes exactly when the done file exists or every subtask is complete,
+        // which is when the open gate items are written.
+        if (progress is { Phase: WorkflowPhase.Implementation, Status: PhaseStatus.Completed })
+        {
+            RefreshOpenGateItems();
+        }
     }
 
     /// <summary>
@@ -350,13 +585,23 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
             ApplyJournal(task.State);
             SeedSubtaskIndicatorFromLedger(task.Paths.TaskName);
+            RefreshOpenGateItems();
             ResumePhase = task.ResumePhase;
             IsRecovered = true;
 
             // Only 'Task laden' hands over a finished task; the startup scan never does.
-            if (task.ResumePhase is null)
+            if (task.ResumePhase is not { } resume)
             {
-                InfoMessage = FinishedTaskMessage;
+                // Reconciliation keeps a manual completion complete whatever the ledger says
+                // (requirement 5.4), so this task looks finished - but it has work left.
+                SetReopensImplementation(IsCompletedManuallyWithOpenSubtasks());
+                InfoMessage = _reopensImplementation ? ReopenImplementationMessage : FinishedTaskMessage;
+            }
+            else if (task.JournalCreated)
+            {
+                // Workflow_LoadFix spec 5.4: the folder had no journal. Say that one was written and
+                // where the run picks up - the indicators alone look like any other recovered task.
+                InfoMessage = $"Neue .workflow-state.json angelegt. Nächste Phase: {PhaseCatalog.For(resume).DisplayName}.";
             }
         }
         finally
@@ -447,27 +692,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     /// </remarks>
     private void SeedSubtaskIndicatorFromLedger(string taskName)
     {
-        if (!SubtasksEnabled || WorkflowDirectory is null)
-        {
-            SubtaskIndicator.Reset();
-            return;
-        }
-
-        SubtaskPaths tracking;
-
-        try
-        {
-            tracking = new SubtaskPaths(WorkflowDirectory, taskName);
-        }
-        catch (ArgumentException)
-        {
-            // The journal stores the chosen directory verbatim, so a blank or whitespace-only
-            // value survives to here by design; it is a user condition, not a defect.
-            SubtaskIndicator.Reset();
-            return;
-        }
-
-        var snapshot = SubtaskLedger.TryRead(tracking);
+        var snapshot = TryReadLedger(taskName);
 
         if (snapshot is null)
         {
@@ -481,7 +706,75 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             snapshot.Total,
             snapshot.Failed,
             null,
-            snapshot.States));
+            snapshot.States,
+            snapshot.Waiting,
+            snapshot.Deferred));
+    }
+
+    // The ledger this tab's own subtask configuration names - while Implementation runs, the one the run
+    // captured, because the selectors are locked then. Null for every unusable case: mode off, no
+    // directory, a blank or malformed path, or an index that cannot be read.
+    private SubtaskSnapshot? TryReadLedger(string taskName) =>
+        TryTrackingPaths(taskName) is { } tracking ? SubtaskLedger.TryRead(tracking) : null;
+
+    // Null for mode off, no directory, or a blank or malformed path.
+    private SubtaskPaths? TryTrackingPaths(string taskName)
+    {
+        if (!SubtasksEnabled || WorkflowDirectory is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return new SubtaskPaths(WorkflowDirectory, taskName);
+        }
+        catch (ArgumentException)
+        {
+            // The journal stores the chosen directory verbatim, so a blank or whitespace-only
+            // value survives to here by design; it is a user condition, not a defect.
+            return null;
+        }
+    }
+
+    // Synchronous on the dispatcher, like SeedSubtaskIndicatorFromLedger: a few small files, and no
+    // late result that could land on a tab whose task identity has changed in the meantime.
+    private void RefreshOpenGateItems()
+    {
+        var report = ReadOpenGateItems();
+
+        OpenGateItemCount = report.Count;
+        HasOpenGateReadErrors = report.HasReadErrors;
+        OpenGateItemsText = OpenGateItems.Format(TaskName, report);
+    }
+
+    private OpenGateReport ReadOpenGateItems()
+    {
+        if (string.IsNullOrWhiteSpace(WorkingDirectory) || !_folders.Validate(TaskName, WorkingDirectory).IsValid)
+        {
+            return OpenGateReport.Empty;
+        }
+
+        var paths = new TaskPaths(WorkingDirectory, TaskName);
+        var tracking = TryTrackingPaths(paths.TaskName);
+
+        return OpenGateItems.Combine(
+            OpenGateItems.FromDoneFile(paths.DoneAbsolute),
+            tracking is null ? OpenGateReport.Empty : OpenGateItems.FromSubtasks(tracking));
+    }
+
+    /// <summary>
+    /// Re-reads the open gate items when their overview opens, so files changed while the tab was
+    /// open are shown as they are now and a read error gets its retry.
+    /// </summary>
+    [RelayCommand]
+    private void RefreshOpenGateItemsOnOpen() => RefreshOpenGateItems();
+
+    // The run's subtask sink: the indicator first, then the items a just-completed subtask left open.
+    private void ApplySubtaskProgress(SubtaskProgress progress)
+    {
+        SubtaskIndicator.Apply(progress);
+        RefreshOpenGateItems();
     }
 
     // SPEC section 6.6. Two outcomes only: a resumable journal paints the indicators and sets
@@ -516,7 +809,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         {
             // No journal, or a finished task: this tab is a fresh start and must look like one.
             // Leaving the indicators alone would keep painting the PREVIOUSLY typed task's green
-            // phases onto this one, or show four green phases above a 'Start workflow' button.
+            // phases onto this one, or show every phase green above a 'Start workflow' button.
             ResetPhaseIndicators();
             ResumePhase = null;
             return;
@@ -582,10 +875,17 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             // (requirement 4.5), and LoadForResume restores this very property.
             SubtaskIndicator.Reset();
         }
+
+        // The subtask half of the open gate items exists only in subtask mode.
+        RefreshOpenGateItems();
     }
 
     partial void OnWorkflowDirectoryChanged(string? value)
     {
+        // The tracking directory is where the subtask half of the open gate items lives. Not
+        // IsNameLocked-guarded: a finished tab may still be pointed at its tracking directory.
+        RefreshOpenGateItems();
+
         if (string.IsNullOrWhiteSpace(value))
         {
             // Blank is a real stored value (a journal keeps the user's choice verbatim), not a
@@ -722,7 +1022,15 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         SyncFolder();
     }
 
+    // Every task-identity change ends here (name, working directory, Start), so the open gate items
+    // are re-read for the task the tab now names - or cleared when it names none.
     private void SyncFolder()
+    {
+        SyncFolderCore();
+        RefreshOpenGateItems();
+    }
+
+    private void SyncFolderCore()
     {
         // A startup prompt-template problem (F17, spec section 9.4) takes precedence over folder
         // validation: Start workflow is dead regardless of the name/directory, and the message
@@ -813,10 +1121,16 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     private bool CanStartWorkflow() =>
         !IsRunning
         && !IsTaskFinished
+        // Workflow_LoadFix spec 8.3 (D13): shut while 'Implementierung beginnen' replaces the run.
+        && !_isSwitchingToImplementation
+        && StartGatesOpen();
+
+    // What both start actions require besides "no run is going" (Workflow_LoadFix spec 8.2).
+    private bool StartGatesOpen() =>
         // F17 / spec section 9.4: a prompt-template problem disables Start on EVERY tab,
         // including tabs opened with '+' after the startup dialog was dismissed. Holding the
         // flag only on MainWindowViewModel leaves the button executable once the modal is gone.
-        && _startupErrors.Count == 0
+        _startupErrors.Count == 0
         && ValidationMessage is null
         // Requirement 1.3: subtask mode with an unusable tracking directory disables starting a
         // workflow. The property is null whenever subtask mode is off, so a normal run is
@@ -841,6 +1155,52 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             return;
         }
 
+        // A task completed by hand with subtasks still open is continued, not restarted: the same
+        // switch 'Implementierung beginnen' makes, which clears the flag and calls back in here with
+        // ResumePhase set. Re-checked against the journal, because the cached field is only a hint.
+        if (ResumePhase is null && _reopensImplementation)
+        {
+            if (!IsCompletedManuallyWithOpenSubtasks())
+            {
+                // The disk changed since loading (subtasks finished, flag cleared). The click asked
+                // for a continuation, so it must not become a restart: start nothing and let the
+                // button and the info line say what Start does now.
+                SetReopensImplementation(false);
+                InfoMessage = IsEveryPhaseCompleted(new TaskPaths(WorkingDirectory, TaskName)) ? FinishedTaskMessage : null;
+                return;
+            }
+
+            if (StartImplementationCommand.CanExecute(null))
+            {
+                StartImplementationCommand.Execute(null);
+            }
+
+            return;
+        }
+
+        // A finished task - nothing to resume, every phase done - would be run again from Specification,
+        // and the orchestrator's first act is to clear the whole journal. Asked here, after the
+        // start gate and before anything is written, so 'Nein' leaves the task exactly as it was.
+        if (ResumePhase is null
+            && IsEveryPhaseCompleted(new TaskPaths(WorkingDirectory, TaskName))
+            && !Confirm(RestartQuestion))
+        {
+            return;
+        }
+
+        var paths = new TaskPaths(WorkingDirectory, TaskName);
+
+        // Persist the description BEFORE the run: a crash one second from now must still recover
+        // a tab with its Taskbeschreibung intact. Also before IsRunning, so a failed save refuses the
+        // start instead of leaving a "running" tab with no run (WF_QUEUE spec Q14).
+        if (!TrySaveDescription(paths))
+        {
+            return;
+        }
+
+        // Any start uses up the tab's own queue (WF_QUEUE spec Q6); a refused start returned above and keeps it.
+        QueuedAfter = null;
+
         IsNameLocked = true;
         IsRunning = true;
 
@@ -849,30 +1209,24 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
         // The orchestrator's first act is to clear the journal from the start phase on
         // (ClearPhasesFrom); the indicators follow suit here, after the start gate, so a refused
         // start destroys nothing. Without it a restarted finished task - which 'Task laden' can
-        // open - would show phases 2-4 green while phase 1 runs.
+        // open - would show the phases after Specification green while Specification runs.
         ResetPhaseIndicators(startPhase);
 
-        // Requirement 3.4: the subtask indicator is grey before phase 4, and it cannot be grey
-        // "with counts" - a row reading '3 von 6' while phase 1 runs describes work this run has
-        // not looked at. Anything the row was showing therefore goes now, AFTER the start gate, so
+        // Requirement 3.4: the subtask indicator is grey before Implementation, and it cannot be
+        // grey "with counts" - a row reading '3 von 6' while Specification runs describes work this
+        // run has not looked at. Anything the row was showing therefore goes now, AFTER the start gate, so
         // a refused start never destroys what the user is reading while they fix it.
         //
-        // The one exception is a run that starts AT phase 4. Its counts are not a previous run's
+        // The one exception is a run that starts AT Implementation. Its counts are not a previous run's
         // leftovers: LoadForResume read them off the tracking files moments ago (requirement 4.5)
-        // and they are exactly the state this run continues from, so the grey-before-phase-4 rule
+        // and they are exactly the state this run continues from, so the grey-before-Implementation rule
         // has nothing left to say about them. Resetting there would make the tab claim '0 von 0'
         // work done - and keep claiming it if the run failed before publishing anything, which the
-        // phase-4 configuration check can do (requirement 1.8).
+        // Implementation-entry configuration check can do (requirement 1.8).
         if (startPhase != WorkflowPhase.Implementation)
         {
             SubtaskIndicator.Reset();
         }
-
-        var paths = new TaskPaths(WorkingDirectory, TaskName);
-
-        // Persist the description BEFORE the run: a crash one second from now must still recover
-        // a tab with its Taskbeschreibung intact.
-        _stateStore.SaveDescription(paths, TaskDescription);
 
         _run = new CancellationTokenSource();
 
@@ -886,16 +1240,17 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             // Requirement 4.2: without this a continued subtask task takes the normal
             // implementation branch and the skip-completed loop is never reached.
             //
-            // Deferred, not Capture: requirement 1.6 puts the snapshot at phase-4 entry, and this
-            // is run entry. The two coincide only for a resumed task; for a run started at phase 1
-            // the user may still tick the checkbox or pick a directory while phases 1-3 run, and
+            // Deferred, not Capture: requirement 1.6 puts the snapshot at Implementation entry, and this
+            // is run entry. The two coincide only for a resumed task; for a run started at Specification
+            // the user may still tick the checkbox or pick a directory while the phases before
+            // Implementation run, and
             // capturing here would silently drop that edit. What travels is therefore a once-only
-            // capture the orchestrator forces when it enters phase 4 - still a snapshot from that
+            // capture the orchestrator forces when it enters Implementation - still a snapshot from that
             // moment on, still nothing the orchestrator can re-read.
             //
             // Deferred, not a validating variant, for the same two reasons as before: the start
             // gate checks the directory before the run begins, the orchestrator re-validates the
-            // captured record at phase-4 entry (requirement 1.8), and a throw from this
+            // captured record at Implementation entry (requirement 1.8), and a throw from this
             // synchronous [RelayCommand] would escape ICommand.Execute after IsRunning was already
             // set. Deferring the capture strengthens that last point rather than weakening it -
             // the factory now runs inside RunAsync, where the catch list is.
@@ -911,7 +1266,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             // FIFO queue. Built on a pool thread instead it would have no context, fall back to
             // unordered ThreadPool.QueueUserWorkItem, and let requirement 3.7's ordered states
             // latch a stale payload - besides touching observable properties off the UI thread.
-            new Progress<SubtaskProgress>(SubtaskIndicator.Apply),
+            new Progress<SubtaskProgress>(ApplySubtaskProgress),
             // Created on the UI thread for the same reason as the two sinks above: Progress<T>
             // captures the creating thread's SynchronizationContext, and only the dispatcher's
             // gives ordered delivery onto observable properties. Without this argument the
@@ -920,7 +1275,9 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             new Progress<string?>(ApplyLauncherStatus),
             // Spec 6.3: the run waits at a phase boundary while this tab is paused. The tab's own
             // gate rather than a fresh one, so a pause armed before Start still counts.
-            _pauseGate);
+            _pauseGate,
+            // WF_DESKTOPJOBBUTTON spec 4.6: the tab's own signal, so the button reaches this run's wait.
+            _desktopJobStart);
 
         // Kept, not discarded: CompleteTaskAsync awaits this handle so the tab closes only after the
         // run has ended (requirement 5.3). Still not awaited HERE - StartWorkflow must return to the
@@ -1002,6 +1359,34 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
             // user a stopped terminal is still waiting for a launcher.
             LauncherStatusMessage = null;
         }
+
+        // WF_QUEUE spec Q7 (a): after the finally, so the tab is settled (IsRunning false) when the handlers
+        // run and a queued tab's start problem is never caught by this run's catch list above.
+        if (IsTaskFinished)
+        {
+            Finished?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    // False when the journal write failed; the message says why. Only these two exception types are
+    // known to come out of the synchronous part of StartWorkflow, and no catch-all is added (WF_QUEUE spec Q14).
+    private bool TrySaveDescription(TaskPaths paths)
+    {
+        try
+        {
+            _stateStore.SaveDescription(paths, TaskDescription);
+            return true;
+        }
+        catch (IOException ex)
+        {
+            ValidationMessage = $"Die Taskbeschreibung konnte nicht gespeichert werden: {ex.Message}";
+            return false;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            ValidationMessage = $"Kein Zugriff auf das Arbeitsverzeichnis: {ex.Message}";
+            return false;
+        }
     }
 
     // The journal rather than the indicators: the orchestrator wrote it before returning, whereas
@@ -1009,6 +1394,9 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     // subtask run that stopped short leaves Implementation Active, so it never counts as finished.
     private bool IsEveryPhaseCompleted(TaskPaths paths) =>
         _stateStore.TryLoad(paths) is { } state && PhaseReconciliation.FirstIncomplete(state) is null;
+
+    // Without a dialog service nothing is asked and the action proceeds, as before the questions.
+    private bool Confirm(string question) => _messages?.Confirm(question) ?? true;
 
     [RelayCommand]
     private void BrowseDirectory()
@@ -1022,7 +1410,7 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     /// <remarks>
     /// The caption is task 6.2's reason for the <c>title</c> parameter. The command's own
-    /// <c>CanExecute</c> carries the phase-4 lock as well as the view's <c>IsEnabled</c> binding:
+    /// <c>CanExecute</c> carries the Implementation lock as well as the view's <c>IsEnabled</c> binding:
     /// <see cref="System.Windows.Controls.Primitives.ButtonBase"/> ands the two together, so the
     /// button is dead if either says so and the lock does not depend on one binding alone
     /// (requirement 1.6).
@@ -1054,8 +1442,9 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     /// <remarks>
     /// Deliberately independent of <see cref="IsRunning"/> and of the active phase, and it never
-    /// touches <c>_manualSignal</c>: pausing only withholds the NEXT phase, so it is as safe to press
-    /// before a run as during one (Workflow_LOAD_AND_PAUSE spec section 6.6).
+    /// touches <c>_manualSignal</c>: pausing only withholds the NEXT phase, or in Implementation the
+    /// next subtask, so it is as safe to press before a run as during one (Workflow_LOAD_AND_PAUSE spec
+    /// section 6.6).
     /// </remarks>
     [RelayCommand(CanExecute = nameof(CanPause))]
     private void Pause() => IsPaused = true;
@@ -1064,6 +1453,15 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
     [RelayCommand(CanExecute = nameof(CanUnpause))]
     private void Unpause() => IsPaused = false;
+
+    private bool CanStartDesktopJobNow() => IsDesktopJobWaiting && !IsPaused;
+
+    /// <remarks>
+    /// A press outside a wait is dropped by the signal itself (WF_DESKTOPJOBBUTTON spec A1), so a
+    /// stale click can never arm a later wait.
+    /// </remarks>
+    [RelayCommand(CanExecute = nameof(CanStartDesktopJobNow))]
+    private void StartDesktopJobNow() => _desktopJobStart.Request();
 
     private bool CanCompleteTask() => IsRunning && _activePhase == WorkflowPhase.Implementation;
 
@@ -1128,6 +1526,18 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
     [RelayCommand(CanExecute = nameof(CanCompleteTask))]
     private async Task CompleteTaskAsync()
     {
+        // Completing with open subtasks is final - recovery never offers the task again - while
+        // stopping is what Pause and closing the tab are for. 'Nein' signals, writes and closes
+        // nothing. No readable index, or every entry complete: nothing to warn about.
+        if (TryReadLedger(TaskName) is { } ledger
+            && ledger.Completed < ledger.Total
+            && !Confirm(
+                $"Task als abgeschlossen markieren? {ledger.Total - ledger.Completed} von {ledger.Total} Subtasks sind nicht complete. "
+                + "Zum Anhalten Pause verwenden oder den Tab schließen."))
+        {
+            return;
+        }
+
         _manualSignal.Signal();
 
         var running = _runTask;
@@ -1157,7 +1567,190 @@ public sealed partial class TaskTabViewModel : ObservableObject, ISubtaskConfigu
 
         // The same event the close button raises, so MainWindowViewModel's existing handling -
         // which dismisses a recovered task - applies unchanged (design "Presentation and Recovery").
-        Close();
+        //
+        // Finished first (WF_QUEUE spec Q7 b, Q12): the tabs queued after this one start before the tab goes.
+        // The journal writes above are durable, so a successor's failure must never keep this tab open - the
+        // exception still surfaces through the command. A second raise is harmless (spec Q7).
+        try
+        {
+            Finished?.Invoke(this, EventArgs.Empty);
+        }
+        finally
+        {
+            Close();
+        }
+    }
+
+    private bool CanStartImplementation() =>
+        !IsTaskFinished
+        && StartGatesOpen()
+        // The implementation reads the spec and the plan: Specification must be done...
+        && StatusOf(WorkflowPhase.Specification) == PhaseStatus.Completed
+        // ...and Implementation neither done nor running - a running one is Task abschliessen's turn.
+        // Done is the one exception: a 'Task abschliessen' with subtasks still open is reopened.
+        && (StatusOf(WorkflowPhase.Implementation) != PhaseStatus.Completed || IsCompletedManuallyWithOpenSubtasks())
+        && _activePhase != WorkflowPhase.Implementation;
+
+    private PhaseStatus StatusOf(WorkflowPhase phase) => Phases.First(p => p.Phase == phase).Status;
+
+    private void SetReopensImplementation(bool value)
+    {
+        if (_reopensImplementation != value)
+        {
+            _reopensImplementation = value;
+            OnPropertyChanged(nameof(StartButtonLabel));
+        }
+    }
+
+    // The journal says Implementation was completed by hand, and the index it names - composed exactly as
+    // reconciliation composes it - is readable and still has entries that are not complete. An
+    // unreadable index says nothing is left (requirement 4.6), and an Implementation that completed on
+    // its own is never reopened.
+    private bool IsCompletedManuallyWithOpenSubtasks()
+    {
+        if (string.IsNullOrWhiteSpace(WorkingDirectory) || string.IsNullOrWhiteSpace(TaskName))
+        {
+            return false;
+        }
+
+        var paths = new TaskPaths(WorkingDirectory, TaskName);
+
+        return _stateStore.TryLoad(paths) is { ImplementationCompletedManually: true, SubtasksEnabled: true } state
+            && PhaseReconciliation.TryTrackingPaths(paths, state) is { } tracking
+            && SubtaskLedger.TryRead(tracking) is { } snapshot
+            && snapshot.Completed < snapshot.Total;
+    }
+
+    /// <summary>
+    /// <c>Implementierung beginnen</c> (Workflow_LoadFix spec section 8): ends a running run by
+    /// cancelling it, re-reconciles the journal with the disk, records Vereinfachen, Review and
+    /// Review umsetzen as skipped where they are not completed in one verified write, and starts a run
+    /// at Implementation - in subtask mode when the checkbox says so.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Cancellation, not <see cref="ManualPhaseSignal"/>: the signal would record the running review
+    /// as Completed - a review that never happened - the run would go on into Review umsetzen, and
+    /// <c>Task abschliessen</c> must stay the signal's only caller (subtask requirement 5.2).
+    /// Cancelling is the path closing the tab already takes: the orchestrator disposes the session in
+    /// its finally, and <c>RunAsync</c> swallows the <see cref="OperationCanceledException"/>.
+    /// </para>
+    /// <para>
+    /// The journal is written only after the cancelled run has ended, for the reason
+    /// <see cref="CompleteTaskAsync"/> gives: until then the orchestrator still writes whole-record
+    /// read-modify-writes, and a late <c>RecordPhase(ResolveReview, Active)</c> would overwrite the
+    /// skip.
+    /// </para>
+    /// <para>
+    /// Nothing is started when the tab was closed while the run wound down, when the journal cannot
+    /// be read, when Specification is no longer backed by a spec and a plan on disk, or when the skip did
+    /// not land; in the last three cases the info line says why.
+    /// </para>
+    /// </remarks>
+    /// <returns>A task that completes once Implementation was started or the switch was refused.</returns>
+    [RelayCommand(CanExecute = nameof(CanStartImplementation))]
+    private async Task StartImplementationAsync()
+    {
+        _isSwitchingToImplementation = true;
+        StartWorkflowCommand.NotifyCanExecuteChanged();
+
+        try
+        {
+            var running = _runTask;
+            if (IsRunning && running is not null)
+            {
+                // Cancel, not CancelAsync: the same synchronous cancel Dispose issues, so the run's
+                // callbacks unwind on the dispatcher exactly as when the tab is closed (spec 8.3 step 2).
+#pragma warning disable CA1849
+                _run?.Cancel();
+#pragma warning restore CA1849
+                await running;
+            }
+
+            // Closing the tab while the run wound down disposed the terminal: nothing may start now.
+            if (_disposed != 0 || string.IsNullOrWhiteSpace(WorkingDirectory) || string.IsNullOrWhiteSpace(TaskName))
+            {
+                return;
+            }
+
+            var paths = new TaskPaths(WorkingDirectory, TaskName);
+
+            // Reopening a task completed by hand with subtasks still open: the flag goes FIRST, so
+            // the reconciliation inside the skip step demotes Implementation off the unfinished
+            // ledger (PhaseReconciliation.Demote) and the journal resumes at Implementation - the
+            // phases before it keep their entries, and the orchestrator clears only from
+            // Implementation on.
+            if (IsCompletedManuallyWithOpenSubtasks())
+            {
+                _stateStore.SetImplementationCompletedManually(paths, completedManually: false);
+            }
+
+            SetReopensImplementation(false);
+
+            if (!TryRecordReviewSkips(paths))
+            {
+                // Nothing is skipped beyond what landed and no Implementation request is ever built; the
+                // indicators show the journal, so the tab and the disk agree.
+                return;
+            }
+
+            ResumePhase = WorkflowPhase.Implementation;
+        }
+        finally
+        {
+            _isSwitchingToImplementation = false;
+            StartWorkflowCommand.NotifyCanExecuteChanged();
+        }
+
+        // The same start every other run takes: the folder re-check, the tracking-directory
+        // re-validation, the description save and the deferred subtask capture (spec 8.3 step 8).
+        // A non-recovered tab re-derives the same Implementation start from the journal, which
+        // holds the skips.
+        StartWorkflow();
+    }
+
+    // Spec 8.3 steps 4 and 5. False means nothing may start, and InfoMessage says why.
+    private bool TryRecordReviewSkips(TaskPaths paths)
+    {
+        // Step 4 (D14, D18): the indicators are what LoadForResume left behind, and the disk may have
+        // changed since - spec or plan deleted or emptied. A recovered tab never re-reconciles on its
+        // own (RefreshResumeStateFromJournal returns at once for IsRecovered), so this does it for
+        // both tab kinds, with the same helper and the same persistence.
+        var journal = _stateStore.TryLoad(paths);
+        if (journal is null)
+        {
+            InfoMessage = SkipNotRecordedMessage;
+            return false;
+        }
+
+        if (PhaseReconciliation.Reconcile(paths, journal))
+        {
+            _stateStore.ReplacePhases(paths, [.. journal.Phases]);
+        }
+
+        ApplyJournal(journal);
+        var next = PhaseReconciliation.FirstIncomplete(journal);
+        ResumePhase = next;
+
+        if (StatusOf(WorkflowPhase.Specification) != PhaseStatus.Completed)
+        {
+            // Continue workflow now resumes at that phase; nothing was skipped.
+            var resume = PhaseCatalog.For(next ?? WorkflowPhase.Specification).DisplayName;
+            InfoMessage = $"Implementierung nicht gestartet: Spezifikation oder Plan fehlt oder ist leer. Nächste Phase: {resume}.";
+            return false;
+        }
+
+        // Step 5 (D19): one write, verified by reading it back. A review that did complete keeps its
+        // green - it happened - and the indicators show what the journal holds after the write.
+        var skipped = _stateStore.TrySkipPhases(paths, SkippablePhases);
+        if (skipped is null)
+        {
+            InfoMessage = SkipNotRecordedMessage;
+            return false;
+        }
+
+        ApplyJournal(skipped);
+        return true;
     }
 
     [RelayCommand]

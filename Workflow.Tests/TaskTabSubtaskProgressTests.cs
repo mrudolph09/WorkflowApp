@@ -153,10 +153,12 @@ public sealed class TaskTabSubtaskProgressTests : IDisposable
     {
         File.WriteAllText(paths.SpecAbsolute, "Spezifikation");
         File.WriteAllText(paths.PlanAbsolute, "Plan");
+        File.WriteAllText(paths.SimplifiedAbsolute, "Vereinfacht");
         File.WriteAllText(paths.ReviewAbsolute, "Review");
 
         var state = new TaskState { TaskDescription = "die Beschreibung" };
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Specification, PhaseStatus.Completed, DateTimeOffset.UtcNow));
+        state.Phases.Add(new TaskPhaseState(WorkflowPhase.Simplifier, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Review, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.ResolveReview, PhaseStatus.Completed, DateTimeOffset.UtcNow));
         state.Phases.Add(new TaskPhaseState(WorkflowPhase.Implementation, PhaseStatus.Pending, null));
